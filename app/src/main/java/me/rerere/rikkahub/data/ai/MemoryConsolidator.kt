@@ -77,7 +77,7 @@ class MemoryConsolidator(
         }
 
     override suspend fun memoryIdsWithUpdates(): List<String> = withContext(Dispatchers.IO) {
-        val assistants = settingsStore.awaitLoaded().assistants.filter { it.enableMemory }
+        val assistants = settingsStore.awaitLoaded().assistants.filter { it.enableMemory && it.enableAutoMemoryConsolidation }
         if (assistants.isEmpty()) return@withContext emptyList()
         val updated = consolidationDao.getAssistantIdsWithUpdatedConversations(
             assistantIds = assistants.map { it.id.toString() },
@@ -250,9 +250,9 @@ private fun List<Batch>.withinTranscriptBudget(): List<Batch> {
     }
 }
 
-/** 助手开了记忆时它读写的记忆库 */
+/** 助手开了记忆且启用了后台自动整理时它读写的记忆库 */
 private fun Settings.memoryIdOf(conversation: Conversation): String? =
-    getAssistantById(conversation.assistantId)?.takeIf { it.enableMemory }?.memoryId
+    getAssistantById(conversation.assistantId)?.takeIf { it.enableMemory && it.enableAutoMemoryConsolidation }?.memoryId
 
 // 整理要调用工具；快速模型不支持时退回对话模型
 private fun Settings.consolidationModel(conversation: Conversation?, assistant: Assistant): Model? {

@@ -92,6 +92,22 @@ class ProotShellRunner(
             }
         }
 
+        // 绑定 POSIX 共享内存 /dev/shm，解决 Python multiprocessing / PostgreSQL / Chromium 报错
+        val shmDir = File(context.tempDir, "shm").apply { mkdirs() }
+        command += "-b"
+        command += "${shmDir.absolutePath}:/dev/shm"
+
+        // 当 Android 宿主机锁死 /proc/stat、/proc/loadavg、/proc/uptime、/proc/vmstat 时挂载可读兜底节点
+        val fakeProcDir = File(context.linuxDir, RootfsPatcher.FAKE_PROC_REL_DIR)
+        RootfsPatcher.FAKE_PROC_FILES.forEach { name ->
+            val hostProc = File("/proc/$name")
+            val fakeProc = File(fakeProcDir, name)
+            if (!hostProc.canRead() && fakeProc.isFile) {
+                command += "-b"
+                command += "${fakeProc.absolutePath}:/proc/$name"
+            }
+        }
+
         command += listOf(
             "/usr/bin/env",
             "-i",
@@ -100,6 +116,10 @@ class ProotShellRunner(
             "TERM=xterm-256color",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
+            "JAVA_TOOL_OPTIONS=-XX:-UseCompressedOops -XX:-UseCompressedClassPointers",
+            "NODE_OPTIONS=--require /etc/rikkahub-node-preload.js",
+            "ELECTRON_DISABLE_SANDBOX=1",
+            "MOZ_FAKE_NO_SANDBOX=1",
             // 非交互执行约定, 抑制各类 CLI 的交互行为 (确认提示/分页器/颜色转义)
             "CI=true",
             "NO_COLOR=1",

@@ -165,13 +165,25 @@ internal fun buildMemoryConsolidationPrompt(fullReview: Boolean): String = build
 }
 
 /** 主对话 system prompt 里的记忆片段：全文注入 profile 和 preferences，其余文件只给清单 */
-internal fun buildMemoryPrompt(files: List<MemoryFile>): String = buildString {
+internal fun buildMemoryPrompt(
+    files: List<MemoryFile>,
+    autoConsolidate: Boolean = false,
+): String = buildString {
     appendLine("<memory_system>")
     appendLine(MEMORY_SYSTEM_INTRO)
     appendLine()
     appendMemoryState(files)
     appendLine()
-    appendLine(MEMORY_SYSTEM_RULES)
+    if (autoConsolidate) {
+        appendLine(MEMORY_SYSTEM_RULES)
+    } else {
+        appendLine(
+            MEMORY_SYSTEM_RULES.replace(
+                "- By default, do not write during the conversation. A background process organizes memory automatically once the conversation pauses.\n    - Exception: when the user explicitly asks you to remember / save / update / forget something, do it with the tools in this turn.",
+                "- When the user shares stable personal facts, preferences, or ongoing project details worth keeping long term, or explicitly asks you to remember / save / update / forget something, record or update it with the memory tools in this turn."
+            )
+        )
+    }
     appendLine("</memory_system>")
     appendLine()
     appendLine(MEMORY_FORMAT_PROMPT)

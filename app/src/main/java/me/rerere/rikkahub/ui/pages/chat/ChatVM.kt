@@ -36,6 +36,7 @@ import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.NodeFavoriteTarget
+import me.rerere.rikkahub.data.model.allChildConversationIds
 import me.rerere.rikkahub.data.model.getAssistantOf
 import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.repository.ConversationRepository
@@ -276,6 +277,73 @@ class ChatVM(
         chatService.regenerateAtMessage(_conversationId, message, regenerateAssistantMsg)
     }
 
+    fun regenerateAtPart(
+        message: UIMessage,
+        partIndex: Int,
+        rerunTool: Boolean = false,
+    ) {
+        chatService.regenerateAtPart(_conversationId, message, partIndex, rerunTool)
+    }
+
+    fun editToolCallPart(
+        messageId: Uuid,
+        toolCallId: String,
+        newInput: String,
+        newOutputText: String?,
+        actionAfterEdit: me.rerere.rikkahub.service.ToolEditAction,
+    ) {
+        chatService.editToolCallPart(
+            conversationId = _conversationId,
+            messageId = messageId,
+            toolCallId = toolCallId,
+            newInput = newInput,
+            newOutputText = newOutputText,
+            actionAfterEdit = actionAfterEdit,
+        )
+    }
+
+    fun getSubConversationFlow(childId: Uuid) = chatService.getConversationFlow(childId)
+
+    fun getSubConversationProcessingStatusFlow(childId: Uuid) = chatService.getProcessingStatusFlow(childId)
+
+    fun sendToSubAgent(
+        targetConversationId: Uuid?,
+        title: String? = null,
+        message: String,
+        interrupt: Boolean = false,
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                chatService.sendToSubConversation(
+                    parentConversationId = _conversationId,
+                    targetConversationId = targetConversationId,
+                    title = title,
+                    message = message,
+                    wait = false,
+                    interrupt = interrupt,
+                )
+            }.onFailure {
+                chatService.addError(it, _conversationId, title = "发送子代理指令失败")
+            }
+        }
+    }
+
+    fun stopSubAgent(targetConversationId: Uuid) {
+        viewModelScope.launch {
+            chatService.stopGeneration(targetConversationId)
+        }
+    }
+
+    fun deleteSubAgent(targetConversationId: Uuid) {
+        viewModelScope.launch {
+            val parentId = conversation.value.config?.parentConversationId ?: _conversationId
+            chatService.deleteSubConversation(
+                parentConversationId = parentId,
+                targetConversationId = targetConversationId,
+            )
+        }
+    }
+
     fun handleToolApproval(
         toolCallId: String,
         approved: Boolean,
@@ -314,7 +382,16 @@ class ChatVM(
 
     fun deleteConversation(conversation: Conversation): Job =
         viewModelScope.launch {
-            conversationRepo.deleteConversation(conversation)
+            val parentId = conversation.config?.parentConversationId
+                ?: if (conversation.id in this@ChatVM.conversation.value.allChildConversationIds) _conversationId else null
+            if (parentId != null) {
+                chatService.deleteSubConversation(
+                    parentConversationId = parentId,
+                    targetConversationId = conversation.id,
+                )
+            } else {
+                conversationRepo.deleteConversation(conversation)
+            }
         }
 
     fun updatePinnedStatus(conversation: Conversation) {

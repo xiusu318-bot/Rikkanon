@@ -11,3 +11,10 @@ local.properties
 .cursor
 .history
 .kotlin
+*.apk
+*.idsig
+*.patch
+*.jks
+*.keystore
+workspace/src/main/jniLibs/*/libtermux.so
+workspace/src/main/jniLibs/*/libworkspace.so

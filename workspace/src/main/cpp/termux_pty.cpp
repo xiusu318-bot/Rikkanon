@@ -154,3 +154,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_termux_terminal_JNI_close(JNIEnv *, jclass, jint fd) {
     close(fd);
 }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_termux_terminal_JNI_getForegroundProcessGroup(JNIEnv *, jclass, jint fd) {
+    return static_cast<jint>(tcgetpgrp(fd));
+}

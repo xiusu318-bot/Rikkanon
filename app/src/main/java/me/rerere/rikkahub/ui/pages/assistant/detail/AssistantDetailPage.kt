@@ -73,6 +73,7 @@ fun AssistantDetailPage(id: String) {
         }
     )
     val assistant by vm.assistant.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val tags by vm.tags.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
@@ -169,6 +170,25 @@ fun AssistantDetailPage(id: String) {
                         supportingContent = { Text(stringResource(R.string.assistant_detail_local_tools_desc)) },
                         headlineContent = { Text(stringResource(R.string.assistant_page_tab_local_tools)) },
                     )
+                    val boundSubAssistants = assistant.effectiveSubAgentIds.let { ids ->
+                        settings.assistants.filter { it.id in ids }
+                    }
+                    item(
+                        onClick = { navController.navigate(Screen.AssistantSubAgent(id)) },
+                        leadingContent = { CardGroupIcon(HugeIcons.Message02, containerColor = containerColor, contentColor = contentColor) },
+                        supportingContent = {
+                            val defaultName = stringResource(R.string.assistant_page_default_assistant)
+                            val subAgentDesc = when {
+                                !assistant.isSubAgentEnabled -> "未启用 · 可绑定一个或多个助手协同处理任务"
+                                else -> {
+                                    val names = boundSubAssistants.joinToString(", ") { it.name.ifBlank { defaultName } }
+                                    "已绑定 ${boundSubAssistants.size} 个: $names"
+                                }
+                            }
+                            Text(subAgentDesc)
+                        },
+                        headlineContent = { Text("子代理设置") },
+                    )
                 }
             }
 
@@ -256,7 +276,7 @@ private fun HeaderChip(text: String) {
             text = text,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             style = MaterialTheme.typography.labelLarge,
-            maxLines = 1,
+            maxLines = 5,
             overflow = TextOverflow.Ellipsis,
         )
     }

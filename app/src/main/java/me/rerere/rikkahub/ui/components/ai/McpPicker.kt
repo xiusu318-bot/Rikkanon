@@ -19,12 +19,15 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ListItemColors
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.ListItemShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SegmentedListItem
+import me.rerere.rikkahub.ui.theme.CustomColors
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.SheetValue
@@ -268,26 +271,35 @@ fun McpPicker(
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = contentPadding,
-        verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        itemsIndexed(enabledServers, key = { _, server -> server.id }) { index, server ->
+        itemsIndexed(enabledServers, key = { _, server -> server.id }) { _, server ->
             val status by mcpManager.getStatus(server).collectAsStateWithLifecycle(McpStatus.Idle)
             val checked = server.id in assistant.mcpServers
-            SegmentedListItem(
-                checked = checked,
-                onCheckedChange = {
-                    val newServers = assistant.mcpServers.toMutableSet()
-                    if (it) newServers.add(server.id) else newServers.remove(server.id)
-                    newServers.removeIf { servers.none { s -> s.id == server.id } } // remove invalid servers
-                    onUpdateAssistant(
-                        assistant.copy(
-                            mcpServers = newServers.toSet()
-                        )
+            val toggle = { newVal: Boolean ->
+                val newServers = assistant.mcpServers.toMutableSet()
+                if (newVal) newServers.add(server.id) else newServers.remove(server.id)
+                newServers.removeIf { servers.none { s -> s.id == server.id } }
+                onUpdateAssistant(
+                    assistant.copy(
+                        mcpServers = newServers.toSet()
                     )
-                },
-                shapes = ListItemDefaults.segmentedShapes(index = index, count = enabledServers.size),
-                colors = colors,
-                leadingContent = {
+                )
+            }
+            Card(
+                onClick = { toggle(!checked) },
+                colors = CardDefaults.cardColors(
+                    containerColor = CustomColors.listItemColors.containerColor
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     when (status) {
                         McpStatus.Idle -> Icon(HugeIcons.Icon1stBracket, null)
                         McpStatus.Connected -> Icon(HugeIcons.McpServer, null)
@@ -302,11 +314,14 @@ fun McpPicker(
                             tint = MaterialTheme.colorScheme.error,
                         )
                     }
-                },
-                supportingContent = {
                     Column(
+                        modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        Text(
+                            text = server.commonOptions.name,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
                         Text(
                             text = when (val s = status) {
                                 is McpStatus.Idle -> "Idle"
@@ -317,6 +332,8 @@ fun McpPicker(
                                 is McpStatus.NeedsAuthorization -> "Needs authorization"
                                 is McpStatus.Authorizing -> "Authorizing"
                             },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 5,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -330,13 +347,8 @@ fun McpPicker(
                             }
                         }
                     }
-                },
-                trailingContent = {
-                    // 整行都能点击切换，开关只用来显示状态
-                    Switch(checked = checked, onCheckedChange = null)
-                },
-            ) {
-                Text(server.commonOptions.name)
+                    Switch(checked = checked, onCheckedChange = { toggle(it) })
+                }
             }
         }
     }

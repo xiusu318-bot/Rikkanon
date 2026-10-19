@@ -180,3 +180,35 @@ internal fun List<UIMessagePart>.localFileUrls(): Set<String> = buildSet {
         if (url?.startsWith("file://") == true) add(url)
     }
 }
+
+private val SUB_CONVERSATION_TOOL_NAMES = setOf("conversation_send", "conversation_read", "conversation_stop")
+private val CONVERSATION_ID_JSON_REGEX = Regex(""""conversation_id"\s*:\s*"([0-9a-fA-F-]{36})"""")
+
+/**
+ * 提取当前主对话所关联/操控的所有子对话 ID：
+ * 既包含持久化在 [ConversationConfig.childConversationIds] 中的 ID（Fork 对话时自动继承），
+ * 也自动扫描当前消息树中 `conversation_send` / `conversation_read` 工具调用记录的 ID。
+ */
+val Conversation.allChildConversationIds: Set<Uuid>
+    get() = buildSet {
+        config?.childConversationIds?.let(::addAll)
+        messageNodes.forEach { node ->
+            node.messages.forEach { message ->
+                message.getTools().forEach { tool ->
+                    if (tool.toolName in SUB_CONVERSATION_TOOL_NAMES) {
+                        CONVERSATION_ID_JSON_REGEX.findAll(tool.input).forEach { match ->
+                            runCatching { Uuid.parse(match.groupValues[1]) }.getOrNull()?.let(::add)
+                        }
+                        tool.output.filterIsInstance<UIMessagePart.Text>().forEach { textPart ->
+                            CONVERSATION_ID_JSON_REGEX.findAll(textPart.text).forEach { match ->
+                                runCatching { Uuid.parse(match.groupValues[1]) }.getOrNull()?.let(::add)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        remove(id)
+        config?.deletedChildConversationIds?.let(::removeAll)
+    }
+

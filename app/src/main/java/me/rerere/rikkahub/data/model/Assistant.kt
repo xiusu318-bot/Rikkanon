@@ -27,7 +27,8 @@ data class Assistant(
     val contextMessageLimit: Int = 0,
     val streamOutput: Boolean = true,
     val enableMemory: Boolean = false,
-    val useGlobalMemory: Boolean = false, // 使用全局共享记忆而非助手隔离记忆
+    val useGlobalMemory: Boolean = false,
+    val enableAutoMemoryConsolidation: Boolean = false,
     val enableRecentChatsReference: Boolean = false,
     val messageTemplate: String = "{{ message }}",
     val presetMessages: List<UIMessage> = emptyList(),
@@ -39,6 +40,25 @@ data class Assistant(
     val customBodies: List<CustomBody> = emptyList(),
     val mcpServers: Set<Uuid> = emptySet(),
     val localTools: List<LocalToolOption> = listOf(LocalToolOption.TimeInfo),
+    val enableSubAgent: Boolean = false,                // 子代理独立模块开关
+    val subAgentIds: Set<Uuid> = emptySet(),            // 勾选绑定的子代理助手 ID 集合（支持单选或多选）
+    val subAgentAssistantId: Uuid? = null,              // 兼容旧版单选字段
+    val subAgentShareWorkspace: Boolean = true,         // 子代理是否自动继承并共享主对话的工作区与交互式终端池
+    val subAgentAutoApproveTools: Boolean = true,       // 作为子代理运行时工具调用是否自动免审批
+    // 主代理对子代理的 4 项进阶控制权限开关（最低基础权限为单次同步派发并仅拿最终回复）
+    val subAgentAllowInspect: Boolean = true,           // 权限1：允许窥屏读取子代理状态/消息历史 (conversation_read) 及返回工具步骤 (tool_steps)
+    val subAgentAllowMultiTurnAndAsync: Boolean = true, // 权限2：允许对已有子代理多轮追问 (conversation_id) 与后台异步并发 (wait=false)
+    val subAgentAllowInterruptAndStop: Boolean = true,  // 权限3：允许中途打断改派 (interrupt=true) 与强制停止 (conversation_stop)
+    val subAgentAllowDelete: Boolean = false,           // 权限4：最高权限，允许主代理彻底删除销毁子代理对话 (conversation_delete)
+    // 主代理调用子代理相关操作前的审批开关
+    val subAgentApproveSpawn: Boolean = false,          // 派发新子代理前需用户审批
+    val subAgentApproveFollowUp: Boolean = false,       // 多轮追问子代理前需用户审批
+    val subAgentApproveInspect: Boolean = false,        // 窥屏读取子代理前需用户审批
+    val subAgentApproveInterruptAndStop: Boolean = false, // 打断或停止子代理前需用户审批
+    val subAgentApproveDelete: Boolean = true,          // 删除销毁子代理前需用户审批（默认开启）
+    val disabledWorkspaceTools: Set<String> = emptySet(), // 禁用的工作区工具名称集合（默认空集即全部开启）
+    val enableSecretKeyAlias: Boolean = false,          // 启用密钥代名词自动替换（工具入参中的 keyName 动态替换为真实密钥）
+    val enableAskKeyTool: Boolean = false,              // 启用 ask_key 询问密钥工具（在定义中告知可用代名词并支持弹窗请求/新建密钥）
     val enableWebSearch: Boolean = false, // 网络搜索开关(每个助手独立)
     val workspaceId: Uuid? = null,
     val background: String? = null, // 聊天页背景图地址(本地文件 URI 或网络 URL), 为 null 时无背景
@@ -50,7 +70,17 @@ data class Assistant(
     val enableTimeReminder: Boolean = false,            // 时间间隔提醒注入
     val timeReminderIntervalMinutes: Int = 60,          // 时间提醒间隔（分钟，至少 1 分钟）
     val allowConversationSystemPrompt: Boolean = false, // 允许对话单独重写 system prompt
-)
+) {
+    val effectiveSubAgentIds: Set<Uuid>
+        get() = when {
+            subAgentIds.isNotEmpty() -> subAgentIds
+            subAgentAssistantId != null -> setOf(subAgentAssistantId)
+            else -> emptySet()
+        }
+
+    val isSubAgentEnabled: Boolean
+        get() = (enableSubAgent || LocalToolOption.SubAgent in localTools) && effectiveSubAgentIds.isNotEmpty()
+}
 
 @Serializable
 data class QuickMessage(

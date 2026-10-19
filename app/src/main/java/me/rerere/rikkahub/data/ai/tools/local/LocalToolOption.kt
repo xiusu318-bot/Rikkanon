@@ -26,6 +26,10 @@ sealed class LocalToolOption {
     data object AskUser : LocalToolOption()
 
     @Serializable
+    @SerialName("ask_key")
+    data object AskKey : LocalToolOption()
+
+    @Serializable
     @SerialName("screen_time")
     data object ScreenTime : LocalToolOption()
 
@@ -36,4 +40,8 @@ sealed class LocalToolOption {
     @Serializable
     @SerialName("chart_display")
     data object ChartDisplay : LocalToolOption()
+
+    @Serializable
+    @SerialName("sub_agent")
+    data object SubAgent : LocalToolOption()
 }

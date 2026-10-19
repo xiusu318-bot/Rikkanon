@@ -7,6 +7,7 @@ import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Model
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
+import me.rerere.rikkahub.data.ai.tools.local.buildAskKeyTool
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.skills.SkillManager
 import me.rerere.rikkahub.data.model.Assistant
@@ -14,7 +15,9 @@ import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.data.repository.memoryId
+import me.rerere.rikkahub.service.ChatService
 import me.rerere.workspace.WorkspaceShellStatus
+import kotlin.uuid.Uuid
 
 private const val TAG = "ChatToolFactory"
 
@@ -39,6 +42,9 @@ class ChatToolFactory(
         assistant: Assistant,
         model: Model,
         workspaceCwd: String? = null,
+        conversationId: Uuid? = null,
+        chatService: ChatService? = null,
+        isSubConversation: Boolean = false,
     ): List<Tool> = buildList {
         if (assistant.enableMemory) {
             addAll(buildMemoryTools(memoryRepository, assistant.memoryId))
@@ -46,11 +52,43 @@ class ChatToolFactory(
         if (shouldUseExternalWebSearch(assistant, model)) {
             addAll(createSearchTools(settings))
         }
-        addAll(localTools.getTools(assistant.localTools))
-        if (assistant.enableRecentChatsReference) {
-            addAll(createConversationTools(conversationRepository, assistant.id))
+        val activeLocalTools = localTools.getTools(assistant.localTools).let { list ->
+            // 子对话后台运行时不弹出 ask_user 卡片，有疑问直接通过普通文本回复主对话
+            if (isSubConversation) list.filterNot { it.name == "ask_user" } else list
         }
-        addAll(createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd))
+        addAll(activeLocalTools)
+        if (settings.enableSecretKeyAlias &&
+            (me.rerere.rikkahub.data.ai.tools.local.LocalToolOption.AskKey in assistant.localTools || assistant.enableAskKeyTool) &&
+            !isSubConversation
+        ) {
+            add(buildAskKeyTool(settings))
+        }
+
+        if (assistant.enableRecentChatsReference ||
+            assistant.isSubAgentEnabled ||
+            assistant.workspaceId != null
+        ) {
+            addAll(
+                createConversationTools(
+                    conversationRepo = conversationRepository,
+                    assistantId = assistant.id,
+                    currentConversationId = conversationId,
+                    chatService = chatService,
+                    isSubConversation = isSubConversation,
+                    enableSubAgent = assistant.isSubAgentEnabled,
+                    boundSubAgentIds = assistant.effectiveSubAgentIds,
+                    settings = settings,
+                    assistant = assistant,
+                )
+            )
+        }
+        addAll(
+            createWorkspaceToolsIfReady(
+                workspaceId = assistant.workspaceId?.toString(),
+                cwd = workspaceCwd,
+                disabledTools = assistant.disabledWorkspaceTools,
+            )
+        )
         if (assistant.enabledSkills.isNotEmpty()) {
             addAll(
                 createSkillTools(
@@ -81,7 +119,11 @@ class ChatToolFactory(
         }
     }
 
-    private suspend fun createWorkspaceToolsIfReady(workspaceId: String?, cwd: String?): List<Tool> {
+    private suspend fun createWorkspaceToolsIfReady(
+        workspaceId: String?,
+        cwd: String?,
+        disabledTools: Set<String> = emptySet(),
+    ): List<Tool> {
         if (workspaceId.isNullOrBlank()) return emptyList()
         val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
         if (workspace.shellStatus != WorkspaceShellStatus.READY.name) {
@@ -91,6 +133,11 @@ class ChatToolFactory(
             )
             return emptyList()
         }
-        return createWorkspaceTools(workspaceId, workspaceRepository, cwd)
+        return createWorkspaceTools(
+            workspaceId = workspaceId,
+            workspaceRepository = workspaceRepository,
+            cwd = cwd,
+            disabledTools = disabledTools,
+        )
     }
 }

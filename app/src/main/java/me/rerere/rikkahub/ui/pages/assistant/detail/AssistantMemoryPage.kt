@@ -233,6 +233,19 @@ private fun MemorySettingsTab(
                 headlineContent = { Text(stringResource(R.string.assistant_page_global_memory)) },
             )
             switchItem(
+                checked = assistant.enableAutoMemoryConsolidation,
+                onCheckedChange = {
+                    onUpdateAssistant(
+                        assistant.copy(
+                            enableAutoMemoryConsolidation = it
+                        )
+                    )
+                },
+                enabled = assistant.enableMemory,
+                supportingContent = { Text("开启后，对话暂停或切至后台时自动调用模型归纳记忆；关闭时仅在对话中按需记录或手动整理") },
+                headlineContent = { Text("后台自动整理记忆") },
+            )
+            switchItem(
                 checked = assistant.enableRecentChatsReference,
                 onCheckedChange = {
                     onUpdateAssistant(

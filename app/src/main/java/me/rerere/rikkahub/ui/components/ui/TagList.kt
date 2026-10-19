@@ -45,6 +45,7 @@ fun TagsInput(
     onValueChange: (value: List<Uuid>, tags: List<Tag>) -> Unit,
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
+    var editingTag by remember { mutableStateOf<Tag?>(null) }
 
     // 根据value获取对应的tags
     val selectedTags = tags.filter { tag -> value.contains(tag.id) }
@@ -55,24 +56,32 @@ fun TagsInput(
         verticalArrangement = Arrangement.spacedBy(4.dp),
         itemVerticalAlignment = Alignment.CenterVertically
     ) {
-        // 显示已选择的tags
+        // 显示已选择的tags（点击标签可直接编辑长文本描述）
         selectedTags.fastForEach { tag ->
-            InputChip(onClick = {}, label = {
-                Text(tag.name)
-            }, selected = false, trailingIcon = {
-                Icon(
-                    imageVector = HugeIcons.Cancel01,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .size(16.dp)
-                        .clickable {
-                            onValueChange(
-                                value.filter { it != tag.id }, tags
-                            )
-                        },
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            })
+            InputChip(
+                onClick = { editingTag = tag },
+                label = {
+                    Text(
+                        text = tag.name,
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                },
+                selected = false,
+                trailingIcon = {
+                    Icon(
+                        imageVector = HugeIcons.Cancel01,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clickable {
+                                onValueChange(
+                                    value.filter { it != tag.id }, tags
+                                )
+                            },
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            )
         }
 
         // 添加按钮
@@ -147,7 +156,7 @@ fun TagsInput(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                // 输入新标签名称
+                // 输入新标签名称（支持输入多行长文本作为子代理职责/描述）
                 OutlinedTextField(
                     value = tagName,
                     onValueChange = {
@@ -157,7 +166,9 @@ fun TagsInput(
                     label = { Text(stringResource(R.string.tag_input_dialog_label)) },
                     placeholder = { Text(stringResource(R.string.tag_input_dialog_placeholder)) },
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
+                    singleLine = false,
+                    minLines = 2,
+                    maxLines = 8,
                     isError = showError
                 )
 
@@ -205,5 +216,45 @@ fun TagsInput(
                 Text(stringResource(R.string.cancel))
             }
         })
+    }
+
+    // 编辑已有标签/描述对话框
+    editingTag?.let { targetTag ->
+        var editedText by remember(targetTag.id) { mutableStateOf(targetTag.name) }
+        AlertDialog(
+            onDismissRequest = { editingTag = null },
+            title = { Text("编辑标签 / 描述") },
+            text = {
+                OutlinedTextField(
+                    value = editedText,
+                    onValueChange = { editedText = it },
+                    label = { Text(stringResource(R.string.tag_input_dialog_label)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    minLines = 2,
+                    maxLines = 8,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = editedText.isNotBlank(),
+                    onClick = {
+                        val trimmed = editedText.trim()
+                        val updatedTags = tags.map { t ->
+                            if (t.id == targetTag.id) t.copy(name = trimmed) else t
+                        }
+                        onValueChange(value, updatedTags)
+                        editingTag = null
+                    },
+                ) {
+                    Text(stringResource(R.string.confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingTag = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
     }
 }

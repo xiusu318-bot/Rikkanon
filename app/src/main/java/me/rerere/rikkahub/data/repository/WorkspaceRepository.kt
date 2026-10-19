@@ -103,10 +103,23 @@ class WorkspaceRepository(
 
     suspend fun setToolApproval(id: String, toolName: String, needsApproval: Boolean): Boolean {
         val workspace = dao.getById(id) ?: return false
-        val overrides = workspace.toolApprovalOverrides() + (toolName to needsApproval)
+        val updated = workspace.rawToolSettingsMap() + (toolName to needsApproval)
         dao.upsert(
             workspace.copy(
-                toolApprovals = JsonInstant.encodeToString(overrides),
+                toolApprovals = JsonInstant.encodeToString(updated),
+                updatedAt = System.currentTimeMillis(),
+            )
+        )
+        return true
+    }
+
+    suspend fun setToolEnabled(id: String, toolName: String, enabled: Boolean): Boolean {
+        val workspace = dao.getById(id) ?: return false
+        val key = WorkspaceEntity.TOOL_ENABLED_PREFIX + toolName
+        val updated = workspace.rawToolSettingsMap() + (key to enabled)
+        dao.upsert(
+            workspace.copy(
+                toolApprovals = JsonInstant.encodeToString(updated),
                 updatedAt = System.currentTimeMillis(),
             )
         )

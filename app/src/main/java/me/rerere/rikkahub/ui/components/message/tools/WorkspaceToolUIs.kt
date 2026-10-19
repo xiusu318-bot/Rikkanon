@@ -412,6 +412,166 @@ private fun ShellExitStatus(content: JsonElement, style: androidx.compose.ui.tex
     )
 }
 
+/**
+ * 交互式 PTY 终端工具 (`workspace_terminal`): 标题显示终端 ID 与发送的指令, 摘要展示状态与最新屏幕输出
+ */
+object TerminalToolUI : ToolUIRenderer {
+    private const val TITLE_MAX_CHARS = 40
+    private const val SUMMARY_MAX_LINES = 8
+
+    override val toolName: String = "workspace_terminal"
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.ComputerTerminal01
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val id = context.arguments.long("id") ?: context.content.long("id")
+        val titleLabel = context.arguments.getStringContent("title") ?: context.content.getStringContent("title")
+        val idTag = buildString {
+            if (id != null) append("#$id")
+            if (!titleLabel.isNullOrBlank()) {
+                if (isNotEmpty()) append(" ")
+                append("[$titleLabel]")
+            }
+        }
+        val killAll = context.arguments.boolean("kill_all") == true
+        val kill = context.arguments.boolean("kill") == true
+        val listOnly = context.arguments.boolean("list_only") == true
+        val newSession = context.arguments.boolean("new_session") == true
+        val input = context.arguments.getStringContent("input")
+        return when {
+            listOnly -> "查看终端列表"
+            killAll -> "关闭全部终端"
+            kill -> "关闭终端 $idTag"
+            !input.isNullOrBlank() -> {
+                val preview = input.replace("\n", " ").replace("\r", " ").trim()
+                val truncated = if (preview.length > TITLE_MAX_CHARS) preview.take(TITLE_MAX_CHARS) + "…" else preview
+                val prefix = if (newSession) "新建终端 $idTag" else "终端 $idTag"
+                "$prefix: $truncated"
+            }
+            newSession -> "新建终端 $idTag"
+            else -> "读取终端 $idTag"
+        }
+    }
+
+    override fun hasSummary(context: ToolUIContext): Boolean = context.content != null
+
+    @Composable
+    override fun Summary(context: ToolUIContext) {
+        val content = context.content ?: return
+        val status = content.getStringContent("status")
+        val fgCmd = content.getStringContent("foregroundCommand")
+        val isAtPrompt = content.boolean("isAtPrompt") == true
+        val output = remember(content) {
+            content.getStringContent("incrementalOutput")?.takeIf { it.isNotBlank() }
+                ?: content.getStringContent("screenSnapshot").orEmpty()
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (!status.isNullOrBlank()) {
+                Text(
+                    text = when (status) {
+                        "prompt_ready" -> "● 就绪 (#${content.long("id") ?: "?"})"
+                        "running_or_waiting_input" -> buildString {
+                            append("◐ 运行中 (#${content.long("id") ?: "?"}")
+                            if (!fgCmd.isNullOrBlank()) append(" · $fgCmd")
+                            append(")")
+                        }
+                        "exited_and_closed", "killed", "killed_all" -> "✕ 已关闭 (#${content.long("id") ?: "?"})"
+                        else -> "○ $status"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = when {
+                        isAtPrompt -> DiffAddedColor
+                        status in setOf("exited_and_closed", "killed", "killed_all") -> MaterialTheme.colorScheme.outline
+                        else -> MaterialTheme.colorScheme.tertiary
+                    },
+                )
+            }
+            if (output.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.small)
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .shimmer(isLoading = context.loading),
+                ) {
+                    Text(
+                        text = output.lineSequence().toList().takeLast(SUMMARY_MAX_LINES).joinToString("\n"),
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        maxLines = SUMMARY_MAX_LINES,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    override fun Preview(context: ToolUIContext, onDismissRequest: () -> Unit) {
+        val content = context.content
+        if (content == null) {
+            DefaultToolPreview(context = context)
+            return
+        }
+        val id = content.long("id") ?: context.arguments.long("id")
+        val status = content.getStringContent("status").orEmpty()
+        val input = context.arguments.getStringContent("input").orEmpty()
+        val incremental = content.getStringContent("incrementalOutput").orEmpty()
+        val snapshot = content.getStringContent("screenSnapshot").orEmpty()
+        Column(
+            modifier = Modifier
+                .fillMaxHeight(0.8f)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "终端 ${if (id != null) "#$id" else ""}",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (status == "prompt_ready") DiffAddedColor else MaterialTheme.colorScheme.tertiary,
+                )
+            }
+            if (input.isNotEmpty()) {
+                Text(text = "输入命令", style = MaterialTheme.typography.labelMedium)
+                HighlightCodeBlock(
+                    code = input,
+                    language = "bash",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (incremental.isNotEmpty()) {
+                Text(text = "本次增量输出", style = MaterialTheme.typography.labelMedium)
+                HighlightCodeBlock(
+                    code = incremental,
+                    language = "plaintext",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (snapshot.isNotEmpty()) {
+                Text(text = "当前屏幕快照", style = MaterialTheme.typography.labelMedium)
+                HighlightCodeBlock(
+                    code = snapshot,
+                    language = "plaintext",
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
 /** 从工具输出 JSON 读取布尔字段 */
 private fun JsonElement?.boolean(key: String): Boolean? =
     this?.jsonObjectOrNull?.get(key)?.jsonPrimitiveOrNull?.booleanOrNull

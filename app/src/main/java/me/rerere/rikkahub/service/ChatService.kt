@@ -13,6 +13,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.completeWith
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -162,6 +164,50 @@ data class ChatError(
 enum class ChatErrorSolution {
     CheckFastModelSettings,
 }
+
+enum class ToolEditAction {
+    SAVE_ONLY,
+    RERUN_TOOL_AND_CONTINUE,
+    CONTINUE_FROM_EDITED_OUTPUT,
+}
+
+data class SubConversationStepSummary(
+    val toolName: String,
+    val inputPreview: String,
+    val isExecuted: Boolean,
+)
+
+data class SubConversationSendResult(
+    val conversationId: Uuid,
+    val title: String,
+    val status: String, // "completed" | "running"
+    val timedOut: Boolean,
+    val reply: String?,
+    val toolSteps: List<SubConversationStepSummary>,
+    val processingStatus: String?,
+    val assistantId: Uuid? = null,
+    val assistantName: String? = null,
+    val modelName: String? = null,
+)
+
+data class SubConversationMessageSnapshot(
+    val position: Int,
+    val role: String,
+    val text: String,
+    val toolSteps: List<SubConversationStepSummary> = emptyList(),
+)
+
+data class SubConversationReadResult(
+    val conversationId: Uuid,
+    val title: String,
+    val status: String,
+    val processingStatus: String?,
+    val totalMessages: Int,
+    val messages: List<SubConversationMessageSnapshot>,
+    val assistantId: Uuid? = null,
+    val assistantName: String? = null,
+    val modelName: String? = null,
+)
 
 private val inputTransformers by lazy {
     listOf(
@@ -554,6 +600,170 @@ class ChatService(
         session.setJob(job)
     }
 
+    /**
+     * 双层 Roll 之内层单步 Roll / 单工具重跑：
+     * - 当 [rerunTool] 为 false 时：保留 [message] 中 `0..<partIndex` 的前置步骤（如已执行的工具和思考），
+     *   在当前 [MessageNode] 下新建一个分支，截断后续步骤并让模型从此处重新生成下一步。
+     * - 当 [rerunTool] 为 true 且 `parts[partIndex]` 是 [UIMessagePart.Tool] 时：
+     *   保留 `0..partIndex`，将该工具的输出清空并标记为 `Approved`，让 `GenerationLoop` 原地重跑该工具并继续后续生成。
+     */
+    fun regenerateAtPart(
+        conversationId: Uuid,
+        message: UIMessage,
+        partIndex: Int,
+        rerunTool: Boolean = false,
+    ) = synchronized(sessionManager.getOrCreate(conversationId)) {
+        val session = sessionManager.getOrCreate(conversationId)
+        val previousJob = session.getJob()
+
+        val job = launchGenerationJob(
+            conversationId = conversationId,
+            keepAliveInBackground = true,
+        ) {
+            try {
+                previousJob?.join()
+                val conversation = session.state.value
+                val node = conversation.getMessageNodeByMessageId(message.id) ?: return@launchGenerationJob
+                val nodeIndex = conversation.messageNodes.indexOf(node)
+                if (nodeIndex < 0) return@launchGenerationJob
+                val targetMsg = node.messages.firstOrNull { it.id == message.id } ?: return@launchGenerationJob
+                if (partIndex !in targetMsg.parts.indices) return@launchGenerationJob
+
+                val prefixParts = if (rerunTool && targetMsg.parts[partIndex] is UIMessagePart.Tool) {
+                    val toolPart = targetMsg.parts[partIndex] as UIMessagePart.Tool
+                    targetMsg.parts.subList(0, partIndex) + toolPart.copy(
+                        output = emptyList(),
+                        approvalState = ToolApprovalState.Approved,
+                    )
+                } else {
+                    targetMsg.parts.subList(0, partIndex)
+                }
+
+                if (prefixParts.isEmpty()) {
+                    // 等价于整条助手消息重发
+                    handleMessageComplete(conversationId, messageRange = 0..<nodeIndex)
+                } else {
+                    val branchedMessage = UIMessage(
+                        role = MessageRole.ASSISTANT,
+                        parts = prefixParts,
+                        modelId = targetMsg.modelId,
+                        modelSnapshot = targetMsg.modelSnapshot,
+                    )
+                    val updatedNode = node.copy(
+                        messages = node.messages + branchedMessage,
+                        selectIndex = node.messages.size,
+                    )
+                    val truncatedNodes = conversation.messageNodes.subList(0, nodeIndex) + updatedNode
+                    saveConversation(conversationId, conversation.copy(messageNodes = truncatedNodes))
+                    handleMessageComplete(conversationId, messageRange = 0..nodeIndex)
+                }
+
+                _generationDoneFlow.emit(conversationId)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                session.messageQueue.pause()
+                addError(e, conversationId, title = context.getString(R.string.error_title_regenerate_message))
+            }
+        }
+
+        session.setJob(job)
+    }
+
+    /**
+     * 直接编辑助手消息中某个工具调用的 `input`（入参 JSON）与 `output`（返回文本），
+     * 并可选从该工具处立即重跑工具或基于修改后的输出重新生成后续步骤。
+     */
+    fun editToolCallPart(
+        conversationId: Uuid,
+        messageId: Uuid,
+        toolCallId: String,
+        newInput: String,
+        newOutputText: String?,
+        actionAfterEdit: ToolEditAction = ToolEditAction.SAVE_ONLY,
+    ) = synchronized(sessionManager.getOrCreate(conversationId)) {
+        val session = sessionManager.getOrCreate(conversationId)
+        val previousJob = session.getJob()
+
+        val job = launchGenerationJob(
+            conversationId = conversationId,
+            keepAliveInBackground = actionAfterEdit != ToolEditAction.SAVE_ONLY,
+        ) {
+            try {
+                previousJob?.join()
+                val conversation = session.state.value
+                val node = conversation.getMessageNodeByMessageId(messageId) ?: return@launchGenerationJob
+                val nodeIndex = conversation.messageNodes.indexOf(node)
+                val targetMsg = node.messages.firstOrNull { it.id == messageId } ?: return@launchGenerationJob
+                val toolIndex = targetMsg.parts.indexOfFirst {
+                    it is UIMessagePart.Tool && it.toolCallId == toolCallId
+                }
+                if (toolIndex < 0) return@launchGenerationJob
+                val originalTool = targetMsg.parts[toolIndex] as UIMessagePart.Tool
+
+                val updatedOutput = when {
+                    actionAfterEdit == ToolEditAction.RERUN_TOOL_AND_CONTINUE -> emptyList()
+                    newOutputText != null -> {
+                        val nonTextParts = originalTool.output.filterNot { it is UIMessagePart.Text }
+                        listOf(UIMessagePart.Text(newOutputText)) + nonTextParts
+                    }
+                    else -> originalTool.output
+                }
+
+                val updatedTool = originalTool.copy(
+                    input = newInput,
+                    output = updatedOutput,
+                    approvalState = if (actionAfterEdit == ToolEditAction.RERUN_TOOL_AND_CONTINUE) {
+                        ToolApprovalState.Approved
+                    } else {
+                        originalTool.approvalState
+                    },
+                )
+
+                when (actionAfterEdit) {
+                    ToolEditAction.SAVE_ONLY -> {
+                        val newParts = targetMsg.parts.toMutableList().apply {
+                            set(toolIndex, updatedTool)
+                        }
+                        val updatedNode = node.copy(
+                            messages = node.messages.map { msg ->
+                                if (msg.id == messageId) msg.copy(parts = newParts) else msg
+                            }
+                        )
+                        val updatedNodes = conversation.messageNodes.toMutableList().apply {
+                            set(nodeIndex, updatedNode)
+                        }
+                        saveConversation(conversationId, conversation.copy(messageNodes = updatedNodes))
+                    }
+
+                    ToolEditAction.RERUN_TOOL_AND_CONTINUE,
+                    ToolEditAction.CONTINUE_FROM_EDITED_OUTPUT -> {
+                        val truncatedParts = targetMsg.parts.subList(0, toolIndex) + updatedTool
+                        val branchedMessage = UIMessage(
+                            role = MessageRole.ASSISTANT,
+                            parts = truncatedParts,
+                            modelId = targetMsg.modelId,
+                            modelSnapshot = targetMsg.modelSnapshot,
+                        )
+                        val updatedNode = node.copy(
+                            messages = node.messages + branchedMessage,
+                            selectIndex = node.messages.size,
+                        )
+                        val truncatedNodes = conversation.messageNodes.subList(0, nodeIndex) + updatedNode
+                        saveConversation(conversationId, conversation.copy(messageNodes = truncatedNodes))
+                        handleMessageComplete(conversationId, messageRange = 0..nodeIndex)
+                        _generationDoneFlow.emit(conversationId)
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                session.messageQueue.pause()
+                addError(e, conversationId, title = "编辑工具调用失败")
+            }
+        }
+
+        session.setJob(job)
+    }
+
     // ---- 处理工具调用审批 ----
 
     fun handleToolApproval(
@@ -590,6 +800,9 @@ class ChatService(
                     }
 
                     // Update the tool approval state
+                    val isAskKeyAnswered = answer != null && conversation.currentMessages.any { message ->
+                        message.getTools().any { it.toolCallId == toolCallId && it.toolName == "ask_key" }
+                    }
                     val updatedNodes = conversation.messageNodes.map { node ->
                         node.copy(
                             messages = node.messages.map { msg ->
@@ -607,7 +820,14 @@ class ChatService(
                             }
                         )
                     }
-                    val updatedConversation = conversation.copy(messageNodes = updatedNodes)
+                    val updatedConversation = conversation.copy(
+                        messageNodes = updatedNodes,
+                        config = if (isAskKeyAnswered) {
+                            conversation.config?.copy(enableSecretKeyAlias = true)
+                        } else {
+                            conversation.config
+                        },
+                    )
                     saveConversation(conversationId, updatedConversation)
 
                     // Check if there are still pending tools
@@ -674,12 +894,19 @@ class ChatService(
             checkInvalidMessages(conversationId)
             val conversation = getConversationFlow(conversationId).value
 
+            val isSubConversation = conversation.config?.autoApproveTools == true ||
+                conversation.config?.parentConversationId != null
+            val autoApproveTools = if (isSubConversation) assistant.subAgentAutoApproveTools else false
+
             val tools = try {
                 chatToolFactory.createTools(
                     settings = settings,
                     assistant = assistant,
                     model = model,
                     workspaceCwd = conversation.workspaceCwd,
+                    conversationId = conversationId,
+                    chatService = this,
+                    isSubConversation = isSubConversation,
                 )
             } catch (error: InvalidMcpServerNamesException) {
                 sessionManager.get(conversationId)?.messageQueue?.pause()
@@ -720,6 +947,23 @@ class ChatService(
                 },
                 outputTransformers = outputTransformers,
                 tools = tools,
+                autoApproveTools = autoApproveTools,
+                pollQueuedUserMessages = {
+                    val steered = mutableListOf<UIMessage>()
+                    while (true) {
+                        val next = synchronized(session) {
+                            session.messageQueue.takeNext()
+                        } ?: break
+                        if (next.answer) {
+                            val processed = preprocessUserInputParts(next.parts, assistant)
+                            steered += UIMessage(
+                                role = MessageRole.USER,
+                                parts = processed,
+                            )
+                        }
+                    }
+                    steered
+                },
             ).onCompletion {
                 // 可能被取消了，或者意外结束，兜底更新
                 val updatedConversation = session.finishGeneration { conversation ->
@@ -771,7 +1015,7 @@ class ChatService(
             sessionManager.launchWithSession(conversationId) {
                 generateSuggestion(conversationId, finalConversation)
             }
-            if (assistant.enableMemory) memoryConsolidationScheduler.onTurnFinished(finalConversation)
+            if (assistant.enableMemory && assistant.enableAutoMemoryConsolidation) memoryConsolidationScheduler.onTurnFinished(finalConversation)
         }
     }
 
@@ -1094,22 +1338,6 @@ class ChatService(
         sessionManager.withSession(conversationId) { session ->
             ensureInitialized(session)
             val conversation = session.state.value
-            if (conversation.config != null) {
-                session.updateMetadata(
-                    update = {
-                        it.copy(
-                            config = it.config?.let { config ->
-                                config.copy(
-                                    enableWebSearch = enableWebSearch ?: config.enableWebSearch,
-                                    builtInSearch = builtInSearch ?: config.builtInSearch,
-                                )
-                            }
-                        )
-                    },
-                    persist = conversationRepo::updateConversationConfig,
-                )
-                return@withSession
-            }
             settingsStore.update { settings ->
                 val assistant = settings.getAssistantOf(conversation)
                 val model = settings.getChatModelOf(conversation)
@@ -1542,5 +1770,343 @@ class ChatService(
         if (jobs.isEmpty()) return
         jobs.forEach { it.join() }
         finishInterruptedPendingTools(conversationId)
+    }
+
+    // ---- 子对话（Sub-Agent）操控与实时状态 ----
+
+    fun getConversationRuntimeStatus(conversationId: Uuid): Pair<String, String?> {
+        val session = sessionManager.get(conversationId) ?: return "idle" to null
+        val isGen = session.isGenerating
+        val hasPendingApproval = session.state.value.currentMessages.any { msg ->
+            msg.parts.any { it is UIMessagePart.Tool && it.isPending }
+        }
+        val status = when {
+            isGen -> "running"
+            hasPendingApproval -> "waiting_approval"
+            session.messageQueue.state.value.paused -> "paused"
+            else -> "idle"
+        }
+        return status to session.processingStatus.value
+    }
+
+    /**
+     * 主对话通过 `conversation_send` 工具创建或向子对话发送一条普通用户指令（[MessageRole.USER]）。
+     * 在子对话视角中，它只是一条标准对话，收到用户指令后正常调用工具并回复。
+     */
+    suspend fun sendToSubConversation(
+        parentConversationId: Uuid,
+        targetConversationId: Uuid? = null,
+        targetAssistantId: Uuid? = null,
+        title: String? = null,
+        message: String,
+        wait: Boolean = true,
+        timeoutMs: Long = 60_000L,
+        interrupt: Boolean = false,
+    ): SubConversationSendResult {
+        require(message.isNotBlank()) { "message must not be blank" }
+        require(targetConversationId != parentConversationId) {
+            "Cannot send sub-agent message to the current parent conversation itself ($parentConversationId)"
+        }
+
+        val settings = settingsStore.awaitLoaded()
+        val parentConversation = getConversationFlow(parentConversationId).value.bindConfig(settings)
+        val parentStoredAssistant = settings.getStoredAssistantOf(parentConversation)
+        val parentEffectiveAssistant = settings.getAssistantOf(parentConversation)
+
+        // 解析子代理绑定的目标助手（按传入的 assistant_id 匹配绑定的子代理助手）
+        val resolvedSubAssistant = (targetAssistantId?.let { settings.getAssistantById(it) })
+            ?: (parentStoredAssistant.effectiveSubAgentIds.firstOrNull { id -> settings.assistants.any { it.id == id } }
+                ?.let { settings.getAssistantById(it) })
+            ?: parentEffectiveAssistant
+        val resolvedSubModel = settings.findModelById(resolvedSubAssistant.chatModelId ?: settings.chatModelId)
+        val builtInSearch = resolvedSubModel != null && BuiltInTools.Search in resolvedSubModel.tools
+        val parentWorkspaceId = parentConversation.config?.workspaceId ?: parentEffectiveAssistant.workspaceId
+        val sharedWorkspaceId = if (parentStoredAssistant.subAgentShareWorkspace) {
+            parentWorkspaceId ?: resolvedSubAssistant.workspaceId
+        } else {
+            resolvedSubAssistant.workspaceId
+        }
+        val sharedWorkspaceCwd = if (parentStoredAssistant.subAgentShareWorkspace && sharedWorkspaceId == parentWorkspaceId) {
+            parentConversation.workspaceCwd
+        } else {
+            null
+        }
+        val subEnabledSkills = resolvedSubAssistant.enabledSkills
+
+        val targetId = targetConversationId ?: Uuid.random()
+        val targetSession = sessionManager.getOrCreate(targetId)
+
+        // 初始化或创建子对话
+        targetSession.initialize {
+            loadConversation(targetId) ?: run {
+                val subConfig = me.rerere.rikkahub.data.model.ConversationConfig(
+                    chatModelId = resolvedSubModel?.id ?: resolvedSubAssistant.chatModelId,
+                    reasoningLevel = resolvedSubAssistant.reasoningLevel,
+                    enableWebSearch = resolvedSubAssistant.enableWebSearch,
+                    builtInSearch = builtInSearch,
+                    mcpServers = resolvedSubAssistant.mcpServers,
+                    workspaceId = sharedWorkspaceId,
+                    enabledSkills = subEnabledSkills,
+                    disabledWorkspaceTools = resolvedSubAssistant.disabledWorkspaceTools,
+                    enableSecretKeyAlias = resolvedSubAssistant.enableSecretKeyAlias || parentEffectiveAssistant.enableSecretKeyAlias,
+                    enableAskKeyTool = false,
+                    childConversationIds = emptySet(),
+                    parentConversationId = parentConversationId,
+                    autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
+                )
+                val fallbackTitle = message.lineSequence().firstOrNull()?.trim()?.take(16)?.ifBlank { null }
+                    ?: "子代理-${targetId.toString().take(4)}"
+                Conversation(
+                    id = targetId,
+                    assistantId = resolvedSubAssistant.id,
+                    title = title?.trim()?.ifBlank { null } ?: fallbackTitle,
+                    messageNodes = emptyList(),
+                    customSystemPrompt = if (resolvedSubAssistant.id == parentConversation.assistantId) {
+                        parentConversation.customSystemPrompt
+                    } else {
+                        null
+                    },
+                    modeInjectionIds = resolvedSubAssistant.modeInjectionIds,
+                    lorebookIds = resolvedSubAssistant.lorebookIds,
+                    config = subConfig,
+                    workspaceCwd = sharedWorkspaceCwd,
+                    folderId = if (resolvedSubAssistant.id == parentConversation.assistantId) {
+                        parentConversation.folderId
+                    } else {
+                        null
+                    },
+                )
+            }
+        }
+
+        // 确保子对话配置了 최신工具/免审批状态 且更新标题（若传入了新标题）
+        val existingChild = targetSession.state.value
+        val updatedChildTitle = title?.trim()?.takeIf { it.isNotEmpty() }
+            ?: existingChild.title.takeIf { it.isNotBlank() && !it.startsWith("Sub-", ignoreCase = true) }
+            ?: "子代理-${targetId.toString().take(4)}"
+        val updatedChildConfig = (existingChild.config ?: parentConversation.config)?.copy(
+            parentConversationId = existingChild.config?.parentConversationId ?: parentConversationId,
+            workspaceId = existingChild.config?.workspaceId ?: sharedWorkspaceId,
+            disabledWorkspaceTools = resolvedSubAssistant.disabledWorkspaceTools,
+            enableSecretKeyAlias = resolvedSubAssistant.enableSecretKeyAlias || parentEffectiveAssistant.enableSecretKeyAlias,
+            mcpServers = resolvedSubAssistant.mcpServers,
+            enabledSkills = subEnabledSkills,
+            enableWebSearch = resolvedSubAssistant.enableWebSearch,
+            autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
+        )
+        if (updatedChildTitle != existingChild.title || updatedChildConfig != existingChild.config) {
+            val updatedChild = existingChild.copy(
+                title = updatedChildTitle,
+                config = updatedChildConfig,
+            )
+            saveConversation(targetId, updatedChild)
+        }
+
+        val childAssistant = settings.getAssistantOf(targetSession.state.value)
+        val childModel = settings.getChatModelOf(targetSession.state.value)
+        val childAssistantName = childAssistant.name.ifBlank { context.getString(R.string.assistant_page_default_assistant) }
+        val childModelName = childModel?.displayName
+
+        // 将子对话 ID 记录到主对话的 config.childConversationIds 中，实现主从跟随
+        registerChildConversation(parentConversationId, targetId)
+
+        if (interrupt && targetSession.isGenerating) {
+            stopGeneration(targetId)
+        }
+
+        val replyDeferred = CompletableDeferred<String?>()
+        synchronized(targetSession) {
+            targetSession.messageQueue.resume()
+            targetSession.messageQueue.enqueue(
+                parts = listOf(UIMessagePart.Text(message)),
+                answer = true,
+                reply = replyDeferred,
+            )
+            dispatchNextQueuedMessage(targetId)
+        }
+
+        if (!wait) {
+            val (status, procStatus) = getConversationRuntimeStatus(targetId)
+            return SubConversationSendResult(
+                conversationId = targetId,
+                title = targetSession.state.value.title,
+                status = if (status == "idle") "running" else status,
+                timedOut = false,
+                reply = null,
+                toolSteps = extractRecentToolSteps(targetSession.state.value),
+                processingStatus = procStatus,
+                assistantId = childAssistant.id,
+                assistantName = childAssistantName,
+                modelName = childModelName,
+            )
+        }
+
+        val boundedTimeout = timeoutMs.coerceIn(1_000L, 600_000L)
+        val completedReply = withTimeoutOrNull(boundedTimeout) {
+            runCatching { replyDeferred.await() }.getOrElse { err ->
+                "Error: ${err.message}"
+            }
+        }
+
+        val latestChild = targetSession.state.value
+        val (status, procStatus) = getConversationRuntimeStatus(targetId)
+        val timedOut = completedReply == null && (targetSession.isGenerating || status == "running")
+        val finalReply = completedReply ?: latestChild.currentMessages
+            .lastOrNull { it.role == MessageRole.ASSISTANT }
+            ?.toText()
+
+        return SubConversationSendResult(
+            conversationId = targetId,
+            title = latestChild.title,
+            status = if (timedOut) "running" else "completed",
+            timedOut = timedOut,
+            reply = finalReply,
+            toolSteps = extractRecentToolSteps(latestChild),
+            processingStatus = procStatus,
+            assistantId = childAssistant.id,
+            assistantName = childAssistantName,
+            modelName = childModelName,
+        )
+    }
+
+    /**
+     * 读取指定对话的实时状态、工具调用进度与消息内容；若正在运行且 [waitMs] > 0，可等待其完成或达到超时上限。
+     */
+    suspend fun readSubConversation(
+        targetConversationId: Uuid,
+        offset: Int = 0,
+        limit: Int = 20,
+        waitMs: Long = 0L,
+    ): SubConversationReadResult {
+        val activeSession = sessionManager.get(targetConversationId)
+        if (activeSession != null && activeSession.isGenerating && waitMs > 0L) {
+            withTimeoutOrNull(waitMs.coerceIn(100L, 600_000L)) {
+                while (activeSession.isGenerating) {
+                    activeSession.getJob()?.join() ?: delay(100)
+                }
+            }
+        }
+
+        val conversation = activeSession?.state?.value
+            ?: conversationRepo.getConversationById(targetConversationId)
+            ?: error("Conversation not found: $targetConversationId")
+
+        val settings = settingsStore.awaitLoaded()
+        val childAssistant = settings.getAssistantOf(conversation)
+        val childModel = settings.getChatModelOf(conversation)
+
+        val (status, procStatus) = getConversationRuntimeStatus(targetConversationId)
+        val dialogue = conversation.currentMessages.filter {
+            it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT
+        }
+        val slice = dialogue.drop(offset.coerceAtLeast(0)).take(limit.coerceIn(1, 50))
+        val snapshots = slice.mapIndexed { idx, msg ->
+            SubConversationMessageSnapshot(
+                position = offset.coerceAtLeast(0) + idx,
+                role = msg.role.name,
+                text = msg.toText().take(12_000),
+                toolSteps = msg.getTools().map { tool ->
+                    SubConversationStepSummary(
+                        toolName = tool.toolName,
+                        inputPreview = tool.input.replace("\n", " ").take(120),
+                        isExecuted = tool.isExecuted,
+                    )
+                },
+            )
+        }
+
+        return SubConversationReadResult(
+            conversationId = conversation.id,
+            title = conversation.title.ifBlank { "Untitled" },
+            status = status,
+            processingStatus = procStatus,
+            totalMessages = dialogue.size,
+            messages = snapshots,
+            assistantId = childAssistant.id,
+            assistantName = childAssistant.name.ifBlank { context.getString(R.string.assistant_page_default_assistant) },
+            modelName = childModel?.displayName,
+        )
+    }
+
+    private suspend fun registerChildConversation(parentId: Uuid, childId: Uuid) {
+        if (parentId == childId) return
+        val parentSession = sessionManager.get(parentId)
+        val parentConv = parentSession?.state?.value ?: conversationRepo.getConversationById(parentId) ?: return
+        val settings = settingsStore.awaitLoaded()
+        val boundParent = parentConv.bindConfig(settings)
+        val oldConfig = boundParent.config ?: return
+        if (childId in oldConfig.childConversationIds && childId !in oldConfig.deletedChildConversationIds) return
+
+        val newConfig = oldConfig.copy(
+            childConversationIds = oldConfig.childConversationIds + childId,
+            deletedChildConversationIds = oldConfig.deletedChildConversationIds - childId,
+        )
+        val updatedParent = boundParent.copy(config = newConfig)
+        if (parentSession != null) {
+            parentSession.updateConversation(updatedParent)
+        }
+        if (conversationRepo.existsConversationById(parentId)) {
+            conversationRepo.updateConversationConfig(updatedParent)
+        }
+    }
+
+    /**
+     * 彻底删除指定的子代理对话（供主代理 `conversation_delete` 工具及人类用户 UI 手动删除共用）：
+     * 1. 若该子代理正在生成，先立即停止；
+     * 2. 从主对话的 `childConversationIds` 移除并记入 `deletedChildConversationIds`，使其从顶栏胶囊和侧边栏树立即消失；
+     * 3. 从数据库删除该子对话。
+     */
+    suspend fun deleteSubConversation(
+        parentConversationId: Uuid?,
+        targetConversationId: Uuid,
+    ) {
+        require(targetConversationId != parentConversationId) {
+            "Cannot delete the current parent conversation itself"
+        }
+        stopGeneration(targetConversationId)
+
+        val targetConv = sessionManager.get(targetConversationId)?.state?.value
+            ?: conversationRepo.getConversationById(targetConversationId)
+        val effectiveParentId = parentConversationId ?: targetConv?.config?.parentConversationId
+
+        if (effectiveParentId != null && effectiveParentId != targetConversationId) {
+            val parentSession = sessionManager.get(effectiveParentId)
+            val parentConv = parentSession?.state?.value ?: conversationRepo.getConversationById(effectiveParentId)
+            if (parentConv != null) {
+                val settings = settingsStore.awaitLoaded()
+                val boundParent = parentConv.bindConfig(settings)
+                val oldConfig = boundParent.config
+                if (oldConfig != null) {
+                    val newConfig = oldConfig.copy(
+                        childConversationIds = oldConfig.childConversationIds - targetConversationId,
+                        deletedChildConversationIds = oldConfig.deletedChildConversationIds + targetConversationId,
+                    )
+                    val updatedParent = boundParent.copy(config = newConfig)
+                    parentSession?.updateConversation(updatedParent)
+                    if (conversationRepo.existsConversationById(effectiveParentId)) {
+                        conversationRepo.updateConversationConfig(updatedParent)
+                    }
+                }
+            }
+        }
+
+        if (targetConv != null) {
+            conversationRepo.deleteConversation(targetConv)
+        }
+        sessionManager.get(targetConversationId)?.updateConversation(
+            Conversation.ofId(targetConversationId, newConversation = true)
+        )
+    }
+
+    private fun extractRecentToolSteps(conversation: Conversation): List<SubConversationStepSummary> {
+        val lastAssistant = conversation.currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
+            ?: return emptyList()
+        return lastAssistant.getTools().map { tool ->
+            SubConversationStepSummary(
+                toolName = tool.toolName,
+                inputPreview = tool.input.replace("\n", " ").take(120),
+                isExecuted = tool.isExecuted,
+            )
+        }
     }
 }

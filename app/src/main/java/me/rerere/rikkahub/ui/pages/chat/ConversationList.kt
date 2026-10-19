@@ -50,12 +50,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.itemKey
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.ConversationSortOrder
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.allChildConversationIds
+import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.ui.theme.extendColors
 import me.rerere.rikkahub.utils.mirrorForRtl
 import me.rerere.rikkahub.utils.toLocalString
+import org.koin.compose.koinInject
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlin.uuid.Uuid
@@ -90,6 +96,18 @@ fun ColumnScope.ConversationList(
     onMoveToFolder: (Conversation) -> Unit = {}
 ) {
     var hasScrolledToCurrent by remember(current.id) { mutableStateOf(false) }
+    val chatService: ChatService = koinInject()
+    val activeMainId = current.config?.parentConversationId ?: current.id
+    val activeMainFlow = remember(activeMainId) { chatService.getConversationFlow(activeMainId) }
+    val activeMainConv by activeMainFlow.collectAsStateWithLifecycle()
+    val currentChildIds = remember(current, activeMainConv) {
+        if (current.config?.parentConversationId != null) {
+            activeMainConv.allChildConversationIds + current.id
+        } else {
+            current.allChildConversationIds
+        }
+    }
+    var childrenExpanded by remember(activeMainId) { mutableStateOf(true) }
 
     LaunchedEffect(current.id, conversations.itemCount, hasScrolledToCurrent) {
         if (hasScrolledToCurrent) return@LaunchedEffect
@@ -155,18 +173,40 @@ fun ColumnScope.ConversationList(
                 }
 
                 is ConversationListItem.Item -> {
-                    ConversationItem(
-                        conversation = item.conversation,
-                        selected = item.conversation.id == current.id,
-                        loading = item.conversation.id in conversationJobs,
-                        onClick = onClick,
-                        onDelete = onDelete,
-                        onRegenerateTitle = onRegenerateTitle,
-                        onPin = onPin,
-                        onMoveToAssistant = onMoveToAssistant,
-                        onMoveToFolder = onMoveToFolder,
-                        modifier = Modifier.animateItem()
-                    )
+                    val isAttachedChild = item.conversation.id in currentChildIds && item.conversation.id != activeMainId
+                    if (!isAttachedChild) {
+                        val isCurrentMain = item.conversation.id == activeMainId
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ConversationItem(
+                                conversation = item.conversation,
+                                selected = item.conversation.id == current.id,
+                                loading = item.conversation.id in conversationJobs,
+                                childCount = if (isCurrentMain) currentChildIds.size else 0,
+                                childrenExpanded = childrenExpanded,
+                                onToggleChildren = { childrenExpanded = !childrenExpanded },
+                                onClick = onClick,
+                                onDelete = onDelete,
+                                onRegenerateTitle = onRegenerateTitle,
+                                onPin = onPin,
+                                onMoveToAssistant = onMoveToAssistant,
+                                onMoveToFolder = onMoveToFolder,
+                                modifier = Modifier.animateItem()
+                            )
+                            if (isCurrentMain && childrenExpanded && currentChildIds.isNotEmpty()) {
+                                currentChildIds.forEach { childId ->
+                                    val childFlow = remember(childId) { chatService.getConversationFlow(childId) }
+                                    val childConv by childFlow.collectAsStateWithLifecycle()
+                                    SubConversationTreeItem(
+                                        conversation = childConv,
+                                        selected = childId == current.id,
+                                        loading = childId in conversationJobs,
+                                        onClick = { onClick(childConv) },
+                                        onDelete = { onDelete(childConv) },
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 null -> {
@@ -226,11 +266,90 @@ private fun PinnedHeader(
 }
 
 @Composable
+private fun SubConversationTreeItem(
+    conversation: Conversation,
+    selected: Boolean = false,
+    loading: Boolean,
+    onClick: () -> Unit,
+    onDelete: (() -> Unit)? = null,
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp)
+                .clip(RoundedCornerShape(50f))
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { if (onDelete != null) showMenu = true },
+                )
+                .background(
+                    if (selected) {
+                        MaterialTheme.colorScheme.surfaceColorAtElevation(8.dp)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.6f)
+                    }
+                )
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = "├─ 🤖",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = conversation.title.trim().takeIf { it.isNotEmpty() && !it.startsWith("Sub-", ignoreCase = true) }
+                    ?: "子代理-${conversation.id.toString().take(4)}",
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            AnimatedVisibility(loading) {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(MaterialTheme.extendColors.green6)
+                        .size(5.dp)
+                )
+            }
+        }
+        if (onDelete != null) {
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = HugeIcons.Delete01,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    onClick = {
+                        showMenu = false
+                        onDelete()
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ConversationItem(
     conversation: Conversation,
     selected: Boolean,
     loading: Boolean,
     modifier: Modifier = Modifier,
+    childCount: Int = 0,
+    childrenExpanded: Boolean = true,
+    onToggleChildren: () -> Unit = {},
     onDelete: (Conversation) -> Unit = {},
     onRegenerateTitle: (Conversation) -> Unit = {},
     onPin: (Conversation) -> Unit = {},
@@ -272,9 +391,28 @@ private fun ConversationItem(
             Text(
                 text = conversation.title.ifBlank { stringResource(id = R.string.chat_page_new_message) },
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
             Spacer(Modifier.weight(1f))
+
+            if (childCount > 0) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier
+                        .padding(end = 4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .clickable { onToggleChildren() },
+                ) {
+                    Text(
+                        text = "${if (childrenExpanded) "▾" else "▸"} $childCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                    )
+                }
+            }
 
             // 置顶图标
             AnimatedVisibility(conversation.isPinned) {

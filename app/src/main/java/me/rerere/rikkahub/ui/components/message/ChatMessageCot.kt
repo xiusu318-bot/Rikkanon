@@ -10,19 +10,24 @@ import me.rerere.rikkahub.utils.JsonInstant
 internal const val CHART_DISPLAY_TOOL_NAME = "chart_display"
 
 /**
- * 思考步骤类型，用于分组 Reasoning、客户端 Tool 和 ServerTool
+ * 思考步骤类型，用于分组 Reasoning、客户端 Tool 和 ServerTool，保留在 UIMessage.parts 中的原始下标以支持单步 Roll
  */
 sealed interface ThinkingStep {
+    val partIndex: Int
+
     data class ReasoningStep(
         val reasoning: UIMessagePart.Reasoning,
+        override val partIndex: Int = 0,
     ) : ThinkingStep
 
     data class ToolStep(
         val tool: UIMessagePart.Tool,
+        override val partIndex: Int = 0,
     ) : ThinkingStep
 
     data class ServerToolStep(
         val tool: UIMessagePart.ServerTool,
+        override val partIndex: Int = 0,
     ) : ThinkingStep
 }
 
@@ -57,7 +62,7 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
     this.fastForEachIndexed { index, part ->
         when (part) {
             is UIMessagePart.Reasoning -> {
-                currentThinkingSteps.add(ThinkingStep.ReasoningStep(part))
+                currentThinkingSteps.add(ThinkingStep.ReasoningStep(part, index))
             }
 
             is UIMessagePart.Tool -> {
@@ -65,12 +70,12 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
                     flushThinkingSteps()
                     result.add(MessagePartBlock.ChartBlock(part, index))
                 } else {
-                    currentThinkingSteps.add(ThinkingStep.ToolStep(part))
+                    currentThinkingSteps.add(ThinkingStep.ToolStep(part, index))
                 }
             }
 
             is UIMessagePart.ServerTool -> {
-                currentThinkingSteps.add(ThinkingStep.ServerToolStep(part))
+                currentThinkingSteps.add(ThinkingStep.ServerToolStep(part, index))
             }
 
             else -> {
