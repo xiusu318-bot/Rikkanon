@@ -6,17 +6,21 @@ plugins {
 android {
     namespace = "me.rerere.workspace"
 
-    defaultConfig {
-        externalNativeBuild {
-            cmake {
-                cppFlags += ""
+    val hasPrebuiltJni = file("src/main/jniLibs/arm64-v8a/libworkspace.so").exists() &&
+        file("src/main/jniLibs/arm64-v8a/libtermux.so").exists()
+    if (!hasPrebuiltJni) {
+        defaultConfig {
+            externalNativeBuild {
+                cmake {
+                    cppFlags += ""
+                }
             }
         }
-    }
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 }

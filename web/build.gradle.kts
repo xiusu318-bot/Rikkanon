@@ -42,7 +42,9 @@ android {
 }
 
 tasks.named("preBuild") {
-    dependsOn(buildWebUi)
+    if (!webStaticResourcesDir.file("index.html").asFile.exists()) {
+        dependsOn(buildWebUi)
+    }
 }
 
 dependencies {

@@ -16,7 +16,11 @@ class RootfsPatcher {
         ensureHostname(etcDir, options.hostname)
         ensureLocale(etcDir, options.locale)
         ensureGroupNames(etcDir, options.groupIds.ifEmpty { currentSupplementaryGroupIds() })
-        ensureTempDirs(linuxDir)
+        ensureTempAndShmDirs(linuxDir)
+        ensureFakeProcFiles(linuxDir)
+        ensureDpkgAndAptSandboxFixes(linuxDir)
+        ensureVpsCommandShims(linuxDir)
+        ensureVpsRuntimeProfile(linuxDir)
     }
 
     private fun ensureRootfsDns(
@@ -138,11 +142,18 @@ class RootfsPatcher {
         )
     }
 
-    private fun ensureTempDirs(linuxDir: File) {
-        listOf("tmp", "var/tmp", "root").forEach { path ->
+    private fun ensureTempAndShmDirs(linuxDir: File) {
+        listOf("tmp", "var/tmp", "root", "dev/shm", "run", "run/shm", "run/lock").forEach { path ->
             File(linuxDir, path).mkdirs()
         }
-        listOf(File(linuxDir, "tmp"), File(linuxDir, "var/tmp")).forEach { dir ->
+        listOf(
+            File(linuxDir, "tmp"),
+            File(linuxDir, "var/tmp"),
+            File(linuxDir, "dev/shm"),
+            File(linuxDir, "run"),
+            File(linuxDir, "run/shm"),
+            File(linuxDir, "run/lock"),
+        ).forEach { dir ->
             dir.setReadable(true, false)
             dir.setWritable(true, false)
             dir.setExecutable(true, false)
@@ -151,6 +162,294 @@ class RootfsPatcher {
             setReadable(true, true)
             setWritable(true, true)
             setExecutable(true, true)
+        }
+    }
+
+    /**
+     * 为 Android 8+ 无权限读取的 `/proc/stat`、`/proc/loadavg`、`/proc/uptime`、`/proc/vmstat` 生成兜底节点，
+     * 防止 `htop`、`top`、`free`、`uptime`、`psutil`、`pm2` 等因 `EACCES` 崩溃退出。
+     */
+    private fun ensureFakeProcFiles(linuxDir: File) {
+        val fakeProcDir = File(linuxDir, FAKE_PROC_REL_DIR).apply { mkdirs() }
+        val cpus = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+
+        val statFile = File(fakeProcDir, "stat")
+        if (!statFile.exists()) {
+            statFile.writeText(
+                buildString {
+                    appendLine("cpu  12000 400 4000 240000 200 0 100 0 0 0")
+                    for (i in 0 until cpus) {
+                        appendLine("cpu$i 1500 50 500 30000 25 0 12 0 0 0")
+                    }
+                    appendLine("intr 100000 0")
+                    appendLine("ctxt 250000")
+                    appendLine("btime ${System.currentTimeMillis() / 1000 - 3600}")
+                    appendLine("processes 1024")
+                    appendLine("procs_running 1")
+                    appendLine("procs_blocked 0")
+                }
+            )
+        }
+
+        val loadavgFile = File(fakeProcDir, "loadavg")
+        if (!loadavgFile.exists()) {
+            loadavgFile.writeText("0.15 0.12 0.08 1/128 1024\n")
+        }
+
+        val uptimeFile = File(fakeProcDir, "uptime")
+        if (!uptimeFile.exists()) {
+            uptimeFile.writeText("3600.00 ${(3600 * cpus)}.00\n")
+        }
+
+        val vmstatFile = File(fakeProcDir, "vmstat")
+        if (!vmstatFile.exists()) {
+            vmstatFile.writeText(
+                """
+                nr_free_pages 262144
+                nr_inactive_anon 32768
+                nr_active_anon 65536
+                nr_inactive_file 131072
+                nr_active_file 131072
+                pgpgin 102400
+                pgpgout 51200
+                pswpin 0
+                pswpout 0
+                pgfault 204800
+                """.trimIndent() + "\n"
+            )
+        }
+    }
+
+    /**
+     * 修复 Debian/Ubuntu `apt` / `dpkg` 在 PRoot 下的三大崩溃点：
+     * 1. `/usr/sbin/policy-rc.d` 返回 101，阻止 `apt install` 时自动调用 init 启动服务导致卡死报错；
+     * 2. `/etc/apt/apt.conf.d/99rikkahub-vps` 强制 `APT::Sandbox::User "root"` 并自动清理下载完的 `.deb` 缓存防止工作区体积膨胀；
+     */
+    private fun ensureDpkgAndAptSandboxFixes(linuxDir: File) {
+        val usrSbin = File(linuxDir, "usr/sbin").apply { mkdirs() }
+        val policyRc = File(usrSbin, "policy-rc.d")
+        if (!policyRc.exists()) {
+            policyRc.writeText("#!/bin/sh\nexit 101\n")
+            policyRc.setExecutable(true, false)
+            policyRc.setReadable(true, false)
+        }
+
+        val aptConfDir = File(linuxDir, "etc/apt/apt.conf.d")
+        if (aptConfDir.isDirectory || File(linuxDir, "etc/apt").isDirectory) {
+            aptConfDir.mkdirs()
+            val aptConf = File(aptConfDir, "99rikkahub-vps")
+            if (!aptConf.exists()) {
+                aptConf.writeText(
+                    """
+                    APT::Sandbox::User "root";
+                    Acquire::Retries "3";
+                    DPkg::Post-Invoke { "rm -f /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb 2>/dev/null || true"; };
+                    """.trimIndent() + "\n"
+                )
+            }
+        }
+    }
+
+    /**
+     * 注入轻量级命令兼容垫片（位于 `/usr/local/sbin`，优先级高于 `/usr/sbin` 和 `/bin`）：
+     * 1. `setcap`：当 Android 目录不支持写安全扩展属性 (`security.capability`) 时忽略错误返回 0，防止 `iputils-ping` 等包安装失败锁死 `dpkg`；
+     * 2. `systemctl`：当 systemd 非 PID 1 时，自动解析 `/etc/init.d/<name>` 或 `/lib/systemd/system/<name>.service` 并在后台启动/停止服务；
+     * 3. `ip`：当 Android 11+ SELinux 拦截 Netlink `RTM_GETLINK` 导致 `ip addr` 报 `Permission denied` 时，提供兜底网卡输出。
+     */
+    private fun ensureVpsCommandShims(linuxDir: File) {
+        val localSbin = File(linuxDir, "usr/local/sbin").apply { mkdirs() }
+
+        // 1. setcap wrapper
+        val setcapWrapper = File(localSbin, "setcap")
+        if (!setcapWrapper.exists()) {
+            setcapWrapper.writeText(
+                """
+                #!/bin/sh
+                for real_bin in /sbin/setcap /usr/sbin/setcap /bin/setcap /usr/bin/setcap; do
+                    if [ -x "${'$'}real_bin" ]; then
+                        "${'$'}real_bin" "${'$'}@" 2>/dev/null || true
+                        exit 0
+                    fi
+                done
+                exit 0
+                """.trimIndent() + "\n"
+            )
+            setcapWrapper.setExecutable(true, false)
+            setcapWrapper.setReadable(true, false)
+        }
+
+        // 2. systemctl lightweight shim
+        val systemctlShim = File(localSbin, "systemctl")
+        if (!systemctlShim.exists()) {
+            systemctlShim.writeText(
+                """
+                #!/bin/sh
+                cmd=""
+                unit=""
+                for arg in "${'$'}@"; do
+                    case "${'$'}arg" in
+                        -*) ;;
+                        start|stop|restart|reload|status|enable|disable|is-active|daemon-reload)
+                            if [ -z "${'$'}cmd" ]; then cmd="${'$'}arg"; else unit="${'$'}arg"; fi
+                            ;;
+                        *)
+                            if [ -z "${'$'}cmd" ]; then cmd="${'$'}arg"; elif [ -z "${'$'}unit" ]; then unit="${'$'}arg"; fi
+                            ;;
+                    esac
+                done
+                unit_name="${'$'}{unit%.service}"
+                case "${'$'}cmd" in
+                    daemon-reload|enable|disable)
+                        exit 0
+                        ;;
+                    start|restart|reload)
+                        if [ -n "${'$'}unit_name" ] && [ -x "/etc/init.d/${'$'}unit_name" ]; then
+                            "/etc/init.d/${'$'}unit_name" "${'$'}cmd"
+                            exit ${'$'}?
+                        fi
+                        for svc_file in "/etc/systemd/system/${'$'}{unit_name}.service" "/lib/systemd/system/${'$'}{unit_name}.service" "/usr/lib/systemd/system/${'$'}{unit_name}.service"; do
+                            if [ -f "${'$'}svc_file" ]; then
+                                exec_line=${'$'}(grep -m1 '^ExecStart=' "${'$'}svc_file" | sed 's/^ExecStart=//;s/^[@+-]*//')
+                                if [ -n "${'$'}exec_line" ]; then
+                                    nohup sh -c "${'$'}exec_line" >/var/log/"${'$'}{unit_name}.log" 2>&1 &
+                                    echo ${'$'}! > "/run/${'$'}{unit_name}.pid"
+                                    exit 0
+                                fi
+                            fi
+                        done
+                        exit 0
+                        ;;
+                    stop)
+                        if [ -n "${'$'}unit_name" ] && [ -x "/etc/init.d/${'$'}unit_name" ]; then
+                            "/etc/init.d/${'$'}unit_name" stop
+                            exit ${'$'}?
+                        fi
+                        if [ -f "/run/${'$'}{unit_name}.pid" ]; then
+                            kill "${'$'}(cat "/run/${'$'}{unit_name}.pid")" 2>/dev/null || true
+                            rm -f "/run/${'$'}{unit_name}.pid"
+                        fi
+                        exit 0
+                        ;;
+                    status|is-active)
+                        if [ -n "${'$'}unit_name" ] && [ -x "/etc/init.d/${'$'}unit_name" ]; then
+                            "/etc/init.d/${'$'}unit_name" status
+                            exit ${'$'}?
+                        fi
+                        if [ -f "/run/${'$'}{unit_name}.pid" ] && kill -0 "${'$'}(cat "/run/${'$'}{unit_name}.pid")" 2>/dev/null; then
+                            echo "active (running)"
+                            exit 0
+                        fi
+                        echo "inactive (dead)"
+                        exit 0
+                        ;;
+                    *)
+                        exit 0
+                        ;;
+                esac
+                """.trimIndent() + "\n"
+            )
+            systemctlShim.setExecutable(true, false)
+            systemctlShim.setReadable(true, false)
+        }
+
+        // 3. ip command fallback shim for Android 11+ netlink EACCES
+        val ipShim = File(localSbin, "ip")
+        if (!ipShim.exists()) {
+            ipShim.writeText(
+                """
+                #!/bin/sh
+                for real_ip in /sbin/ip /bin/ip /usr/sbin/ip /usr/bin/ip; do
+                    if [ -x "${'$'}real_ip" ]; then
+                        out=${'$'}("${'$'}real_ip" "${'$'}@" 2>&1)
+                        rc=${'$'}?
+                        if [ ${'$'}rc -eq 0 ]; then
+                            printf '%s\n' "${'$'}out"
+                            exit 0
+                        fi
+                        case "${'$'}out" in
+                            *"Permission denied"*|*"Cannot open netlink socket"*)
+                                break
+                                ;;
+                            *)
+                                printf '%s\n' "${'$'}out" >&2
+                                exit ${'$'}rc
+                                ;;
+                        esac
+                    fi
+                done
+                case "${'$'}1" in
+                    a*|addr*|link*)
+                        echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN qlen 1000"
+                        echo "    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00"
+                        echo "    inet 127.0.0.1/8 scope host lo"
+                        echo "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP qlen 1000"
+                        echo "    link/ether 02:42:ac:11:00:02 brd ff:ff:ff:ff:ff:ff"
+                        echo "    inet 10.0.2.15/24 brd 10.0.2.255 scope global eth0"
+                        exit 0
+                        ;;
+                    r*|route*)
+                        echo "default via 10.0.2.2 dev eth0"
+                        echo "10.0.2.0/24 dev eth0 proto kernel scope link src 10.0.2.15"
+                        exit 0
+                        ;;
+                    *)
+                        exit 0
+                        ;;
+                esac
+                """.trimIndent() + "\n"
+            )
+            ipShim.setExecutable(true, false)
+            ipShim.setReadable(true, false)
+        }
+    }
+
+    /**
+     * 注入 Node.js 网卡 EACCES 保护垫片与全局环境变量（JVM 免崩、Chromium/Electron 免沙箱）：
+     */
+    private fun ensureVpsRuntimeProfile(linuxDir: File) {
+        val nodePreload = File(linuxDir, "etc/rikkahub-node-preload.js")
+        if (!nodePreload.exists()) {
+            nodePreload.writeText(
+                """
+                // Prevent Android 11+ SELinux netlink EACCES from crashing Node.js / Vite / Next.js / Webpack
+                try {
+                  const os = require('os');
+                  const orig = os.networkInterfaces;
+                  os.networkInterfaces = function () {
+                    try {
+                      const res = orig.call(os);
+                      if (res && Object.keys(res).length > 0) return res;
+                    } catch (_) {}
+                    return {
+                      lo: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: true, cidr: '127.0.0.1/8' }],
+                      eth0: [{ address: '10.0.2.15', netmask: '255.255.255.0', family: 'IPv4', mac: '02:42:ac:11:00:02', internal: false, cidr: '10.0.2.15/24' }]
+                    };
+                  };
+                } catch (_) {}
+                """.trimIndent() + "\n"
+            )
+            nodePreload.setReadable(true, false)
+        }
+
+        val profileDir = File(linuxDir, "etc/profile.d").apply { mkdirs() }
+        val vpsProfile = File(profileDir, "rikkahub-vps.sh")
+        if (!vpsProfile.exists()) {
+            vpsProfile.writeText(
+                """
+                export JAVA_TOOL_OPTIONS="${'$'}{JAVA_TOOL_OPTIONS:--XX:-UseCompressedOops -XX:-UseCompressedClassPointers}"
+                if [ -f /etc/rikkahub-node-preload.js ]; then
+                    case "${'$'}NODE_OPTIONS" in
+                        *rikkahub-node-preload.js*) ;;
+                        *) export NODE_OPTIONS="${'$'}{NODE_OPTIONS:+${'$'}NODE_OPTIONS }--require /etc/rikkahub-node-preload.js" ;;
+                    esac
+                fi
+                export ELECTRON_DISABLE_SANDBOX=1
+                export MOZ_FAKE_NO_SANDBOX=1
+                export CHROMIUM_FLAGS="${'$'}{CHROMIUM_FLAGS:---no-sandbox --disable-dev-shm-usage}"
+                export PUPPETEER_ARGS="--no-sandbox --disable-setuid-sandbox"
+                """.trimIndent() + "\n"
+            )
+            vpsProfile.setReadable(true, false)
         }
     }
 
@@ -165,9 +464,11 @@ class RootfsPatcher {
             .mapNotNull { it.toLongOrNull() }
     }
 
-    private companion object {
+    companion object {
         private const val MAX_DNS_SERVERS = 3
         private const val DEFAULT_HOSTNAME = "localhost"
+        const val FAKE_PROC_REL_DIR = "run/rikkahub-proc"
+        val FAKE_PROC_FILES = listOf("stat", "loadavg", "uptime", "vmstat")
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val LOCAL_RESOLVERS = setOf(
             "127.0.0.1",

@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -41,6 +44,8 @@ import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
+import me.rerere.rikkahub.data.datastore.redactSecretKeyValues
+import me.rerere.rikkahub.data.datastore.replaceSecretKeyAliases
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.MemoryFile
 import java.io.File
@@ -89,6 +94,8 @@ class GenerationLoop(
         conversationSystemPrompt: String? = null,
         conversationId: Uuid? = null,
         workspaceCwd: String? = null,
+        autoApproveTools: Boolean = false,
+        pollQueuedUserMessages: (suspend () -> List<UIMessage>)? = null,
     ): Flow<GenerationChunk> = flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = providerManager.getProviderByType(provider)
@@ -165,23 +172,31 @@ class GenerationLoop(
 
                 val toolCalls = messages.last().getTools().filter { !it.isExecuted }
                 if (toolCalls.isEmpty()) {
+                    // Before breaking, check if user sent any steering messages while streaming
+                    val steered = pollQueuedUserMessages?.invoke().orEmpty()
+                    if (steered.isNotEmpty()) {
+                        messages = messages + steered
+                        emit(GenerationChunk.Messages(messages))
+                        continue
+                    }
                     // no tool calls, break
                     break
                 }
 
-                // Check for tools that need approval
+                // Check for tools that need approval (bypass if autoApproveTools is enabled on sub-conversations,
+                // except interactive HITL tools like ask_user / ask_key which always require user input)
                 var hasPendingApproval = false
                 val updatedTools = toolCalls.map { tool ->
                     val toolDef = tools.find { it.name == tool.toolName }
+                    val isInteractiveHitl = tool.toolName == "ask_user" || tool.toolName == "ask_key"
                     when {
-                        // Tool needs approval and state is Auto -> set to Pending
-                        toolDef?.needsApproval(tool.inputAsJson()) == true &&
+                        (isInteractiveHitl || !autoApproveTools) &&
+                            toolDef?.needsApproval(tool.inputAsJson()) == true &&
                             tool.approvalState is ToolApprovalState.Auto -> {
                             hasPendingApproval = true
                             tool.copy(approvalState = ToolApprovalState.Pending)
                         }
-                        // State is Pending -> keep waiting
-                        tool.approvalState is ToolApprovalState.Pending -> {
+                        (isInteractiveHitl || !autoApproveTools) && tool.approvalState is ToolApprovalState.Pending -> {
                             hasPendingApproval = true
                             tool
                         }
@@ -217,83 +232,91 @@ class GenerationLoop(
                 toolsToProcess = messages.last().getTools().filter { it.canResumeExecution }
             }
 
-            // Handle tools (execute approved tools, handle denied tools)
-            val executedTools = arrayListOf<UIMessagePart.Tool>()
-            toolsToProcess.forEach { tool ->
-                when (tool.approvalState) {
-                    is ToolApprovalState.Denied -> {
-                        // Tool was denied by user
-                        val reason = (tool.approvalState as ToolApprovalState.Denied).reason
-                        executedTools += tool.copy(
-                            output = listOf(
-                                UIMessagePart.Text(
-                                    json.encodeToString(
-                                        buildJsonObject {
-                                            put(
-                                                "error",
-                                                JsonPrimitive("Tool execution denied by user. Reason: ${reason.ifBlank { "No reason provided" }}")
+            // Handle tools concurrently (supports parallel sub-agents & parallel workspace tools)
+            val executedTools = coroutineScope {
+                toolsToProcess.map { tool ->
+                    async {
+                        when (tool.approvalState) {
+                            is ToolApprovalState.Denied -> {
+                                val reason = (tool.approvalState as ToolApprovalState.Denied).reason
+                                tool.copy(
+                                    output = listOf(
+                                        UIMessagePart.Text(
+                                            json.encodeToString(
+                                                buildJsonObject {
+                                                    put(
+                                                        "error",
+                                                        JsonPrimitive("Tool execution denied by user. Reason: ${reason.ifBlank { "No reason provided" }}")
+                                                    )
+                                                }
                                             )
-                                        }
-                                    )
-                                )
-                            )
-                        )
-                    }
-
-                    is ToolApprovalState.Answered -> {
-                        // Tool was answered by user (e.g., ask_user tool)
-                        val answer = (tool.approvalState as ToolApprovalState.Answered).answer
-                        executedTools += tool.copy(
-                            output = listOf(
-                                UIMessagePart.Text(answer)
-                            )
-                        )
-                    }
-
-                    is ToolApprovalState.Pending -> {
-                        // Should not reach here, but just in case
-                    }
-
-                    else -> {
-                        // Auto or Approved - execute the tool
-                        runCatching {
-                            val toolDef = tools.find { toolDef -> toolDef.name == tool.toolName }
-                                ?: error("Tool ${tool.toolName} not found")
-                            val args = runCatching {
-                                json.parseToJsonElement(tool.input.ifBlank { "{}" })
-                            }.getOrElse {
-                                error("Invalid tool arguments JSON for ${tool.toolName}: ${it.message}")
-                            }
-                            Log.i(TAG, "generateText: executing tool ${toolDef.name} with args: $args")
-                            val result = toolDef.execute(args)
-                            val hasShellAccess = tools.any { it.name == "workspace_shell" }
-                            executedTools += tool.copy(
-                                output = maybeTruncateToolOutput(tool, result, hasShellAccess)
-                            )
-                        }.onFailure {
-                            // 取消必须向上传播，否则停止生成会被误报为工具执行错误
-                            if (it is CancellationException) throw it
-                            it.printStackTrace()
-                            executedTools += tool.copy(
-                                output = listOf(
-                                    UIMessagePart.Text(
-                                        json.encodeToString(
-                                            buildJsonObject {
-                                                put(
-                                                    "error",
-                                                    JsonPrimitive(buildString {
-                                                        append("[${it.javaClass.name}] ${it.message}")
-                                                        append("\n${it.stackTraceToString()}")
-                                                    })
-                                                )
-                                            }
                                         )
                                     )
                                 )
-                            )
+                            }
+
+                            is ToolApprovalState.Answered -> {
+                                val answer = (tool.approvalState as ToolApprovalState.Answered).answer
+                                tool.copy(
+                                    output = listOf(
+                                        UIMessagePart.Text(answer)
+                                    )
+                                )
+                            }
+
+                            is ToolApprovalState.Pending -> null
+
+                            else -> {
+                                runCatching {
+                                    val toolDef = tools.find { toolDef -> toolDef.name == tool.toolName }
+                                        ?: error("Tool ${tool.toolName} not found")
+                                    val rawArgs = runCatching {
+                                        json.parseToJsonElement(tool.input.ifBlank { "{}" })
+                                    }.getOrElse {
+                                        error("Invalid tool arguments JSON for ${tool.toolName}: ${it.message}")
+                                    }
+                                    val useSecretAlias = settings.enableSecretKeyAlias
+                                    val args = rawArgs.replaceSecretKeyAliases(settings, useSecretAlias)
+                                    Log.i(TAG, "generateText: executing tool ${toolDef.name}")
+                                    val rawResult = toolDef.execute(args)
+                                    val result = if (useSecretAlias) {
+                                        rawResult.map { part ->
+                                            if (part is UIMessagePart.Text) {
+                                                part.copy(text = settings.redactSecretKeyValues(part.text, true))
+                                            } else part
+                                        }
+                                    } else {
+                                        rawResult
+                                    }
+                                    val hasShellAccess = tools.any { it.name == "workspace_shell" || it.name == "workspace_terminal" }
+                                    tool.copy(
+                                        output = maybeTruncateToolOutput(tool, result, hasShellAccess)
+                                    )
+                                }.getOrElse {
+                                    if (it is CancellationException) throw it
+                                    it.printStackTrace()
+                                    tool.copy(
+                                        output = listOf(
+                                            UIMessagePart.Text(
+                                                json.encodeToString(
+                                                    buildJsonObject {
+                                                        put(
+                                                            "error",
+                                                            JsonPrimitive(buildString {
+                                                                append("[${it.javaClass.name}] ${it.message}")
+                                                                append("\n${it.stackTraceToString()}")
+                                                            })
+                                                        )
+                                                    }
+                                                )
+                                            )
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
-                }
+                }.awaitAll().filterNotNull()
             }
 
             if (executedTools.isEmpty()) {
@@ -309,17 +332,24 @@ class GenerationLoop(
                 } else part
             }
             messages = messages.dropLast(1) + lastMessage.copy(parts = updatedParts)
-            emit(
-                GenerationChunk.Messages(
-                    messages.transforms(
-                        transformers = outputTransformers,
-                        context = context,
-                        model = model,
-                        assistant = assistant,
-                        settings = settings
-                    )
-                )
+            messages = messages.transforms(
+                transformers = outputTransformers,
+                context = context,
+                model = model,
+                assistant = assistant,
+                settings = settings
             )
+
+            // Mid-turn user message steering: if the user sent a message during tool execution,
+            // append it right after the completed tool step so the next LLM turn responds to it immediately
+            // and starts a fresh assistant message block.
+            val steeredMessages = pollQueuedUserMessages?.invoke().orEmpty()
+            if (steeredMessages.isNotEmpty()) {
+                Log.i(TAG, "generateText: injecting ${steeredMessages.size} mid-turn steered user message(s)")
+                messages = messages + steeredMessages
+            }
+
+            emit(GenerationChunk.Messages(messages))
         }
 
     }.flowOn(Dispatchers.IO)
@@ -356,7 +386,7 @@ class GenerationLoop(
                 // 记忆
                 if (assistant.enableMemory) {
                     appendLine()
-                    append(buildMemoryPrompt(memories))
+                    append(buildMemoryPrompt(memories, autoConsolidate = assistant.enableAutoMemoryConsolidation))
                 }
                 // 工具prompt
                 tools.forEach { tool ->

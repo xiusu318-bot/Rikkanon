@@ -31,11 +31,13 @@ import me.rerere.hugeicons.stroke.ChartLineData01
 import me.rerere.hugeicons.stroke.ClipboardPaste
 import me.rerere.hugeicons.stroke.Clock01
 import me.rerere.hugeicons.stroke.JavaScript
+import me.rerere.hugeicons.stroke.Key01
 import me.rerere.hugeicons.stroke.MessageQuestion
 import me.rerere.hugeicons.stroke.SmartPhone01
 import me.rerere.hugeicons.stroke.VolumeHigh
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
+import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
@@ -60,6 +62,7 @@ fun AssistantLocalToolPage(id: String) {
         }
     )
     val assistant by vm.assistant.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     Scaffold(
@@ -81,7 +84,8 @@ fun AssistantLocalToolPage(id: String) {
         AssistantLocalToolContent(
             innerPadding = innerPadding,
             assistant = assistant,
-            onUpdate = { vm.update(it) }
+            settings = settings,
+            onUpdate = { vm.update(it) },
         )
     }
 }
@@ -90,7 +94,8 @@ fun AssistantLocalToolPage(id: String) {
 private fun AssistantLocalToolContent(
     innerPadding: PaddingValues,
     assistant: Assistant,
-    onUpdate: (Assistant) -> Unit
+    settings: Settings,
+    onUpdate: (Assistant) -> Unit,
 ) {
     val context = LocalContext.current
     val toaster = LocalToaster.current
@@ -204,6 +209,42 @@ private fun AssistantLocalToolContent(
                 title = R.string.assistant_page_local_tools_ask_user_title,
                 description = R.string.assistant_page_local_tools_ask_user_desc,
             )
+            if (settings.enableSecretKeyAlias) {
+                val askKeyChecked = assistant.localTools.contains(LocalToolOption.AskKey) || assistant.enableAskKeyTool
+                switchItem(
+                    checked = askKeyChecked,
+                    onCheckedChange = { enabled ->
+                        val newLocalTools = if (enabled) {
+                            (assistant.localTools + LocalToolOption.AskKey).distinct()
+                        } else {
+                            assistant.localTools - LocalToolOption.AskKey
+                        }
+                        onUpdate(
+                            assistant.copy(
+                                localTools = newLocalTools,
+                                enableAskKeyTool = enabled,
+                            )
+                        )
+                    },
+                    leadingContent = {
+                        CardGroupIcon(
+                            icon = HugeIcons.Key01,
+                            containerColor = if (askKeyChecked) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.surfaceContainerHigh
+                            },
+                            contentColor = if (askKeyChecked) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    },
+                    headlineContent = { Text("询问密钥") },
+                    supportingContent = { Text("告知模型已有密钥名称，并允许模型询问或新建密钥") },
+                )
+            }
             toolItem(
                 option = LocalToolOption.ScreenTime,
                 icon = HugeIcons.SmartPhone01,

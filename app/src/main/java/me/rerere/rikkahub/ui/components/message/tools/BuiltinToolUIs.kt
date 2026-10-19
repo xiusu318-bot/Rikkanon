@@ -403,7 +403,9 @@ object RecentChatsToolUI : ToolUIRenderer {
         stringResource(R.string.chat_message_tool_recent_chats)
 
     private fun chats(context: ToolUIContext): List<JsonElement> =
-        (context.content as? JsonArray) ?: emptyList()
+        (context.content as? JsonArray)
+            ?: (context.content?.jsonObjectOrNull?.get("conversations") as? JsonArray)
+            ?: emptyList()
 
     override fun hasSummary(context: ToolUIContext): Boolean = chats(context).isNotEmpty()
 
@@ -450,6 +452,110 @@ object ConversationSearchToolUI : ToolUIRenderer {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
         )
+    }
+}
+
+/**
+ * 子代理派发/沟通 (`conversation_send`): 标题展示子对话名称与指令摘要, 展开显示运行状态与回复预览
+ */
+object ConversationSendToolUI : ToolUIRenderer {
+    override val toolName: String = "conversation_send"
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.Message02
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val title = context.arguments.getStringContent("title")
+            ?: context.content.getStringContent("title")
+            ?: context.arguments.getStringContent("conversation_id")?.take(8)
+            ?: "子代理"
+        val msg = context.arguments.getStringContent("message")?.replace("\n", " ")?.trim().orEmpty()
+        val preview = if (msg.length > 32) msg.take(32) + "…" else msg
+        return "子代理 [$title]: $preview"
+    }
+
+    override fun hasSummary(context: ToolUIContext): Boolean = context.content != null
+
+    @Composable
+    override fun Summary(context: ToolUIContext) {
+        val content = context.content ?: return
+        val status = content.getStringContent("status") ?: "completed"
+        val assistantName = content.getStringContent("assistant_name")
+        val modelName = content.getStringContent("model")
+        val reply = content.getStringContent("reply")
+        val stepsCount = content.jsonObjectOrNull?.get("tool_steps")?.let { it as? JsonArray }?.size ?: 0
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = buildString {
+                    append(if (status == "running") "🟢 后台运行中" else "✅ 已完成")
+                    if (!assistantName.isNullOrBlank()) {
+                        append(" · $assistantName")
+                        if (!modelName.isNullOrBlank()) append(" ($modelName)")
+                    }
+                    if (stepsCount > 0) append(" · $stepsCount 步工具调用")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (status == "running") MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+            )
+            if (!reply.isNullOrBlank()) {
+                Text(
+                    text = reply.lineSequence().take(4).joinToString("\n"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 子代理状态/内容查看 (`conversation_read`)
+ */
+object ConversationReadToolUI : ToolUIRenderer {
+    override val toolName: String = "conversation_read"
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.Message02
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val title = context.content.getStringContent("title")
+            ?: context.arguments.getStringContent("conversation_id")?.take(8)
+            ?: "子代理"
+        return "查看子代理 [$title]"
+    }
+
+    override fun hasSummary(context: ToolUIContext): Boolean = context.content != null
+
+    @Composable
+    override fun Summary(context: ToolUIContext) {
+        val content = context.content ?: return
+        val status = content.getStringContent("status") ?: "idle"
+        val procStatus = content.getStringContent("processing_status")
+        Text(
+            text = buildString {
+                append("状态: $status")
+                if (!procStatus.isNullOrBlank()) append(" ($procStatus)")
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+        )
+    }
+}
+
+/**
+ * 停止子代理 (`conversation_stop`)
+ */
+object ConversationStopToolUI : ToolUIRenderer {
+    override val toolName: String = "conversation_stop"
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.Message02
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val id = context.arguments.getStringContent("conversation_id")?.take(8) ?: ""
+        return "停止子代理 ($id)"
     }
 }
 

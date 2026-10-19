@@ -11,3 +11,9 @@ local.properties
 .cursor
 .history
 .kotlin
+*.apk
+*.idsig
+*.patch
+app/rikkanon.jks
+workspace/src/main/jniLibs/*/libtermux.so
+workspace/src/main/jniLibs/*/libworkspace.so

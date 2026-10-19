@@ -102,6 +102,7 @@ import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.Wrench01
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.ai.tools.resolveWorkspaceToolApproval
+import me.rerere.rikkahub.data.ai.tools.resolveWorkspaceToolEnabled
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import androidx.compose.ui.res.stringResource
 import me.rerere.rikkahub.R
@@ -249,6 +250,7 @@ fun WorkspaceDetailPage(id: String) {
                         workspace = state.workspace,
                         installProgress = installProgress,
                         onInstallRootfs = { showInstallDialog = true },
+                        onToolEnabledChange = vm::setToolEnabled,
                         onToolApprovalChange = vm::setToolApproval,
                         onShellCompatibilityModeChange = vm::setShellCompatibilityMode,
                     )
@@ -407,6 +409,7 @@ private fun WorkspaceBasicPage(
     workspace: WorkspaceEntity?,
     installProgress: RootfsInstallProgress?,
     onInstallRootfs: () -> Unit,
+    onToolEnabledChange: (String, Boolean) -> Unit,
     onToolApprovalChange: (String, Boolean) -> Unit,
     onShellCompatibilityModeChange: (Boolean) -> Unit,
 ) {
@@ -481,6 +484,13 @@ private fun WorkspaceBasicPage(
         }
 
         item {
+            WorkspaceToolEnabledCard(
+                workspace = workspace,
+                onToolEnabledChange = onToolEnabledChange,
+            )
+        }
+
+        item {
             WorkspaceToolApprovalCard(
                 workspace = workspace,
                 onToolApprovalChange = onToolApprovalChange,
@@ -513,11 +523,59 @@ private fun ShellStatusBadge(status: String?) {
 }
 
 @Composable
+private fun WorkspaceToolEnabledCard(
+    workspace: WorkspaceEntity?,
+    onToolEnabledChange: (String, Boolean) -> Unit,
+) {
+    val enabledOverrides = workspace?.toolEnabledOverrides().orEmpty()
+    val tools = workspaceToolApprovalItems()
+
+    CardGroup(
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("工具启用")
+                Text(
+                    text = "控制 AI 在此工作区可调用哪些工具；关闭后将不再向模型暴露该工具",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    ) {
+        tools.forEach { (toolName, label, icon) ->
+            val isEnabled = resolveWorkspaceToolEnabled(toolName, enabledOverrides)
+            switchItem(
+                checked = isEnabled,
+                onCheckedChange = { onToolEnabledChange(toolName, it) },
+                enabled = workspace != null,
+                leadingContent = {
+                    CardGroupIcon(
+                        icon = icon,
+                        containerColor = if (isEnabled) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                        contentColor = if (isEnabled) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                },
+                headlineContent = { Text(label) },
+            )
+        }
+    }
+}
+
+@Composable
 private fun WorkspaceToolApprovalCard(
     workspace: WorkspaceEntity?,
     onToolApprovalChange: (String, Boolean) -> Unit,
 ) {
     val overrides = workspace?.toolApprovalOverrides().orEmpty()
+    val enabledOverrides = workspace?.toolEnabledOverrides().orEmpty()
     val tools = workspaceToolApprovalItems()
 
     CardGroup(
@@ -533,17 +591,20 @@ private fun WorkspaceToolApprovalCard(
         },
     ) {
         tools.forEach { (toolName, label, icon) ->
+            val toolEnabled = resolveWorkspaceToolEnabled(toolName, enabledOverrides)
             switchItem(
                 checked = resolveWorkspaceToolApproval(toolName, overrides),
                 onCheckedChange = { onToolApprovalChange(toolName, it) },
-                enabled = workspace != null,
-                supportingContent = {
-                    Text(
-                        text = toolName,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
+                enabled = workspace != null && toolEnabled,
+                supportingContent = if (!toolEnabled) {
+                    {
+                        Text(
+                            text = "已禁用该工具",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                } else null,
                 leadingContent = { CardGroupIcon(icon) },
                 headlineContent = { Text(label) },
             )
@@ -557,6 +618,7 @@ private fun workspaceToolApprovalItems() = listOf(
     Triple("workspace_write_file", stringResource(R.string.workspace_detail_tool_write_file), HugeIcons.PencilEdit01),
     Triple("workspace_edit_file", stringResource(R.string.workspace_detail_tool_edit_file), HugeIcons.FileEdit),
     Triple("workspace_shell", stringResource(R.string.workspace_detail_tool_shell), HugeIcons.ComputerTerminal01),
+    Triple("workspace_terminal", "交互式终端", HugeIcons.ComputerTerminal01),
 )
 
 @Composable

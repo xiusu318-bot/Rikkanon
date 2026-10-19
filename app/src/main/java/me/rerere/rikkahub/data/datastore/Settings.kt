@@ -3,6 +3,10 @@ package me.rerere.rikkahub.data.datastore
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.asr.ASRProviderSetting
@@ -76,6 +80,8 @@ data class Settings(
     val modeInjections: List<PromptInjection.ModeInjection> = DEFAULT_MODE_INJECTIONS,
     val lorebooks: List<Lorebook> = emptyList(),
     val quickMessages: List<QuickMessage> = emptyList(),
+    val enableSecretKeyAlias: Boolean = false,
+    val secretKeys: List<SecretKeyEntry> = emptyList(),
     val webServerEnabled: Boolean = false,
     val webServerPort: Int = 8080,
     val webServerJwtEnabled: Boolean = false,
@@ -197,3 +203,70 @@ data class BackupReminderConfig(
     val intervalDays: Int = 7,
     val lastBackupTime: Long = 0L,
 )
+
+/**
+ * 密钥代名词条目：
+ * - [keyName]：暴露给 LLM 的代名词（如 `MY_SSH_PASS`、`GITHUB_TOKEN`）
+ * - [secretValue]：仅保存在宿主本地设置中的真实密钥明文，在工具真正执行时由底层动态替换
+ * - [description]：可选用途备注（在启用 `ask_key` 工具时可告知 LLM 该代名词的用途）
+ */
+@Serializable
+data class SecretKeyEntry(
+    val id: Uuid = Uuid.random(),
+    val keyName: String = "",
+    val secretValue: String = "",
+    val description: String = "",
+    val enabled: Boolean = true,
+)
+
+/**
+ * 将字符串中的密钥代名词 [SecretKeyEntry.keyName] 替换为真实密钥值 [SecretKeyEntry.secretValue]。
+ * 按代名词长度降序替换，避免短代名词误截断包含它的长代名词。
+ */
+fun Settings.applySecretKeyAliasesToString(input: String, enabled: Boolean = true): String {
+    if (!enabled || input.isEmpty() || secretKeys.isEmpty()) return input
+    var result = input
+    secretKeys
+        .filter { it.enabled && it.keyName.isNotBlank() && it.secretValue.isNotEmpty() }
+        .sortedByDescending { it.keyName.length }
+        .forEach { entry ->
+            result = result.replace(entry.keyName, entry.secretValue)
+        }
+    return result
+}
+
+/**
+ * 递归遍历工具入参 [JsonElement]，仅对字符串节点做密钥代名词替换，
+ * 确保真实密钥中包含引号、反斜杠或换行符时不会破坏外层 JSON 结构。
+ */
+fun JsonElement.replaceSecretKeyAliases(settings: Settings, enabled: Boolean): JsonElement {
+    if (!enabled || settings.secretKeys.isEmpty()) return this
+    return when (this) {
+        is JsonPrimitive -> {
+            if (isString) {
+                JsonPrimitive(settings.applySecretKeyAliasesToString(content, true))
+            } else {
+                this
+            }
+        }
+        is JsonObject -> JsonObject(mapValues { (_, v) -> v.replaceSecretKeyAliases(settings, true) })
+        is JsonArray -> JsonArray(map { it.replaceSecretKeyAliases(settings, true) })
+    }
+}
+
+/**
+ * 将工具输出文本中出现的真实密钥值 [SecretKeyEntry.secretValue] 反向替换回代名词 [SecretKeyEntry.keyName]，
+ * 防止命令回显或报错信息将真实密钥泄露给云端模型。
+ */
+fun Settings.redactSecretKeyValues(output: String, enabled: Boolean = true): String {
+    if (!enabled || output.isEmpty() || secretKeys.isEmpty()) return output
+    var result = output
+    secretKeys
+        .filter { it.enabled && it.keyName.isNotBlank() && it.secretValue.isNotEmpty() }
+        .sortedByDescending { it.secretValue.length }
+        .forEach { entry ->
+            result = result.replace(entry.secretValue, entry.keyName)
+        }
+    return result
+}
+

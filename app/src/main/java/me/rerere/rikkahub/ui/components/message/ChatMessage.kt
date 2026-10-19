@@ -58,13 +58,24 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
+import me.rerere.ai.ui.ReasoningType
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyUIMessage
 import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Add01
+import me.rerere.hugeicons.stroke.ArrowDown01
+import me.rerere.hugeicons.stroke.ArrowUp01
+import me.rerere.hugeicons.stroke.Code
+import me.rerere.hugeicons.stroke.Copy01
+import me.rerere.hugeicons.stroke.Delete01
+import me.rerere.hugeicons.stroke.Edit01
 import me.rerere.hugeicons.stroke.File02
 import me.rerere.hugeicons.stroke.MusicNote03
+import me.rerere.hugeicons.stroke.Refresh03
+import me.rerere.hugeicons.stroke.Settings03
 import me.rerere.hugeicons.stroke.Video01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
@@ -72,6 +83,23 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
+import me.rerere.rikkahub.service.ToolEditAction
+import me.rerere.rikkahub.utils.JsonInstantPretty
+import me.rerere.rikkahub.utils.writeClipboardText
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SheetValue
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberBottomSheetState
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.text.font.FontFamily
+import kotlinx.serialization.json.JsonObject
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
@@ -112,6 +140,8 @@ fun ChatMessage(
     onClearTranslation: (UIMessage) -> Unit = {},
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onRegeneratePart: ((partIndex: Int, rerunTool: Boolean) -> Unit)? = null,
+    onEditToolCall: ((toolCallId: String, newInput: String, newOutputText: String?, action: ToolEditAction) -> Unit)? = null,
 ) {
     val message = node.messages[node.selectIndex]
     if (message.isContextCheckpoint) {
@@ -132,6 +162,14 @@ fun ChatMessage(
     )
     var showActionsSheet by remember { mutableStateOf(false) }
     var showSelectCopySheet by remember { mutableStateOf(false) }
+    var showPartsEditorSheet by remember { mutableStateOf(false) }
+    val handleEditClick = {
+        if (message.role == MessageRole.ASSISTANT) {
+            showPartsEditorSheet = true
+        } else {
+            onEdit()
+        }
+    }
     val navController = LocalNavController.current
     val context = LocalContext.current
     val colorScheme = MaterialTheme.colorScheme
@@ -173,6 +211,8 @@ fun ChatMessage(
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
+                onRegeneratePart = onRegeneratePart,
+                onEditToolCall = onEditToolCall,
             )
 
             message.translation?.let { translation ->
@@ -227,7 +267,7 @@ fun ChatMessage(
     if (showActionsSheet) {
         ChatMessageActionsSheet(
             message = message,
-            onEdit = onEdit,
+            onEdit = handleEditClick,
             onDelete = onDelete,
             onShare = onShare,
             onFork = onFork,
@@ -266,6 +306,32 @@ fun ChatMessage(
             }
         )
     }
+
+    if (showPartsEditorSheet) {
+        MessagePartsEditorSheet(
+            message = message,
+            onDismissRequest = { showPartsEditorSheet = false },
+            onSaveMessage = { updatedMessage, asNewBranch ->
+                showPartsEditorSheet = false
+                if (asNewBranch) {
+                    val branched = updatedMessage.copy(id = kotlin.uuid.Uuid.random())
+                    onUpdate(node.copy(messages = node.messages + branched, selectIndex = node.messages.size))
+                } else {
+                    onUpdate(
+                        node.copy(
+                            messages = node.messages.map { msg ->
+                                if (msg.id == message.id) updatedMessage.copy(id = message.id) else msg
+                            }
+                        )
+                    )
+                }
+            },
+            onRegeneratePart = { partIndex, rerunTool ->
+                showPartsEditorSheet = false
+                onRegeneratePart?.invoke(partIndex, rerunTool)
+            },
+        )
+    }
 }
 
 @OptIn(FlowPreview::class)
@@ -280,6 +346,8 @@ private fun MessagePartsBlock(
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
+    onRegeneratePart: ((partIndex: Int, rerunTool: Boolean) -> Unit)? = null,
+    onEditToolCall: ((toolCallId: String, newInput: String, newOutputText: String?, action: ToolEditAction) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // 消息输出HapticFeedback
@@ -352,6 +420,13 @@ private fun MessagePartsBlock(
                                         assistant = assistant,
                                         onToolApproval = onToolApproval,
                                         onToolAnswer = onToolAnswer,
+                                        onEditToolCall = onEditToolCall,
+                                        onRegenerateFromHere = if (onRegeneratePart != null) {
+                                            { onRegeneratePart(step.partIndex, false) }
+                                        } else null,
+                                        onRerunTool = if (onRegeneratePart != null) {
+                                            { onRegeneratePart(step.partIndex, true) }
+                                        } else null,
                                     )
                                 }
                             }
@@ -375,32 +450,43 @@ private fun MessagePartsBlock(
                 when (val part = block.part) {
                     is UIMessagePart.Text -> {
                         val textContent = @Composable {
-                            if (role == MessageRole.USER) {
-                                ChatMessageBubble(
-                                    role = role,
-                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = settings.displaySetting.bubbleOpacity),
-                                    onClick = { onUserMessageClick?.invoke() },
-                                    // 用户气泡不占满整行，和助手的回复错开
-                                    modifier = Modifier
-                                        .padding(start = 48.dp)
-                                        .animateContentSize(),
-                                ) {
-                                    MarkdownBlock(
-                                        content = part.text.replaceRegexes(
-                                            assistant = assistant,
-                                            scope = AssistantAffectScope.USER,
-                                            visual = true,
-                                        ),
-                                        onClickCitation = handleClickCitation
-                                    )
-                                }
-                            } else {
-                                if (settings.displaySetting.showAssistantBubble) {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                if (role == MessageRole.USER) {
                                     ChatMessageBubble(
                                         role = role,
-                                        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity),
-                                        modifier = Modifier.animateContentSize(),
+                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = settings.displaySetting.bubbleOpacity),
+                                        onClick = { onUserMessageClick?.invoke() },
+                                        // 用户气泡不占满整行，和助手的回复错开
+                                        modifier = Modifier
+                                            .padding(start = 48.dp)
+                                            .animateContentSize(),
                                     ) {
+                                        MarkdownBlock(
+                                            content = part.text.replaceRegexes(
+                                                assistant = assistant,
+                                                scope = AssistantAffectScope.USER,
+                                                visual = true,
+                                            ),
+                                            onClickCitation = handleClickCitation
+                                        )
+                                    }
+                                } else {
+                                    if (settings.displaySetting.showAssistantBubble) {
+                                        ChatMessageBubble(
+                                            role = role,
+                                            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity),
+                                            modifier = Modifier.animateContentSize(),
+                                        ) {
+                                            MarkdownBlock(
+                                                content = part.text.replaceRegexes(
+                                                    assistant = assistant,
+                                                    scope = AssistantAffectScope.ASSISTANT,
+                                                    visual = true,
+                                                ),
+                                                onClickCitation = handleClickCitation,
+                                            )
+                                        }
+                                    } else {
                                         MarkdownBlock(
                                             content = part.text.replaceRegexes(
                                                 assistant = assistant,
@@ -408,19 +494,10 @@ private fun MessagePartsBlock(
                                                 visual = true,
                                             ),
                                             onClickCitation = handleClickCitation,
+                                            modifier = Modifier
+                                                .animateContentSize()
                                         )
                                     }
-                                } else {
-                                    MarkdownBlock(
-                                        content = part.text.replaceRegexes(
-                                            assistant = assistant,
-                                            scope = AssistantAffectScope.ASSISTANT,
-                                            visual = true,
-                                        ),
-                                        onClickCitation = handleClickCitation,
-                                        modifier = Modifier
-                                            .animateContentSize()
-                                    )
                                 }
                             }
                         }
@@ -627,3 +704,567 @@ private fun ChatMessageCitations(annotations: List<UIMessageAnnotation>) {
         }
     }
 }
+
+/**
+ * 助手消息深度结构化编辑器（融合可视化部件编辑与底层 Raw JSON 源码编辑）：
+ * 1. 可视化部件模式：支持增删、上下移动、单步 Roll / 重跑工具，直接编辑 Reasoning / Tool (input, output, toolName, toolCallId, approvalState, metadata) / Text 等部件。
+ * 2. 底层 JSON 源码模式：直接暴露整条 UIMessage 在数据库中的完整 JSON 结构，支持任意底层字段修改与语法校验。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MessagePartsEditorSheet(
+    message: UIMessage,
+    onDismissRequest: () -> Unit,
+    onSaveMessage: (UIMessage, asNewBranch: Boolean) -> Unit,
+    onRegeneratePart: (partIndex: Int, rerunTool: Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    var baseMessage by remember(message) { mutableStateOf(message) }
+    val editableParts = remember(message) {
+        mutableStateListOf<UIMessagePart>().apply { addAll(message.parts) }
+    }
+    val expandedMetaIndices = remember(message) { mutableStateListOf<Int>() }
+    var isRawJsonMode by remember { mutableStateOf(false) }
+    var rawJsonText by remember(message) {
+        mutableStateOf(
+            runCatching {
+                JsonInstantPretty.encodeToString(UIMessage.serializer(), message)
+            }.getOrElse { "" }
+        )
+    }
+    var jsonError by remember { mutableStateOf<String?>(null) }
+
+    fun buildCurrentMessageFromParts(): UIMessage =
+        baseMessage.copy(parts = editableParts.toList())
+
+    fun syncPartsToRawJson() {
+        rawJsonText = runCatching {
+            JsonInstantPretty.encodeToString(UIMessage.serializer(), buildCurrentMessageFromParts())
+        }.getOrElse { rawJsonText }
+        jsonError = null
+    }
+
+    fun tryApplyRawJsonToParts(): UIMessage? {
+        return runCatching {
+            JsonInstantPretty.decodeFromString(UIMessage.serializer(), rawJsonText)
+        }.fold(
+            onSuccess = { parsed ->
+                jsonError = null
+                baseMessage = parsed
+                editableParts.clear()
+                editableParts.addAll(parsed.parts)
+                parsed
+            },
+            onFailure = { err ->
+                jsonError = err.message ?: "JSON 格式解析失败"
+                null
+            }
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        sheetState = rememberBottomSheetState(
+            initialValue = SheetValue.Expanded,
+            enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "编辑消息与底层存储",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    FilterChip(
+                        selected = !isRawJsonMode,
+                        onClick = {
+                            if (isRawJsonMode) {
+                                if (tryApplyRawJsonToParts() != null) {
+                                    isRawJsonMode = false
+                                }
+                            }
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = HugeIcons.Edit01,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        },
+                        label = { Text("可视化部件 (${editableParts.size} 步)") },
+                    )
+                    FilterChip(
+                        selected = isRawJsonMode,
+                        onClick = {
+                            if (!isRawJsonMode) {
+                                syncPartsToRawJson()
+                                isRawJsonMode = true
+                            }
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = HugeIcons.Code,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                            )
+                        },
+                        label = { Text("底层 JSON 源码") },
+                    )
+                }
+            }
+
+            if (isRawJsonMode) {
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "UIMessage 原始 JSON 存储结构",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(
+                                    onClick = {
+                                        val parsed = tryApplyRawJsonToParts()
+                                        if (parsed != null) {
+                                            rawJsonText = JsonInstantPretty.encodeToString(UIMessage.serializer(), parsed)
+                                        }
+                                    }
+                                ) {
+                                    Text("格式化校验", style = MaterialTheme.typography.labelSmall)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        context.writeClipboardText(rawJsonText)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = HugeIcons.Copy01,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Text(
+                                        text = "复制 JSON",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(start = 4.dp),
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = rawJsonText,
+                            onValueChange = {
+                                rawJsonText = it
+                                jsonError = null
+                            },
+                            label = { Text("完整消息 JSON (parts / metadata / usage / modelSnapshot 等)") },
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 10,
+                            maxLines = 22,
+                            isError = jsonError != null,
+                        )
+
+                        jsonError?.let { err ->
+                            Text(
+                                text = "JSON 解析错误: $err",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
+            } else {
+                editableParts.forEachIndexed { index, part ->
+                    val showMeta = index in expandedMetaIndices
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                itemVerticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                val partLabel = when (part) {
+                                    is UIMessagePart.Reasoning -> "#${index + 1} 思考 (Reasoning)"
+                                    is UIMessagePart.Tool -> "#${index + 1} 工具 (${part.toolName})"
+                                    is UIMessagePart.Text -> "#${index + 1} 正文 (Text)"
+                                    else -> "#${index + 1} ${part::class.simpleName}"
+                                }
+                                Text(
+                                    text = partLabel,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    if (part is UIMessagePart.Tool) {
+                                        TextButton(onClick = { onRegeneratePart(index, true) }) {
+                                            Text("重跑工具", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                    TextButton(onClick = { onRegeneratePart(index, false) }) {
+                                        Text("从此步 Roll", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    ChatMessageActionButton(
+                                        icon = HugeIcons.Settings03,
+                                        contentDescription = "展开/收起底层字段",
+                                        onClick = {
+                                            if (showMeta) expandedMetaIndices.remove(index)
+                                            else expandedMetaIndices.add(index)
+                                        },
+                                    )
+                                    if (index > 0) {
+                                        ChatMessageActionButton(
+                                            icon = HugeIcons.ArrowUp01,
+                                            contentDescription = "上移此步",
+                                            onClick = {
+                                                val item = editableParts.removeAt(index)
+                                                editableParts.add(index - 1, item)
+                                            },
+                                        )
+                                    }
+                                    if (index < editableParts.lastIndex) {
+                                        ChatMessageActionButton(
+                                            icon = HugeIcons.ArrowDown01,
+                                            contentDescription = "下移此步",
+                                            onClick = {
+                                                val item = editableParts.removeAt(index)
+                                                editableParts.add(index + 1, item)
+                                            },
+                                        )
+                                    }
+                                    if (editableParts.size > 1) {
+                                        ChatMessageActionButton(
+                                            icon = HugeIcons.Delete01,
+                                            contentDescription = "删除此部件",
+                                            onClick = { editableParts.removeAt(index) },
+                                        )
+                                    }
+                                }
+                            }
+
+                            when (part) {
+                                is UIMessagePart.Text -> {
+                                    OutlinedTextField(
+                                        value = part.text,
+                                        onValueChange = { editableParts[index] = part.copy(text = it) },
+                                        label = { Text("正文内容 (text)") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        minLines = 2,
+                                        maxLines = 10,
+                                    )
+                                    if (showMeta) {
+                                        PartMetadataEditorField(
+                                            metadata = part.metadata,
+                                            onMetadataChange = { newMeta ->
+                                                editableParts[index] = part.copy(metadata = newMeta)
+                                            },
+                                        )
+                                    }
+                                }
+
+                                is UIMessagePart.Reasoning -> {
+                                    OutlinedTextField(
+                                        value = part.reasoning,
+                                        onValueChange = { editableParts[index] = part.copy(reasoning = it) },
+                                        label = { Text("思考过程 (reasoning)") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        minLines = 2,
+                                        maxLines = 8,
+                                    )
+                                    if (showMeta) {
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                text = "思考类型:",
+                                                style = MaterialTheme.typography.labelSmall,
+                                            )
+                                            ReasoningType.entries.forEach { rType ->
+                                                FilterChip(
+                                                    selected = part.reasoningType == rType,
+                                                    onClick = {
+                                                        editableParts[index] = part.copy(reasoningType = rType)
+                                                    },
+                                                    label = { Text(rType.name, style = MaterialTheme.typography.labelSmall) },
+                                                )
+                                            }
+                                        }
+                                        PartMetadataEditorField(
+                                            metadata = part.metadata,
+                                            onMetadataChange = { newMeta ->
+                                                editableParts[index] = part.copy(metadata = newMeta)
+                                            },
+                                        )
+                                    }
+                                }
+
+                                is UIMessagePart.Tool -> {
+                                    val outText = part.output.filterIsInstance<UIMessagePart.Text>()
+                                        .joinToString("\n") { it.text }
+                                    if (showMeta) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            OutlinedTextField(
+                                                value = part.toolName,
+                                                onValueChange = { editableParts[index] = part.copy(toolName = it) },
+                                                label = { Text("工具名 (toolName)") },
+                                                singleLine = true,
+                                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                            OutlinedTextField(
+                                                value = part.toolCallId,
+                                                onValueChange = { editableParts[index] = part.copy(toolCallId = it) },
+                                                label = { Text("调用 ID (toolCallId)") },
+                                                singleLine = true,
+                                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                        }
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                                            itemVerticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text("审批状态:", style = MaterialTheme.typography.labelSmall)
+                                            val states = listOf(
+                                                "Auto" to ToolApprovalState.Auto,
+                                                "Approved" to ToolApprovalState.Approved,
+                                                "Pending" to ToolApprovalState.Pending,
+                                                "Denied" to ToolApprovalState.Denied("Denied"),
+                                            )
+                                            states.forEach { (label, stateObj) ->
+                                                val selected = part.approvalState::class == stateObj::class
+                                                FilterChip(
+                                                    selected = selected,
+                                                    onClick = {
+                                                        editableParts[index] = part.copy(approvalState = stateObj)
+                                                    },
+                                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                                )
+                                            }
+                                        }
+                                    }
+                                    OutlinedTextField(
+                                        value = part.input,
+                                        onValueChange = { editableParts[index] = part.copy(input = it) },
+                                        label = { Text("工具调用入参 (input JSON)") },
+                                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        minLines = 2,
+                                        maxLines = 8,
+                                    )
+                                    OutlinedTextField(
+                                        value = outText,
+                                        onValueChange = { newOut ->
+                                            val nonText = part.output.filterNot { it is UIMessagePart.Text }
+                                            val nextOutput = if (newOut.isEmpty() && nonText.isEmpty()) {
+                                                emptyList()
+                                            } else {
+                                                listOf(UIMessagePart.Text(newOut)) + nonText
+                                            }
+                                            editableParts[index] = part.copy(output = nextOutput)
+                                        },
+                                        label = { Text("工具返回结果 (output，留空视为未执行)") },
+                                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        minLines = 2,
+                                        maxLines = 10,
+                                    )
+                                    if (showMeta) {
+                                        PartMetadataEditorField(
+                                            metadata = part.metadata,
+                                            onMetadataChange = { newMeta ->
+                                                editableParts[index] = part.copy(metadata = newMeta)
+                                            },
+                                        )
+                                    }
+                                }
+
+                                is UIMessagePart.Image -> {
+                                    OutlinedTextField(
+                                        value = part.url,
+                                        onValueChange = { editableParts[index] = part.copy(url = it) },
+                                        label = { Text("图片地址 (url)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+
+                                is UIMessagePart.Document -> {
+                                    OutlinedTextField(
+                                        value = part.fileName,
+                                        onValueChange = { editableParts[index] = part.copy(fileName = it) },
+                                        label = { Text("文件名 (fileName)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    OutlinedTextField(
+                                        value = part.url,
+                                        onValueChange = { editableParts[index] = part.copy(url = it) },
+                                        label = { Text("文档地址 (url)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+
+                                else -> {}
+                            }
+                        }
+                    }
+                }
+
+                // 底部快捷新增部件栏
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    TextButton(
+                        onClick = {
+                            editableParts.add(UIMessagePart.Text(text = ""))
+                        }
+                    ) {
+                        Icon(HugeIcons.Add01, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Text("新增正文 (Text)", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(
+                        onClick = {
+                            editableParts.add(UIMessagePart.Reasoning(reasoning = ""))
+                        }
+                    ) {
+                        Icon(HugeIcons.Add01, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Text("新增思考 (Reasoning)", modifier = Modifier.padding(start = 4.dp))
+                    }
+                    TextButton(
+                        onClick = {
+                            editableParts.add(
+                                UIMessagePart.Tool(
+                                    toolCallId = "call_${kotlin.uuid.Uuid.random().toString().take(8)}",
+                                    toolName = "workspace_terminal",
+                                    input = "{}",
+                                    output = listOf(UIMessagePart.Text("{}")),
+                                    approvalState = ToolApprovalState.Auto,
+                                )
+                            )
+                        }
+                    ) {
+                        Icon(HugeIcons.Add01, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Text("新增工具块 (Tool)", modifier = Modifier.padding(start = 4.dp))
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismissRequest) {
+                    Text(stringResource(android.R.string.cancel))
+                }
+                TextButton(
+                    onClick = {
+                        val finalMsg = if (isRawJsonMode) {
+                            tryApplyRawJsonToParts() ?: return@TextButton
+                        } else {
+                            buildCurrentMessageFromParts()
+                        }
+                        onSaveMessage(finalMsg, false)
+                    }
+                ) {
+                    Text("原地覆盖保存")
+                }
+                FilledTonalButton(
+                    onClick = {
+                        val finalMsg = if (isRawJsonMode) {
+                            tryApplyRawJsonToParts() ?: return@FilledTonalButton
+                        } else {
+                            buildCurrentMessageFromParts()
+                        }
+                        onSaveMessage(finalMsg, true)
+                    }
+                ) {
+                    Text("保存为新分支")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PartMetadataEditorField(
+    metadata: JsonObject?,
+    onMetadataChange: (JsonObject?) -> Unit,
+) {
+    var metaText by remember(metadata) {
+        mutableStateOf(metadata?.let { JsonInstantPretty.encodeToString(JsonObject.serializer(), it) }.orEmpty())
+    }
+    var hasError by remember { mutableStateOf(false) }
+
+    OutlinedTextField(
+        value = metaText,
+        onValueChange = { next ->
+            metaText = next
+            if (next.isBlank()) {
+                hasError = false
+                onMetadataChange(null)
+            } else {
+                runCatching {
+                    JsonInstantPretty.parseToJsonElement(next).jsonObject
+                }.onSuccess { parsed ->
+                    hasError = false
+                    onMetadataChange(parsed)
+                }.onFailure {
+                    hasError = true
+                }
+            }
+        },
+        label = { Text("底层元数据 (metadata JSON，可留空)") },
+        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        modifier = Modifier.fillMaxWidth(),
+        minLines = 1,
+        maxLines = 6,
+        isError = hasError,
+    )
+}
+

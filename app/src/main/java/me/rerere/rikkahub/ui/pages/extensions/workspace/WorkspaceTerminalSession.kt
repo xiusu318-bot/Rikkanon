@@ -34,6 +34,8 @@ internal fun createWorkspaceTerminalSession(
     val tempDir = File(workspaceDir, "tmp")
     val skillsDir = File(appContext.filesDir, FileFolders.SKILLS).apply { mkdirs() }
     val builtinSkillsDir = File(appContext.filesDir, FileFolders.BUILTIN_SKILLS).apply { mkdirs() }
+    val toolOutputsDir = File(appContext.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() }
+    val uploadDir = File(appContext.filesDir, FileFolders.UPLOAD).apply { mkdirs() }
     val nativeLibraryDir = File(appContext.applicationInfo.nativeLibraryDir)
     val proot = File(nativeLibraryDir, "libproot_exec.so")
     val loader = File(nativeLibraryDir, "libproot_loader.so")
@@ -53,6 +55,10 @@ internal fun createWorkspaceTerminalSession(
         "${skillsDir.absolutePath}:$SKILLS_DIR",
         "-b",
         "${builtinSkillsDir.absolutePath}:$BUILTIN_SKILLS_DIR",
+        "-b",
+        "${toolOutputsDir.absolutePath}:$TOOL_OUTPUTS_DIR",
+        "-b",
+        "${uploadDir.absolutePath}:$UPLOAD_DIR",
     )
     listOf("/dev", "/proc", "/sys").forEach { path ->
         if (File(path).exists()) {
@@ -60,6 +66,23 @@ internal fun createWorkspaceTerminalSession(
             args += path
         }
     }
+
+    // 绑定 POSIX 共享内存 /dev/shm，解决 Python multiprocessing / PostgreSQL / Chromium 报错
+    val shmDir = File(tempDir, "shm").apply { mkdirs() }
+    args += "-b"
+    args += "${shmDir.absolutePath}:/dev/shm"
+
+    // 当 Android 宿主机锁死 /proc/stat、/proc/loadavg、/proc/uptime、/proc/vmstat 时挂载可读兜底节点
+    val fakeProcDir = File(linuxDir, RootfsPatcher.FAKE_PROC_REL_DIR)
+    RootfsPatcher.FAKE_PROC_FILES.forEach { name ->
+        val hostProc = File("/proc/$name")
+        val fakeProc = File(fakeProcDir, name)
+        if (!hostProc.canRead() && fakeProc.isFile) {
+            args += "-b"
+            args += "${fakeProc.absolutePath}:/proc/$name"
+        }
+    }
+
     args += listOf(
         "/usr/bin/env",
         "-i",
@@ -70,7 +93,12 @@ internal fun createWorkspaceTerminalSession(
         "LC_ALL=C.UTF-8",
         "USER=root",
         "SHELL=$shell",
+        "JAVA_TOOL_OPTIONS=-XX:-UseCompressedOops -XX:-UseCompressedClassPointers",
+        "NODE_OPTIONS=--require /etc/rikkahub-node-preload.js",
+        "ELECTRON_DISABLE_SANDBOX=1",
+        "MOZ_FAKE_NO_SANDBOX=1",
         shell,
+        "-l",
     )
 
     val env = mutableListOf(
@@ -119,8 +147,13 @@ internal class WorkspaceTerminalSessionClient(
     private val onFinished: () -> Unit,
 ) : TerminalSessionClient {
     var terminalView: TerminalView? = null
+    val lastOutputAtMs = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+    val outputEvents = kotlinx.coroutines.flow.MutableSharedFlow<Long>(extraBufferCapacity = 64)
 
     override fun onTextChanged(changedSession: TerminalSession) {
+        val now = System.currentTimeMillis()
+        lastOutputAtMs.set(now)
+        outputEvents.tryEmit(now)
         terminalView?.onScreenUpdated()
     }
 
@@ -129,6 +162,9 @@ internal class WorkspaceTerminalSessionClient(
     }
 
     override fun onSessionFinished(finishedSession: TerminalSession) {
+        val now = System.currentTimeMillis()
+        lastOutputAtMs.set(now)
+        outputEvents.tryEmit(now)
         terminalView?.onScreenUpdated()
         onFinished()
     }
@@ -329,6 +365,139 @@ internal class WorkspaceTerminalViewClient(
 private const val WORKSPACE_DIR = "/workspace"
 private const val SKILLS_DIR = "/skills"
 private const val BUILTIN_SKILLS_DIR = "/builtin_skills"
+private const val TOOL_OUTPUTS_DIR = "/tool_outputs"
+private const val UPLOAD_DIR = "/upload"
+
+internal data class TerminalProcessTreeState(
+    val prootPid: Int,
+    val shellPid: Int,
+    val foregroundPgid: Int?,
+    val foregroundCommand: String?,
+    val isAtPrompt: Boolean,
+    val processExited: Boolean,
+)
+
+private data class ProcStatEntry(
+    val pid: Int,
+    val comm: String,
+    val state: Char,
+    val ppid: Int,
+    val pgrp: Int,
+    val session: Int,
+    val tpgid: Int,
+)
+
+private fun readProcStat(pid: Int): ProcStatEntry? {
+    if (pid <= 0) return null
+    return runCatching {
+        val stat = File("/proc/$pid/stat").readText()
+        val commStart = stat.indexOf('(')
+        val commEnd = stat.lastIndexOf(')')
+        if (commStart < 0 || commEnd <= commStart || commEnd + 2 >= stat.length) return null
+        val comm = stat.substring(commStart + 1, commEnd)
+        val fields = stat.substring(commEnd + 2).trim().split(' ')
+        if (fields.size < 6) return null
+        ProcStatEntry(
+            pid = pid,
+            comm = comm,
+            state = fields[0].firstOrNull() ?: '?',
+            ppid = fields[1].toIntOrNull() ?: 0,
+            pgrp = fields[2].toIntOrNull() ?: 0,
+            session = fields[3].toIntOrNull() ?: 0,
+            tpgid = fields[5].toIntOrNull() ?: -1,
+        )
+    }.getOrNull()
+}
+
+/**
+ * 检查指定终端会话 (以 PRoot 进程 [prootPid] 为会话首进程 sid == prootPid) 的进程树状态:
+ * - 自动识别 PRoot 内部的顶层交互式 Shell 进程 (bash/sh/ash/dash/zsh)
+ * - 判断顶层 Shell 是否已退出 (如执行了 `exit` 或 `Ctrl+D`)
+ * - 判断当前是否回到了顶层 Shell 提示符 (`isAtPrompt`) 还是有前台子命令正在运行 (`foregroundCommand`)
+ */
+internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState {
+    if (prootPid <= 0) {
+        return TerminalProcessTreeState(
+            prootPid = prootPid,
+            shellPid = 0,
+            foregroundPgid = null,
+            foregroundCommand = null,
+            isAtPrompt = false,
+            processExited = true,
+        )
+    }
+
+    val prootStat = readProcStat(prootPid)
+    if (prootStat == null || prootStat.state == 'Z' || prootStat.state == 'X') {
+        return TerminalProcessTreeState(
+            prootPid = prootPid,
+            shellPid = 0,
+            foregroundPgid = null,
+            foregroundCommand = null,
+            isAtPrompt = false,
+            processExited = true,
+        )
+    }
+
+    val targetSid = if (prootStat.session > 0) prootStat.session else prootPid
+    val sessionProcs = runCatching {
+        File("/proc").listFiles()
+            ?.asSequence()
+            ?.mapNotNull { dir -> dir.name.toIntOrNull() }
+            ?.mapNotNull { pid -> readProcStat(pid) }
+            ?.filter { entry ->
+                entry.state != 'Z' && entry.state != 'X' &&
+                    (entry.session == targetSid || entry.pid == prootPid || entry.ppid == prootPid)
+            }
+            ?.toList()
+            .orEmpty()
+    }.getOrDefault(listOf(prootStat))
+
+    // PRoot 的直接子进程即顶层交互式 Shell
+    val shellProc = sessionProcs
+        .filter { it.pid != prootPid && it.ppid == prootPid }
+        .minByOrNull { it.pid }
+
+    // 如果 PRoot 已经启动过子进程但现在没有任何存活的直接子进程，说明顶层 Shell 已经 exit
+    val childProcesses = sessionProcs.filter { it.pid != prootPid }
+    if (shellProc == null && childProcesses.isEmpty()) {
+        val fgPgid = prootStat.tpgid.takeIf { it > 0 }
+        return TerminalProcessTreeState(
+            prootPid = prootPid,
+            shellPid = prootPid,
+            foregroundPgid = fgPgid,
+            foregroundCommand = null,
+            isAtPrompt = false,
+            processExited = false,
+        )
+    }
+
+    val topShell = shellProc ?: childProcesses.minByOrNull { it.pid } ?: prootStat
+    val activeSubprocs = childProcesses.filter { it.pid != topShell.pid }
+    val fgPgid = topShell.tpgid.takeIf { it > 0 } ?: prootStat.tpgid.takeIf { it > 0 }
+
+    val fgSubprocs = if (fgPgid != null && fgPgid != topShell.pgrp && fgPgid != prootStat.pgrp) {
+        activeSubprocs.filter { it.pgrp == fgPgid }
+    } else {
+        // 兼容未开启独立进程组控制的 POSIX sh: 直接子进程仍在运行时视为前台任务
+        activeSubprocs.filter { it.ppid == topShell.pid }
+    }
+
+    val isAtPrompt = fgSubprocs.isEmpty() && (fgPgid == null || fgPgid == topShell.pgrp || fgPgid == prootStat.pgrp)
+    val fgCommand = fgSubprocs.lastOrNull()?.comm
+
+    return TerminalProcessTreeState(
+        prootPid = prootPid,
+        shellPid = topShell.pid,
+        foregroundPgid = fgPgid,
+        foregroundCommand = fgCommand,
+        isAtPrompt = isAtPrompt,
+        processExited = false,
+    )
+}
+
+internal fun readTerminalForegroundPgid(pid: Int): Int? =
+    inspectTerminalProcessTree(pid).foregroundPgid
 
 // 一个 URL 最多还原跨越的软换行行数(向上/向下各算), 足够覆盖任意真实 URL
 private const val URL_MAX_WRAP_ROWS = 50

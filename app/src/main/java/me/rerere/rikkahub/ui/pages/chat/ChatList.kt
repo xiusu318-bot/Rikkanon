@@ -103,7 +103,9 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.withConversation
 import me.rerere.rikkahub.service.ChatError
+import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.ui.components.message.ChatMessage
+import org.koin.compose.koinInject
 import me.rerere.rikkahub.ui.components.ui.ErrorCardsDisplay
 import me.rerere.rikkahub.ui.hooks.ImeLazyListAutoScroller
 import me.rerere.rikkahub.ui.theme.ChatFontProvider
@@ -368,6 +370,7 @@ private fun ChatListNormal(
                         selectedKeys = selectedItems,
                         enabled = selecting,
                     ) {
+                        val chatService: ChatService = koinInject()
                         ChatMessage(
                             node = node,
                             model = node.currentMessage.modelId?.let(modelById::get)
@@ -376,6 +379,24 @@ private fun ChatListNormal(
                             loading = loading && index == lastMessageIndex,
                             onRegenerate = {
                                 onRegenerate(node.currentMessage)
+                            },
+                            onRegeneratePart = { partIndex, rerunTool ->
+                                chatService.regenerateAtPart(
+                                    conversationId = conversation.id,
+                                    message = node.currentMessage,
+                                    partIndex = partIndex,
+                                    rerunTool = rerunTool,
+                                )
+                            },
+                            onEditToolCall = { toolCallId, newInput, newOutputText, action ->
+                                chatService.editToolCallPart(
+                                    conversationId = conversation.id,
+                                    messageId = node.currentMessage.id,
+                                    toolCallId = toolCallId,
+                                    newInput = newInput,
+                                    newOutputText = newOutputText,
+                                    actionAfterEdit = action,
+                                )
                             },
                             onEdit = {
                                 onEdit(node.currentMessage)

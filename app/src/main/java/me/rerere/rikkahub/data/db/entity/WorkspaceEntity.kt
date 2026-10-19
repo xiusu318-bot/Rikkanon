@@ -36,9 +36,21 @@ data class WorkspaceEntity(
     @ColumnInfo("shell_compatibility_mode", defaultValue = "0")
     val shellCompatibilityMode: Boolean = false,
 ) {
-    fun toolApprovalOverrides(): Map<String, Boolean> = runCatching {
+    fun rawToolSettingsMap(): Map<String, Boolean> = runCatching {
         JsonInstant.decodeFromString<Map<String, Boolean>>(toolApprovals)
     }.getOrDefault(emptyMap())
+
+    fun toolApprovalOverrides(): Map<String, Boolean> =
+        rawToolSettingsMap().filterKeys { !it.startsWith(TOOL_ENABLED_PREFIX) }
+
+    fun toolEnabledOverrides(): Map<String, Boolean> =
+        rawToolSettingsMap()
+            .filterKeys { it.startsWith(TOOL_ENABLED_PREFIX) }
+            .mapKeys { (key, _) -> key.removePrefix(TOOL_ENABLED_PREFIX) }
+
+    companion object {
+        const val TOOL_ENABLED_PREFIX = "__enabled__"
+    }
 
     fun toWorkspace(): Workspace = Workspace(
         id = id,

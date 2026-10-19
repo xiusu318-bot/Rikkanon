@@ -184,6 +184,47 @@ class AssistantDetailVM(
         }
     }
 
+    fun updateSecretKeys(secretKeys: List<me.rerere.rikkahub.data.datastore.SecretKeyEntry>) {
+        viewModelScope.launch {
+            settingsStore.update { settings ->
+                settings.copy(secretKeys = secretKeys)
+            }
+        }
+    }
+
+    /**
+     * 快速新建一个专属子代理助手（指定名称、模型与系统提示词）并立即勾选绑定到当前主助手的子代理池中
+     */
+    fun createAndBindSubAgentAssistant(
+        name: String,
+        chatModelId: Uuid?,
+        systemPrompt: String,
+    ) {
+        viewModelScope.launch {
+            val current = assistant.value
+            val newSubAssistant = Assistant(
+                id = Uuid.random(),
+                name = name.trim().ifBlank { "子代理助手" },
+                chatModelId = chatModelId,
+                systemPrompt = systemPrompt.trim(),
+                workspaceId = current.workspaceId,
+                enableSubAgent = false,
+            )
+            settingsStore.update { settings ->
+                val updatedMain = current.copy(
+                    enableSubAgent = true,
+                    subAgentIds = current.effectiveSubAgentIds + newSubAssistant.id,
+                    subAgentAssistantId = null,
+                )
+                settings.copy(
+                    assistants = settings.assistants.map {
+                        if (it.id == current.id) updatedMain else it
+                    } + newSubAssistant
+                )
+            }
+        }
+    }
+
     // 助手还没加载出来时 assistant 是个占位对象，记忆库要按页面拿到的 assistantId 来定位
     private fun memoryIdOf(assistant: Assistant) = if (assistant.useGlobalMemory) {
         MemoryRepository.GLOBAL_MEMORY_ID

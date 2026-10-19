@@ -46,20 +46,40 @@ import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.BubbleChatQuestion
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.Edit01
+import me.rerere.hugeicons.stroke.Eye
+import me.rerere.hugeicons.stroke.Key01
+import me.rerere.hugeicons.stroke.Refresh03
 import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.Tools
+import me.rerere.hugeicons.stroke.ViewOffSlash
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.ai.tools.local.ASK_KEY_TOOL_NAME
+import me.rerere.rikkahub.data.datastore.SecretKeyEntry
+import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.service.ToolEditAction
 import me.rerere.rikkahub.ui.components.message.tools.DefaultToolPreview
 import me.rerere.rikkahub.ui.components.message.tools.ToolUIContext
 import me.rerere.rikkahub.ui.components.message.tools.ToolUIRegistry
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.ui.ChainOfThoughtScope
+import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.ui.components.DotLoading
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import kotlinx.coroutines.launch
+import org.koin.compose.koinInject
+import kotlin.uuid.Uuid
 
 private const val ASK_USER_TOOL_NAME = "ask_user"
 
@@ -99,10 +119,17 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     assistant: Assistant? = null,
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onEditToolCall: ((toolCallId: String, newInput: String, newOutputText: String?, action: ToolEditAction) -> Unit)? = null,
+    onRegenerateFromHere: (() -> Unit)? = null,
+    onRerunTool: (() -> Unit)? = null,
 ) {
-    // ask_user 是交互式问答流程, 不走注册式渲染框架
+    // ask_user / ask_key 是交互式问答流程, 不走注册式渲染框架
     if (tool.toolName == ASK_USER_TOOL_NAME) {
         AskUserToolStep(tool = tool, loading = loading, onToolAnswer = onToolAnswer)
+        return
+    }
+    if (tool.toolName == ASK_KEY_TOOL_NAME) {
+        AskKeyToolStep(tool = tool, loading = loading, onToolAnswer = onToolAnswer)
         return
     }
 
@@ -131,6 +158,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     }
 
     var showResult by remember { mutableStateOf(false) }
+    var editingInSheet by remember { mutableStateOf(false) }
     var showDenyDialog by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(true) }
     val isPending = tool.isPending
@@ -197,7 +225,10 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         } else {
             null
         },
-        onClick = { showResult = true },
+        onClick = {
+            editingInSheet = false
+            showResult = true
+        },
         content = if (hasExtraContent) {
             {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -252,16 +283,163 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
             ),
             onDismissRequest = { showResult = false },
             content = {
-                if (outputUnparsable) {
-                    DefaultToolPreview(context = context)
-                } else {
-                    renderer.Preview(
-                        context = context,
-                        onDismissRequest = { showResult = false },
-                    )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // 顶部操作栏：支持直接编辑工具入参/结果、单工具重跑、以及从此工具步骤处单步 Roll
+                    if (onEditToolCall != null || onRegenerateFromHere != null || onRerunTool != null) {
+                        FlowRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (onEditToolCall != null) {
+                                FilterChip(
+                                    selected = editingInSheet,
+                                    onClick = { editingInSheet = !editingInSheet },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = HugeIcons.Edit01,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(14.dp),
+                                        )
+                                    },
+                                    label = { Text(if (editingInSheet) "返回预览" else "编辑工具调用/结果") },
+                                )
+                            }
+                            if (onRerunTool != null && !loading) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        showResult = false
+                                        onRerunTool()
+                                    },
+                                    modifier = Modifier.height(32.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = HugeIcons.Refresh03,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Text(
+                                        text = "重跑此工具",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(start = 4.dp),
+                                    )
+                                }
+                            }
+                            if (onRegenerateFromHere != null && !loading) {
+                                TextButton(
+                                    onClick = {
+                                        showResult = false
+                                        onRegenerateFromHere()
+                                    },
+                                    modifier = Modifier.height(32.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = HugeIcons.Refresh03,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Text(
+                                        text = "从此步 Roll",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(start = 4.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (editingInSheet && onEditToolCall != null) {
+                        ToolCallEditorContent(
+                            tool = tool,
+                            onSubmit = { newInput, newOutput, action ->
+                                showResult = false
+                                onEditToolCall(tool.toolCallId, newInput, newOutput, action)
+                            },
+                        )
+                    } else if (outputUnparsable) {
+                        DefaultToolPreview(context = context)
+                    } else {
+                        renderer.Preview(
+                            context = context,
+                            onDismissRequest = { showResult = false },
+                        )
+                    }
                 }
             },
         )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ToolCallEditorContent(
+    tool: UIMessagePart.Tool,
+    onSubmit: (newInput: String, newOutputText: String?, action: ToolEditAction) -> Unit,
+) {
+    val initialOutputText = remember(tool) {
+        tool.output.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
+    }
+    var inputText by remember(tool.toolCallId) { mutableStateOf(tool.input) }
+    var outputText by remember(tool.toolCallId) { mutableStateOf(initialOutputText) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "编辑工具: ${tool.toolName}",
+            style = MaterialTheme.typography.titleMedium,
+        )
+        OutlinedTextField(
+            value = inputText,
+            onValueChange = { inputText = it },
+            label = { Text("工具调用入参 (input JSON)") },
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 10,
+        )
+        OutlinedTextField(
+            value = outputText,
+            onValueChange = { outputText = it },
+            label = { Text("工具返回结果 (output 文本)") },
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 4,
+            maxLines = 14,
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TextButton(
+                onClick = {
+                    onSubmit(inputText, outputText, ToolEditAction.SAVE_ONLY)
+                }
+            ) {
+                Text("仅保存修改")
+            }
+            FilledTonalButton(
+                onClick = {
+                    onSubmit(inputText, null, ToolEditAction.RERUN_TOOL_AND_CONTINUE)
+                }
+            ) {
+                Text("按新入参重跑此工具并继续")
+            }
+            FilledTonalButton(
+                onClick = {
+                    onSubmit(inputText, outputText, ToolEditAction.CONTINUE_FROM_EDITED_OUTPUT)
+                }
+            ) {
+                Text("按新结果重生成后续")
+            }
+        }
     }
 }
 
@@ -442,6 +620,262 @@ private fun ChainOfThoughtScope.AskUserToolStep(
                             modifier = Modifier.padding(start = 4.dp),
                         )
                     }
+                }
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChainOfThoughtScope.AskKeyToolStep(
+    tool: UIMessagePart.Tool,
+    loading: Boolean,
+    onToolAnswer: ((toolCallId: String, answer: String) -> Unit)?,
+) {
+    val isPending = tool.isPending
+    val isAnswered = tool.approvalState is ToolApprovalState.Answered
+    val arguments = tool.inputAsJson()
+    val settings = LocalSettings.current
+    val settingsStore: SettingsStore = koinInject()
+    val scope = rememberCoroutineScope()
+
+    val reason = remember(arguments) {
+        runCatching {
+            arguments.jsonObject["reason"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull().orEmpty().ifBlank { "请求密钥代名词" }
+    }
+    val suggestedKeyName = remember(arguments) {
+        runCatching {
+            arguments.jsonObject["suggested_key_name"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull().orEmpty().trim()
+    }
+
+    val existingKeys = settings.secretKeys
+    var selectedExistingKeyName by remember(existingKeys, suggestedKeyName) {
+        mutableStateOf(
+            existingKeys.find { it.keyName == suggestedKeyName }?.keyName
+                ?: existingKeys.firstOrNull { it.enabled }?.keyName
+        )
+    }
+    var createNewMode by remember(existingKeys.isEmpty()) {
+        mutableStateOf(existingKeys.isEmpty())
+    }
+    var newKeyName by remember(suggestedKeyName) {
+        mutableStateOf(suggestedKeyName.ifBlank { "SECRET_KEY" })
+    }
+    var newSecretValue by remember { mutableStateOf("") }
+    var newDescription by remember(reason) { mutableStateOf(reason) }
+    var showSecret by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(true) }
+
+    ControlledChainOfThoughtStep(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        icon = {
+            if (loading) {
+                DotLoading(size = 10.dp)
+            } else {
+                Icon(
+                    imageVector = HugeIcons.Key01,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = LocalContentColor.current.copy(alpha = 0.7f),
+                )
+            }
+        },
+        label = {
+            Text(
+                text = "请求密钥: $reason",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.shimmer(isLoading = loading),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        content = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+
+                if (isPending && onToolAnswer != null) {
+                    if (existingKeys.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            FilterChip(
+                                selected = !createNewMode,
+                                onClick = { createNewMode = false },
+                                label = { Text("选择已有密钥 (${existingKeys.size})", style = MaterialTheme.typography.labelSmall) },
+                            )
+                            FilterChip(
+                                selected = createNewMode,
+                                onClick = { createNewMode = true },
+                                leadingIcon = {
+                                    Icon(HugeIcons.Add01, contentDescription = null, modifier = Modifier.size(14.dp))
+                                },
+                                label = { Text("新建密钥代名词", style = MaterialTheme.typography.labelSmall) },
+                            )
+                        }
+                    }
+
+                    if (!createNewMode && existingKeys.isNotEmpty()) {
+                        Text(
+                            text = "点选要提供给 AI 的密钥代名词（仅发送代名词，执行工具时自动替换为真实密钥）：",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            existingKeys.forEach { entry ->
+                                val label = if (entry.description.isNotBlank()) {
+                                    "${entry.keyName} (${entry.description})"
+                                } else {
+                                    entry.keyName
+                                }
+                                FilterChip(
+                                    selected = selectedExistingKeyName == entry.keyName,
+                                    onClick = { selectedExistingKeyName = entry.keyName },
+                                    label = {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = newKeyName,
+                            onValueChange = { newKeyName = it },
+                            label = { Text("代名词 (key_name，发给 AI 的代号)") },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = newSecretValue,
+                            onValueChange = { newSecretValue = it },
+                            label = { Text("真实密钥值 (仅保存在宿主本地，AI 不可见)") },
+                            singleLine = false,
+                            minLines = 1,
+                            maxLines = 3,
+                            visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            trailingIcon = {
+                                FilledTonalIconButton(
+                                    onClick = { showSecret = !showSecret },
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = if (showSecret) HugeIcons.ViewOffSlash else HugeIcons.Eye,
+                                        contentDescription = "显示/隐藏密钥",
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = newDescription,
+                            onValueChange = { newDescription = it },
+                            label = { Text("用途备注 (可选)") },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    val canSubmit = if (!createNewMode && existingKeys.isNotEmpty()) {
+                        !selectedExistingKeyName.isNullOrBlank()
+                    } else {
+                        newKeyName.isNotBlank() && newSecretValue.isNotEmpty()
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            val chosenKeyName = if (!createNewMode && existingKeys.isNotEmpty()) {
+                                selectedExistingKeyName!!.trim()
+                            } else {
+                                newKeyName.trim()
+                            }
+                            scope.launch {
+                                if (createNewMode || existingKeys.isEmpty()) {
+                                    val newEntry = SecretKeyEntry(
+                                        id = Uuid.random(),
+                                        keyName = chosenKeyName,
+                                        secretValue = newSecretValue,
+                                        description = newDescription.trim(),
+                                        enabled = true,
+                                    )
+                                    settingsStore.update { current ->
+                                        val updatedList = current.secretKeys.filterNot {
+                                            it.keyName == chosenKeyName
+                                        } + newEntry
+                                        current.copy(secretKeys = updatedList)
+                                    }
+                                } else {
+                                    // 确保选中的已有密钥处于启用状态
+                                    settingsStore.update { current ->
+                                        current.copy(
+                                            secretKeys = current.secretKeys.map {
+                                                if (it.keyName == chosenKeyName) it.copy(enabled = true) else it
+                                            }
+                                        )
+                                    }
+                                }
+                                val payload = buildJsonObject {
+                                    put("key_name", JsonPrimitive(chosenKeyName))
+                                    put(
+                                        "instruction",
+                                        JsonPrimitive("Use the exact alias `$chosenKeyName` in your tool arguments/commands. It will be automatically replaced with the real secret value at execution time.")
+                                    )
+                                }
+                                onToolAnswer(tool.toolCallId, payload.toString())
+                            }
+                        },
+                        enabled = canSubmit,
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Icon(
+                            imageVector = HugeIcons.Tick01,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(
+                            text = if (!createNewMode && existingKeys.isNotEmpty()) {
+                                "提供代名词: ${selectedExistingKeyName.orEmpty()}"
+                            } else {
+                                "保存密钥并提供代名词"
+                            },
+                            modifier = Modifier.padding(start = 4.dp),
+                        )
+                    }
+                } else if (isAnswered) {
+                    val answeredState = tool.approvalState as ToolApprovalState.Answered
+                    val answerJson = runCatching {
+                        JsonInstant.parseToJsonElement(answeredState.answer)
+                    }.getOrNull()
+                    val providedKeyName = answerJson?.jsonObject?.get("key_name")?.jsonPrimitive?.contentOrNull
+                        ?: answeredState.answer
+                    Text(
+                        text = "已提供密钥代名词: $providedKeyName（真实密钥仅保存在本地并在执行时自动替换）",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
             }
         },

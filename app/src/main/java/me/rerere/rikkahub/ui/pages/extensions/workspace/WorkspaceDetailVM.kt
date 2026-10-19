@@ -276,6 +276,14 @@ class WorkspaceDetailVM(
         }
     }
 
+    fun setToolEnabled(toolName: String, enabled: Boolean) {
+        viewModelScope.launch {
+            val workspace = state.value.workspace ?: return@launch
+            repository.setToolEnabled(workspace.id, toolName, enabled)
+            loadWorkspace()
+        }
+    }
+
     fun installRootfs(url: String) {
         viewModelScope.launch {
             _installError.value = null
