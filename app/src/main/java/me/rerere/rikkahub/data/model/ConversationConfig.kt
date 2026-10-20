@@ -38,8 +38,10 @@ data class ConversationConfig(
     val subAgentApproveDelete: Boolean = true,
     val childConversationIds: Set<Uuid> = emptySet(),
     val deletedChildConversationIds: Set<Uuid> = emptySet(),
+    val subAgentIdMap: Map<String, Uuid> = emptyMap(), // 主对话局部子代理代号（如 "sub_1" 或旧对话历史ID） -> 数据库真实子对话 UUID
     val parentConversationId: Uuid? = null,
     val autoApproveTools: Boolean = false,
+    val subAgentMaxStepsOverride: Int? = null, // 主代理调用时显式传入的单轮最大工具步数（null 则取子代理默认 subAgentMaxSteps，0 为不设限）
 )
 
 /** 是否为派生的子代理对话 */

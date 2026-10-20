@@ -2,6 +2,7 @@ package me.rerere.workspace
 
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.ConcurrentHashMap
 
 class RootfsPatcher {
     fun patch(
@@ -11,16 +12,27 @@ class RootfsPatcher {
         val etcDir = File(linuxDir, "etc")
         if (!etcDir.isDirectory) return
 
+        val cacheKey = "${linuxDir.absolutePath}|${options.nameservers.joinToString(",")}|${options.hostname}|${options.locale}"
+        if (cacheKey in patchedRoots &&
+            File(etcDir, "resolv.conf").isFile &&
+            File(linuxDir, "etc/profile.d/rikkahub-vps.sh").isFile &&
+            File(linuxDir, "$FAKE_PROC_REL_DIR/stat").isFile
+        ) {
+            return
+        }
+
         ensureRootfsDns(etcDir, options.nameservers)
         ensureHosts(etcDir, options.hostname)
         ensureHostname(etcDir, options.hostname)
         ensureLocale(etcDir, options.locale)
-        ensureGroupNames(etcDir, options.groupIds.ifEmpty { currentSupplementaryGroupIds() })
+        ensureGroupNames(etcDir, options.groupIds.ifEmpty { cachedSupplementaryGroupIds })
         ensureTempAndShmDirs(linuxDir)
         ensureFakeProcFiles(linuxDir)
         ensureDpkgAndAptSandboxFixes(linuxDir)
         ensureVpsCommandShims(linuxDir)
         ensureVpsRuntimeProfile(linuxDir)
+
+        patchedRoots.add(cacheKey)
     }
 
     private fun ensureRootfsDns(
@@ -469,6 +481,20 @@ class RootfsPatcher {
         private const val DEFAULT_HOSTNAME = "localhost"
         const val FAKE_PROC_REL_DIR = "run/rikkahub-proc"
         val FAKE_PROC_FILES = listOf("stat", "loadavg", "uptime", "vmstat")
+        val UNREADABLE_HOST_PROC_FILES: List<String> by lazy {
+            FAKE_PROC_FILES.filter { name -> !File("/proc/$name").canRead() }
+        }
+        private val patchedRoots: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        private val cachedSupplementaryGroupIds: List<Long> by lazy {
+            val status = File("/proc/self/status")
+            if (!status.isFile) return@lazy emptyList()
+            val groups = status.readLines().firstOrNull { it.startsWith("Groups:") } ?: return@lazy emptyList()
+            groups
+                .removePrefix("Groups:")
+                .trim()
+                .split(WHITESPACE_REGEX)
+                .mapNotNull { it.toLongOrNull() }
+        }
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val LOCAL_RESOLVERS = setOf(
             "127.0.0.1",

@@ -469,11 +469,14 @@ class ConversationRepository(
             id = Uuid.parse(entity.id),
             assistantId = Uuid.parse(entity.assistantId),
             title = entity.title,
-            isPinned = entity.isPinned,
+            messageNodes = emptyList(),
             createAt = Instant.ofEpochMilli(entity.createAt),
             updateAt = Instant.ofEpochMilli(entity.updateAt),
-            messageNodes = emptyList(),
-            folderId = entity.folderId.ifEmpty { null }?.let { Uuid.parse(it) },
+            isPinned = entity.isPinned,
+            folderId = entity.folderId.ifBlank { null }?.let(Uuid::parse),
+            config = if (entity.config.isBlank()) null else runCatching {
+                JsonInstant.decodeFromString<me.rerere.rikkahub.data.model.ConversationConfig>(entity.config)
+            }.getOrNull(),
         )
     }
 
@@ -546,6 +549,7 @@ data class LightConversationEntity(
     val createAt: Long,
     val updateAt: Long,
     val folderId: String = "",
+    val config: String = "",
 )
 
 data class ConversationPageResult(

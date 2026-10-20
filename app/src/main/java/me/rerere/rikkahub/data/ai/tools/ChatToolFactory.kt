@@ -65,8 +65,7 @@ class ChatToolFactory(
         }
 
         if (assistant.enableRecentChatsReference ||
-            assistant.isSubAgentEnabled ||
-            assistant.workspaceId != null
+            (assistant.isSubAgentEnabled && !isSubConversation)
         ) {
             addAll(
                 createConversationTools(
@@ -79,6 +78,7 @@ class ChatToolFactory(
                     boundSubAgentIds = assistant.effectiveSubAgentIds,
                     settings = settings,
                     assistant = assistant,
+                    workspaceRepository = workspaceRepository,
                 )
             )
         }

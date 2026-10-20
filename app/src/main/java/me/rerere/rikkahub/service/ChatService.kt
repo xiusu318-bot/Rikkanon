@@ -9,12 +9,17 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.completeWith
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,6 +78,7 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.allChildConversationIds
 import me.rerere.rikkahub.data.model.bindConfig
 import me.rerere.rikkahub.data.model.fillModelSnapshots
 import me.rerere.rikkahub.data.model.getAssistantOf
@@ -80,6 +86,7 @@ import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.model.getStoredAssistantOf
 import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.data.model.replaceRegexes
+import me.rerere.rikkahub.data.model.resolveLogicalSubAgentId
 import me.rerere.rikkahub.data.model.toMessageNode
 import me.rerere.rikkahub.data.model.withAssistantUpdate
 import me.rerere.rikkahub.data.model.withoutConversationFields
@@ -179,6 +186,7 @@ data class SubConversationStepSummary(
 
 data class SubConversationSendResult(
     val conversationId: Uuid,
+    val logicalId: String = conversationId.toString(),
     val title: String,
     val status: String, // "completed" | "running"
     val timedOut: Boolean,
@@ -285,6 +293,103 @@ class ChatService(
     private val _generationDoneFlow = MutableSharedFlow<Uuid>()
     val generationDoneFlow: SharedFlow<Uuid> = _generationDoneFlow.asSharedFlow()
 
+    // 子代理父子注册锁与并发限流池
+    private val subAgentRegistrationMutex = Mutex()
+    private val subAgentConcurrencyMutex = Mutex()
+    private val subAgentActiveCounts = ConcurrentHashMap<Uuid, Int>()
+    private val subAgentWaitQueues = ConcurrentHashMap<Uuid, ArrayDeque<CompletableDeferred<Unit>>>()
+    private val subAgentSlotAcquiredDeferreds = ConcurrentHashMap<Uuid, CompletableDeferred<Unit>>()
+
+    // 后台子代理完成自动通知状态机
+    private val subAgentNotificationLock = Any()
+    private val pendingBackgroundSubAgents = ConcurrentHashMap<Uuid, MutableSet<Uuid>>()
+    private val unconsumedCompletedSubAgents = ConcurrentHashMap<Uuid, LinkedHashMap<Uuid, CompletedSubAgentReport>>()
+    private val activeWaitingSubAgentReaders = ConcurrentHashMap<Uuid, AtomicInteger>()
+    private val parentSubAgentNotifyJobs = ConcurrentHashMap<Uuid, Job>()
+
+    private data class CompletedSubAgentReport(
+        val childId: Uuid,
+        val logicalId: String,
+        val title: String,
+        val assistantName: String?,
+        val modelName: String?,
+        val status: String,
+        val reply: String,
+        val toolSteps: List<SubConversationStepSummary>,
+        val allowInspect: Boolean,
+    )
+
+    private suspend fun <T> withSubAgentConcurrencySlot(
+        parentId: Uuid,
+        childId: Uuid,
+        getMaxConcurrency: suspend () -> Int,
+        onWaitingQueue: (Int) -> Unit,
+        onAcquired: () -> Unit,
+        block: suspend () -> T,
+    ): T {
+        val waiter: CompletableDeferred<Unit>? = subAgentConcurrencyMutex.withLock {
+            val limit = getMaxConcurrency().coerceAtLeast(1)
+            val active = subAgentActiveCounts[parentId] ?: 0
+            if (active < limit) {
+                subAgentActiveCounts[parentId] = active + 1
+                subAgentSlotAcquiredDeferreds[childId]?.complete(Unit)
+                null
+            } else {
+                val deferred = CompletableDeferred<Unit>()
+                val queue = subAgentWaitQueues.getOrPut(parentId) { ArrayDeque() }
+                queue.addLast(deferred)
+                onWaitingQueue(queue.size)
+                deferred
+            }
+        }
+
+        if (waiter != null) {
+            try {
+                waiter.await()
+                subAgentSlotAcquiredDeferreds[childId]?.complete(Unit)
+            } catch (e: Throwable) {
+                subAgentConcurrencyMutex.withLock {
+                    val queue = subAgentWaitQueues[parentId]
+                    val removed = queue?.remove(waiter) == true
+                    if (!removed && waiter.isCompleted) {
+                        releaseSubAgentSlotLocked(parentId, getMaxConcurrency().coerceAtLeast(1))
+                    }
+                }
+                throw e
+            }
+        }
+
+        onAcquired()
+        try {
+            return block()
+        } finally {
+            withContext(NonCancellable) {
+                val limit = runCatching { getMaxConcurrency().coerceAtLeast(1) }.getOrDefault(2)
+                subAgentConcurrencyMutex.withLock {
+                    releaseSubAgentSlotLocked(parentId, limit)
+                }
+            }
+        }
+    }
+
+    private fun releaseSubAgentSlotLocked(parentId: Uuid, limit: Int) {
+        val currentActive = (subAgentActiveCounts[parentId] ?: 1) - 1
+        val queue = subAgentWaitQueues[parentId]
+        var active = currentActive.coerceAtLeast(0)
+        while (queue != null && queue.isNotEmpty() && active < limit) {
+            val next = queue.removeFirst()
+            if (next.complete(Unit)) {
+                active++
+            }
+        }
+        if (active <= 0 && (queue == null || queue.isEmpty())) {
+            subAgentActiveCounts.remove(parentId)
+            subAgentWaitQueues.remove(parentId)
+        } else {
+            subAgentActiveCounts[parentId] = active
+        }
+    }
+
     fun cleanup() = runCatching { sessionManager.cleanup() }
 
     private fun onSessionGenerationFinished(session: ConversationSession, cause: Throwable?) {
@@ -371,6 +476,17 @@ class ChatService(
         val bound = conversation.bindConfig(settingsStore.awaitLoaded())
         if (bound !== conversation) conversationRepo.updateConversationConfig(bound)
         return bound
+    }
+
+    /**
+     * 安全获取会话（优先读内存中已初始化的活跃会话，否则从数据库加载），
+     * 绝不触发 `getConversationFlow` 在找不到 ID 时自动向数据库插入默认助手空白会话的副作用。
+     */
+    suspend fun getOrLoadConversation(conversationId: Uuid): Conversation? {
+        sessionManager.get(conversationId)?.state?.value
+            ?.takeIf { it.messageNodes.isNotEmpty() || it.config != null || it.title.isNotBlank() }
+            ?.let { return it }
+        return loadConversation(conversationId)
     }
 
     // ---- 发送消息 ----
@@ -924,83 +1040,154 @@ class ChatService(
 
             // start generating
             val session = sessionManager.getOrCreate(conversationId)
-            generationLoop.generateText(
-                settings = settings,
-                model = model,
-                processingStatus = session.processingStatus,
-                messages = conversation.currentMessages.let {
-                    if (messageRange != null) {
-                        it.subList(messageRange.start, messageRange.endInclusive + 1)
-                    } else {
-                        it
-                    }
-                },
-                assistant = assistant,
-                conversationId = conversationId,
-                conversationSystemPrompt = conversation.customSystemPrompt,
-                workspaceCwd = conversation.workspaceCwd,
-                memories = memoryRepository.getFiles(assistant.memoryId),
-                inputTransformers = buildList {
-                    addAll(inputTransformers)
-                    add(templateTransformer)
-                    add(workspaceReminderTransformer)
-                },
-                outputTransformers = outputTransformers,
-                tools = tools,
-                autoApproveTools = autoApproveTools,
-                pollQueuedUserMessages = {
-                    val steered = mutableListOf<UIMessage>()
-                    while (true) {
-                        val next = synchronized(session) {
-                            session.messageQueue.takeNext()
-                        } ?: break
-                        if (next.answer) {
-                            val processed = preprocessUserInputParts(next.parts, assistant)
+            val parentId = conversation.config?.parentConversationId
+            val configuredMaxSteps = if (isSubConversation) {
+                val overrideSteps = conversation.config?.subAgentMaxStepsOverride
+                when {
+                    overrideSteps != null -> if (overrideSteps <= 0) 256 else overrideSteps
+                    assistant.subAgentMaxSteps > 0 -> assistant.subAgentMaxSteps
+                    else -> 256
+                }
+            } else {
+                256
+            }
+
+            val runGeneration: suspend () -> Unit = {
+                generationLoop.generateText(
+                    settings = settings,
+                    model = model,
+                    processingStatus = session.processingStatus,
+                    messages = conversation.currentMessages.let {
+                        if (messageRange != null) {
+                            it.subList(messageRange.start, messageRange.endInclusive + 1)
+                        } else {
+                            it
+                        }
+                    },
+                    assistant = assistant,
+                    conversationId = conversationId,
+                    conversationSystemPrompt = conversation.customSystemPrompt,
+                    workspaceCwd = conversation.workspaceCwd,
+                    memories = memoryRepository.getFiles(assistant.memoryId),
+                    inputTransformers = buildList {
+                        addAll(inputTransformers)
+                        add(templateTransformer)
+                        add(workspaceReminderTransformer)
+                    },
+                    outputTransformers = outputTransformers,
+                    tools = tools,
+                    maxSteps = configuredMaxSteps,
+                    autoApproveTools = autoApproveTools,
+                    pollQueuedUserMessages = {
+                        val steered = mutableListOf<UIMessage>()
+                        // 若该对话有后台运行完毕且尚未被 conversation_read 消费的子代理结果，在下一步直接通过 Steer 通道通知父代理
+                        drainCompletedSubAgentNotificationText(conversationId)?.let { notifyText ->
                             steered += UIMessage(
                                 role = MessageRole.USER,
-                                parts = processed,
+                                parts = listOf(UIMessagePart.Text(notifyText)),
                             )
                         }
+                        while (true) {
+                            val next = synchronized(session) {
+                                session.messageQueue.takeNext()
+                            } ?: break
+                            if (next.answer) {
+                                val processed = preprocessUserInputParts(next.parts, assistant)
+                                steered += UIMessage(
+                                    role = MessageRole.USER,
+                                    parts = processed,
+                                )
+                            }
+                        }
+                        steered
+                    },
+                ).onCompletion {
+                    // 可能被取消了，或者意外结束，兜底更新
+                    val updatedConversation = session.finishGeneration { conversation ->
+                        saveConversation(conversationId, conversation)
                     }
-                    steered
-                },
-            ).onCompletion {
-                // 可能被取消了，或者意外结束，兜底更新
-                val updatedConversation = session.finishGeneration { conversation ->
-                    saveConversation(conversationId, conversation)
-                }
 
-                // 生成结束：取消 Live Update 通知，后台时发送完成通知
-                appEventBus.emit(
-                    AppEvent.ChatGenerationEnded(
-                        conversationId = conversationId,
-                        senderName = senderName,
-                        contentPreview = updatedConversation.currentMessages.lastOrNull()
-                            ?.toText()?.take(50)?.trim() ?: "",
+                    // 生成结束：取消 Live Update 通知，后台时发送完成通知
+                    appEventBus.emit(
+                        AppEvent.ChatGenerationEnded(
+                            conversationId = conversationId,
+                            senderName = senderName,
+                            contentPreview = updatedConversation.currentMessages.lastOrNull()
+                                ?.toText()?.take(50)?.trim() ?: "",
+                        )
                     )
-                )
-            }.collect { chunk ->
-                when (chunk) {
-                    is GenerationChunk.Messages -> {
-                        val updatedConversation = getConversationFlow(conversationId).value
-                            .updateCurrentMessages(chunk.messages)
-                        updateConversation(conversationId, updatedConversation)
+                }.collect { chunk ->
+                    when (chunk) {
+                        is GenerationChunk.Messages -> {
+                            val updatedConversation = getConversationFlow(conversationId).value
+                                .updateCurrentMessages(chunk.messages)
+                            updateConversation(conversationId, updatedConversation)
 
-                        // 通知等边缘副作用由 ChatNotificationManager 消费；
-                        // tryEmit 不挂起，事件丢失只影响单次通知更新，不能反压生成链
-                        chunk.messages.lastOrNull()?.let { lastMessage ->
-                            appEventBus.tryEmit(
-                                AppEvent.ChatGenerationUpdate(conversationId, lastMessage, senderName)
-                            )
+                            // 通知等边缘副作用由 ChatNotificationManager 消费；
+                            // tryEmit 不挂起，事件丢失只影响单次通知更新，不能反压生成链
+                            chunk.messages.lastOrNull()?.let { lastMessage ->
+                                appEventBus.tryEmit(
+                                    AppEvent.ChatGenerationUpdate(conversationId, lastMessage, senderName)
+                                )
+                            }
                         }
                     }
                 }
+            }
+
+            if (isSubConversation && parentId != null) {
+                withSubAgentConcurrencySlot(
+                    parentId = parentId,
+                    childId = conversationId,
+                    getMaxConcurrency = {
+                        val latestSettings = settingsStore.awaitLoaded()
+                        val parentConv = getOrLoadConversation(parentId)
+                        val parentAssistant = parentConv?.let { latestSettings.getStoredAssistantOf(it) }
+                            ?: latestSettings.getCurrentAssistant()
+                        parentAssistant.subAgentMaxConcurrency.coerceAtLeast(1)
+                    },
+                    onWaitingQueue = { queuePos ->
+                        session.processingStatus.value = "排队等待并发执行 (#$queuePos)..."
+                    },
+                    onAcquired = {
+                        if (session.processingStatus.value?.startsWith("排队等待") == true) {
+                            session.processingStatus.value = null
+                        }
+                    },
+                    block = runGeneration,
+                )
+            } else {
+                runGeneration()
             }
         }.onFailure {
             // 兜底取消 Live Update 通知（生成开始前失败时 onCompletion 不会执行）
             appEventBus.tryEmit(AppEvent.ChatGenerationEnded(conversationId, senderName, null))
             if (it is CancellationException) throw it
             sessionManager.get(conversationId)?.messageQueue?.pause()
+
+            // 若是后台子代理请求失败且尚未产生有效助手回复，把错误详情记入子对话，绝不留空白空壳
+            val failedSession = sessionManager.get(conversationId)
+            val failedConv = failedSession?.state?.value
+            if (failedConv?.config?.parentConversationId != null) {
+                val lastNode = failedConv.messageNodes.lastOrNull()
+                if (lastNode == null || lastNode.role == MessageRole.USER || lastNode.currentMessage.parts.isEmptyInputMessage()) {
+                    val errMsg = UIMessage(
+                        role = MessageRole.ASSISTANT,
+                        parts = listOf(
+                            UIMessagePart.Text("⚠️ 子代理执行失败: ${it.message ?: it.javaClass.simpleName}")
+                        ),
+                        modelId = model.id,
+                    )
+                    val updatedNodes = if (lastNode?.role == MessageRole.ASSISTANT && lastNode.currentMessage.parts.isEmptyInputMessage()) {
+                        failedConv.messageNodes.dropLast(1) + errMsg.toMessageNode()
+                    } else {
+                        failedConv.messageNodes + errMsg.toMessageNode()
+                    }
+                    runCatching {
+                        saveConversation(conversationId, failedConv.copy(messageNodes = updatedNodes))
+                    }
+                }
+            }
 
             it.printStackTrace()
             addError(it, conversationId, title = context.getString(R.string.error_title_generation))
@@ -1633,7 +1820,80 @@ class ChatService(
             .getConversationsOfAssistant(currentConversation.assistantId)
             .first()
             .mapTo(mutableSetOf()) { it.title }
-        val forkConversation = createForkConversation(currentConversation, copiedNodes, existingTitles)
+        val rawFork = createForkConversation(currentConversation, copiedNodes, existingTitles)
+
+        // 若被分支的主对话存在关联子代理，为新分支深拷贝独立的子代理副本（将副本的 parentConversationId 指向新分支主对话），
+        // 并在新分支主对话的 subAgentIdMap 中将原代号（如 "sub_1" 及历史旧ID）指向新克隆的子代理 UUID，
+        // 做到既不改动一字历史上下文（100% 保住缓存），又让新分支拥有完全独立的子代理且点「返回主对话」准确回到新分支。
+        val truncatedSource = currentConversation.copy(messageNodes = copiedNodes)
+        val sourceChildIds = truncatedSource.allChildConversationIds.toList()
+        val forkConversation = if (sourceChildIds.isNotEmpty()) {
+            val oldMap = currentConversation.config?.subAgentIdMap.orEmpty()
+            val newIdMap = mutableMapOf<String, Uuid>()
+            val newChildIds = LinkedHashSet<Uuid>()
+            var nextSubIdx = 1
+
+            for (oldChildId in sourceChildIds) {
+                val origChild = getOrLoadConversation(oldChildId) ?: continue
+                val clonedChildId = Uuid.random()
+                val clonedChildNodes = origChild.messageNodes.map { node ->
+                    node.copy(
+                        id = Uuid.random(),
+                        messages = node.messages.map { msg ->
+                            msg.copy(
+                                parts = msg.parts.map { part -> part.copyWithForkedFileUrl() }
+                            )
+                        }
+                    )
+                }
+                val clonedChildConfig = (origChild.config ?: me.rerere.rikkahub.data.model.ConversationConfig()).copy(
+                    parentConversationId = rawFork.id,
+                    childConversationIds = emptySet(),
+                    deletedChildConversationIds = emptySet(),
+                    subAgentIdMap = emptyMap(),
+                )
+                val clonedChild = origChild.copy(
+                    id = clonedChildId,
+                    messageNodes = clonedChildNodes,
+                    config = clonedChildConfig,
+                )
+                saveConversation(clonedChildId, clonedChild)
+                newChildIds.add(clonedChildId)
+
+                val matchingKeys = oldMap.entries.filter { it.value == oldChildId }.map { it.key }
+                var hasSubKey = false
+                for (key in matchingKeys) {
+                    newIdMap[key] = clonedChildId
+                    if (key.startsWith("sub_")) {
+                        hasSubKey = true
+                        val idx = key.removePrefix("sub_").toIntOrNull()
+                        if (idx != null && idx >= nextSubIdx) {
+                            nextSubIdx = idx + 1
+                        }
+                    }
+                }
+                if (!hasSubKey) {
+                    while ("sub_$nextSubIdx" in newIdMap) {
+                        nextSubIdx++
+                    }
+                    newIdMap["sub_$nextSubIdx"] = clonedChildId
+                    nextSubIdx++
+                }
+                // 同时将旧真实 UUID 字符串映射到新克隆的子代理 UUID，兼容历史消息中写了旧 UUID 的对话
+                newIdMap[oldChildId.toString()] = clonedChildId
+            }
+
+            val baseConfig = rawFork.config ?: me.rerere.rikkahub.data.model.ConversationConfig()
+            rawFork.copy(
+                config = baseConfig.copy(
+                    childConversationIds = newChildIds,
+                    deletedChildConversationIds = emptySet(),
+                    subAgentIdMap = newIdMap,
+                )
+            )
+        } else {
+            rawFork
+        }
 
         saveConversation(forkConversation.id, forkConversation)
         memoryConsolidationScheduler.onConversationForked(forkConversation)
@@ -1762,6 +2022,10 @@ class ChatService(
 
     // 停止当前会话生成任务（不清理会话缓存）
     suspend fun stopGeneration(conversationId: Uuid) {
+        synchronized(subAgentNotificationLock) {
+            parentSubAgentNotifyJobs.remove(conversationId)?.cancel()
+            pendingBackgroundSubAgents.values.forEach { it.remove(conversationId) }
+        }
         val session = sessionManager.get(conversationId) ?: return
         val jobs = synchronized(session) {
             session.messageQueue.pause()
@@ -1776,7 +2040,9 @@ class ChatService(
 
     fun getConversationRuntimeStatus(conversationId: Uuid): Pair<String, String?> {
         val session = sessionManager.get(conversationId) ?: return "idle" to null
-        val isGen = session.isGenerating
+        val isGen = session.isGenerating ||
+            session.submittingMessage != null ||
+            session.messageQueue.state.value.messages.isNotEmpty()
         val hasPendingApproval = session.state.value.currentMessages.any { msg ->
             msg.parts.any { it is UIMessagePart.Tool && it.isPending }
         }
@@ -1796,22 +2062,41 @@ class ChatService(
     suspend fun sendToSubConversation(
         parentConversationId: Uuid,
         targetConversationId: Uuid? = null,
+        preallocatedNewTargetId: Uuid? = null,
         targetAssistantId: Uuid? = null,
         title: String? = null,
         message: String,
         wait: Boolean = true,
         timeoutMs: Long = 60_000L,
         interrupt: Boolean = false,
+        maxStepsOverride: Int? = null,
     ): SubConversationSendResult {
         require(message.isNotBlank()) { "message must not be blank" }
         require(targetConversationId != parentConversationId) {
             "Cannot send sub-agent message to the current parent conversation itself ($parentConversationId)"
         }
 
+        val targetId = targetConversationId ?: preallocatedNewTargetId ?: Uuid.random()
+        // 若是新建子代理，在进入任何挂起 I/O 前确保已在内存中同步分配 sub_N 编号，严格保证并发调用顺序
+        val preassignedLogicalId = if (targetConversationId == null) {
+            reserveChildConversationIdImmediate(parentConversationId, targetId)
+        } else null
+
         val settings = settingsStore.awaitLoaded()
         val parentConversation = getConversationFlow(parentConversationId).value.bindConfig(settings)
         val parentStoredAssistant = settings.getStoredAssistantOf(parentConversation)
         val parentEffectiveAssistant = settings.getAssistantOf(parentConversation)
+
+        // 若传入了 targetConversationId（追问已有子代理），强制校验其必须属于当前主对话派生的子代理，严禁触碰普通用户对话
+        if (targetConversationId != null) {
+            val existingTarget = getOrLoadConversation(targetConversationId)
+                ?: error("Sub-agent conversation not found: $targetConversationId")
+            val isOwnedSubAgent = existingTarget.config?.parentConversationId == parentConversationId ||
+                (targetConversationId in parentConversation.config?.childConversationIds.orEmpty() && existingTarget.config?.parentConversationId != null)
+            require(isOwnedSubAgent) {
+                "Permission denied: conversation $targetConversationId is not a sub-agent of the current conversation"
+            }
+        }
 
         // 解析子代理绑定的目标助手（按传入的 assistant_id 匹配绑定的子代理助手）
         val resolvedSubAssistant = (targetAssistantId?.let { settings.getAssistantById(it) })
@@ -1833,140 +2118,236 @@ class ChatService(
         }
         val subEnabledSkills = resolvedSubAssistant.enabledSkills
 
-        val targetId = targetConversationId ?: Uuid.random()
         val targetSession = sessionManager.getOrCreate(targetId)
+        // 持有引用计数，防止 5 秒空闲定时器在排队或刚创建期间将子代理会话从内存卸载
+        targetSession.acquire()
 
-        // 初始化或创建子对话
-        targetSession.initialize {
-            loadConversation(targetId) ?: run {
-                val subConfig = me.rerere.rikkahub.data.model.ConversationConfig(
-                    chatModelId = resolvedSubModel?.id ?: resolvedSubAssistant.chatModelId,
-                    reasoningLevel = resolvedSubAssistant.reasoningLevel,
-                    enableWebSearch = resolvedSubAssistant.enableWebSearch,
-                    builtInSearch = builtInSearch,
-                    mcpServers = resolvedSubAssistant.mcpServers,
-                    workspaceId = sharedWorkspaceId,
-                    enabledSkills = subEnabledSkills,
-                    disabledWorkspaceTools = resolvedSubAssistant.disabledWorkspaceTools,
-                    enableSecretKeyAlias = resolvedSubAssistant.enableSecretKeyAlias || parentEffectiveAssistant.enableSecretKeyAlias,
-                    enableAskKeyTool = false,
-                    childConversationIds = emptySet(),
-                    parentConversationId = parentConversationId,
-                    autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
-                )
-                val fallbackTitle = message.lineSequence().firstOrNull()?.trim()?.take(16)?.ifBlank { null }
-                    ?: "子代理-${targetId.toString().take(4)}"
-                Conversation(
-                    id = targetId,
-                    assistantId = resolvedSubAssistant.id,
-                    title = title?.trim()?.ifBlank { null } ?: fallbackTitle,
-                    messageNodes = emptyList(),
-                    customSystemPrompt = if (resolvedSubAssistant.id == parentConversation.assistantId) {
-                        parentConversation.customSystemPrompt
-                    } else {
-                        null
-                    },
-                    modeInjectionIds = resolvedSubAssistant.modeInjectionIds,
-                    lorebookIds = resolvedSubAssistant.lorebookIds,
-                    config = subConfig,
-                    workspaceCwd = sharedWorkspaceCwd,
-                    folderId = if (resolvedSubAssistant.id == parentConversation.assistantId) {
-                        parentConversation.folderId
-                    } else {
-                        null
-                    },
-                )
+        try {
+            // 将子对话 ID 持久化记录到主对话的 config.childConversationIds 与 subAgentIdMap 中，获取局部代号（如 "sub_1"）
+            val logicalId = registerChildConversation(parentConversationId, targetId, preassignedLogicalId)
+
+            // 初始化或创建子对话
+            targetSession.initialize {
+                loadConversation(targetId) ?: run {
+                    val subConfig = me.rerere.rikkahub.data.model.ConversationConfig(
+                        chatModelId = resolvedSubModel?.id ?: resolvedSubAssistant.chatModelId,
+                        reasoningLevel = resolvedSubAssistant.reasoningLevel,
+                        enableWebSearch = resolvedSubAssistant.enableWebSearch,
+                        builtInSearch = builtInSearch,
+                        mcpServers = resolvedSubAssistant.mcpServers,
+                        workspaceId = sharedWorkspaceId,
+                        enabledSkills = subEnabledSkills,
+                        disabledWorkspaceTools = resolvedSubAssistant.disabledWorkspaceTools,
+                        enableSecretKeyAlias = resolvedSubAssistant.enableSecretKeyAlias || parentEffectiveAssistant.enableSecretKeyAlias,
+                        enableAskKeyTool = false,
+                        childConversationIds = emptySet(),
+                        parentConversationId = parentConversationId,
+                        autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
+                        subAgentMaxStepsOverride = maxStepsOverride,
+                    )
+                    val fallbackTitle = message.lineSequence().firstOrNull()?.trim()?.take(16)?.ifBlank { null }
+                        ?: "子代理-$logicalId"
+                    Conversation(
+                        id = targetId,
+                        assistantId = resolvedSubAssistant.id,
+                        title = title?.trim()?.ifBlank { null } ?: fallbackTitle,
+                        messageNodes = emptyList(),
+                        customSystemPrompt = if (resolvedSubAssistant.id == parentConversation.assistantId) {
+                            parentConversation.customSystemPrompt
+                        } else {
+                            null
+                        },
+                        modeInjectionIds = resolvedSubAssistant.modeInjectionIds,
+                        lorebookIds = resolvedSubAssistant.lorebookIds,
+                        config = subConfig,
+                        workspaceCwd = sharedWorkspaceCwd,
+                        folderId = if (resolvedSubAssistant.id == parentConversation.assistantId) {
+                            parentConversation.folderId
+                        } else {
+                            null
+                        },
+                    )
+                }
             }
-        }
 
-        // 确保子对话配置了 최신工具/免审批状态 且更新标题（若传入了新标题）
-        val existingChild = targetSession.state.value
-        val updatedChildTitle = title?.trim()?.takeIf { it.isNotEmpty() }
-            ?: existingChild.title.takeIf { it.isNotBlank() && !it.startsWith("Sub-", ignoreCase = true) }
-            ?: "子代理-${targetId.toString().take(4)}"
-        val updatedChildConfig = (existingChild.config ?: parentConversation.config)?.copy(
-            parentConversationId = existingChild.config?.parentConversationId ?: parentConversationId,
-            workspaceId = existingChild.config?.workspaceId ?: sharedWorkspaceId,
-            disabledWorkspaceTools = resolvedSubAssistant.disabledWorkspaceTools,
-            enableSecretKeyAlias = resolvedSubAssistant.enableSecretKeyAlias || parentEffectiveAssistant.enableSecretKeyAlias,
-            mcpServers = resolvedSubAssistant.mcpServers,
-            enabledSkills = subEnabledSkills,
-            enableWebSearch = resolvedSubAssistant.enableWebSearch,
-            autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
-        )
-        if (updatedChildTitle != existingChild.title || updatedChildConfig != existingChild.config) {
+            // 确保子对话配置了最新工具/免审批/步数限制状态，并立即落库防止成为未持久化空壳
+            val existingChild = targetSession.state.value
+            val updatedChildTitle = title?.trim()?.takeIf { it.isNotEmpty() }
+                ?: existingChild.title.takeIf { it.isNotBlank() && !it.startsWith("Sub-", ignoreCase = true) }
+                ?: "子代理-$logicalId"
+            val updatedChildConfig = (existingChild.config ?: parentConversation.config)?.copy(
+                parentConversationId = existingChild.config?.parentConversationId ?: parentConversationId,
+                workspaceId = existingChild.config?.workspaceId ?: sharedWorkspaceId,
+                disabledWorkspaceTools = resolvedSubAssistant.disabledWorkspaceTools,
+                enableSecretKeyAlias = resolvedSubAssistant.enableSecretKeyAlias || parentEffectiveAssistant.enableSecretKeyAlias,
+                mcpServers = resolvedSubAssistant.mcpServers,
+                enabledSkills = subEnabledSkills,
+                enableWebSearch = resolvedSubAssistant.enableWebSearch,
+                autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
+                subAgentMaxStepsOverride = maxStepsOverride,
+            )
             val updatedChild = existingChild.copy(
+                assistantId = if (targetConversationId == null) resolvedSubAssistant.id else existingChild.assistantId,
                 title = updatedChildTitle,
                 config = updatedChildConfig,
             )
-            saveConversation(targetId, updatedChild)
-        }
+            if (
+                !conversationRepo.existsConversationById(targetId) ||
+                updatedChild != existingChild
+            ) {
+                saveConversation(targetId, updatedChild)
+            }
 
-        val childAssistant = settings.getAssistantOf(targetSession.state.value)
-        val childModel = settings.getChatModelOf(targetSession.state.value)
-        val childAssistantName = childAssistant.name.ifBlank { context.getString(R.string.assistant_page_default_assistant) }
-        val childModelName = childModel?.displayName
+            val childAssistant = settings.getAssistantOf(targetSession.state.value)
+            val childModel = settings.getChatModelOf(targetSession.state.value)
+            val childAssistantName = childAssistant.name.ifBlank { context.getString(R.string.assistant_page_default_assistant) }
+            val childModelName = childModel?.displayName
 
-        // 将子对话 ID 记录到主对话的 config.childConversationIds 中，实现主从跟随
-        registerChildConversation(parentConversationId, targetId)
+            // 开启新一轮消息前，清除该子代理上一轮可能残留的未消费后台通知
+            markSubAgentResultConsumed(parentConversationId, targetId)
 
-        if (interrupt && targetSession.isGenerating) {
-            stopGeneration(targetId)
-        }
+            if (interrupt && targetSession.isGenerating) {
+                stopGeneration(targetId)
+            }
 
-        val replyDeferred = CompletableDeferred<String?>()
-        synchronized(targetSession) {
-            targetSession.messageQueue.resume()
-            targetSession.messageQueue.enqueue(
-                parts = listOf(UIMessagePart.Text(message)),
-                answer = true,
-                reply = replyDeferred,
-            )
-            dispatchNextQueuedMessage(targetId)
-        }
+            val slotAcquiredDeferred = CompletableDeferred<Unit>()
+            subAgentSlotAcquiredDeferreds[targetId] = slotAcquiredDeferred
+            val replyDeferred = CompletableDeferred<String?>()
+            replyDeferred.invokeOnCompletion {
+                subAgentSlotAcquiredDeferreds.remove(targetId)
+                slotAcquiredDeferred.complete(Unit)
+                targetSession.release()
+                Unit
+            }
 
-        if (!wait) {
+            synchronized(targetSession) {
+                targetSession.messageQueue.resume()
+                targetSession.messageQueue.enqueue(
+                    parts = listOf(UIMessagePart.Text(message)),
+                    answer = true,
+                    reply = replyDeferred,
+                )
+                dispatchNextQueuedMessage(targetId)
+            }
+
+            // 等待几毫秒确保后台协程已将 USER 消息写入会话并落库，杜绝异步返回瞬间 total_messages == 0
+            withTimeoutOrNull(1_500L) {
+                while (
+                    targetSession.state.value.messageNodes.isEmpty() &&
+                    !replyDeferred.isCompleted &&
+                    (targetSession.submittingMessage != null || targetSession.messageQueue.state.value.messages.isNotEmpty() || targetSession.isGenerating)
+                ) {
+                    delay(15)
+                }
+            }
+
+            if (!wait) {
+                registerBackgroundSubAgentWatch(
+                    parentConversationId = parentConversationId,
+                    targetId = targetId,
+                    logicalId = logicalId,
+                    replyDeferred = replyDeferred,
+                    allowInspect = parentEffectiveAssistant.subAgentAllowInspect,
+                )
+                val (status, procStatus) = getConversationRuntimeStatus(targetId)
+                return SubConversationSendResult(
+                    conversationId = targetId,
+                    logicalId = logicalId,
+                    title = targetSession.state.value.title,
+                    status = if (status == "idle") "running" else status,
+                    timedOut = false,
+                    reply = null,
+                    toolSteps = extractRecentToolSteps(targetSession.state.value),
+                    processingStatus = procStatus,
+                    assistantId = childAssistant.id,
+                    assistantName = childAssistantName,
+                    modelName = childModelName,
+                )
+            }
+
+            // 当存在并发排队限制时，排队等待槽位的时间不计入子代理自身的执行超时时间
+            while (!slotAcquiredDeferred.isCompleted && !replyDeferred.isCompleted) {
+                delay(50)
+            }
+
+            val boundedTimeout = timeoutMs.coerceIn(1_000L, 600_000L)
+            val completedReply = withTimeoutOrNull(boundedTimeout) {
+                runCatching { replyDeferred.await() }.getOrElse { err ->
+                    "Error: ${err.message}"
+                }
+            }
+
+            val latestChild = targetSession.state.value
             val (status, procStatus) = getConversationRuntimeStatus(targetId)
+            val timedOut = completedReply == null && (targetSession.isGenerating || status == "running")
+            if (timedOut) {
+                registerBackgroundSubAgentWatch(
+                    parentConversationId = parentConversationId,
+                    targetId = targetId,
+                    logicalId = logicalId,
+                    replyDeferred = replyDeferred,
+                    allowInspect = parentEffectiveAssistant.subAgentAllowInspect,
+                )
+            }
+            val finalReply = completedReply ?: latestChild.currentMessages
+                .lastOrNull { it.role == MessageRole.ASSISTANT }
+                ?.toText()
+
             return SubConversationSendResult(
                 conversationId = targetId,
-                title = targetSession.state.value.title,
-                status = if (status == "idle") "running" else status,
-                timedOut = false,
-                reply = null,
-                toolSteps = extractRecentToolSteps(targetSession.state.value),
+                logicalId = logicalId,
+                title = latestChild.title,
+                status = if (timedOut) "running" else "completed",
+                timedOut = timedOut,
+                reply = finalReply,
+                toolSteps = extractRecentToolSteps(latestChild),
                 processingStatus = procStatus,
                 assistantId = childAssistant.id,
                 assistantName = childAssistantName,
                 modelName = childModelName,
             )
+        } catch (t: Throwable) {
+            targetSession.release()
+            throw t
         }
+    }
 
-        val boundedTimeout = timeoutMs.coerceIn(1_000L, 600_000L)
-        val completedReply = withTimeoutOrNull(boundedTimeout) {
-            runCatching { replyDeferred.await() }.getOrElse { err ->
-                "Error: ${err.message}"
+    /**
+     * 批量等待多个子代理对话完成（或其中任意一个完成），供 `conversation_read` 批量汇聚结果使用。
+     * 等待期间标记 [activeWaitingSubAgentReaders]，避免后台子代理完成瞬间抢先发通知消息。
+     */
+    suspend fun waitForSubConversations(
+        targetIds: Collection<Uuid>,
+        waitMs: Long,
+        waitAll: Boolean = true,
+    ) {
+        if (waitMs <= 0L || targetIds.isEmpty()) return
+        targetIds.forEach { id ->
+            activeWaitingSubAgentReaders.getOrPut(id) { AtomicInteger(0) }.incrementAndGet()
+        }
+        try {
+            withTimeoutOrNull(waitMs.coerceIn(100L, 600_000L)) {
+                while (true) {
+                    val runningStates = targetIds.map { id ->
+                        getConversationRuntimeStatus(id).first == "running"
+                    }
+                    val shouldContinue = if (waitAll) {
+                        runningStates.any { it }
+                    } else {
+                        runningStates.all { it }
+                    }
+                    if (!shouldContinue) break
+                    delay(100)
+                }
+            }
+        } finally {
+            targetIds.forEach { id ->
+                val counter = activeWaitingSubAgentReaders[id]
+                if (counter != null && counter.decrementAndGet() <= 0) {
+                    activeWaitingSubAgentReaders.remove(id, counter)
+                }
             }
         }
-
-        val latestChild = targetSession.state.value
-        val (status, procStatus) = getConversationRuntimeStatus(targetId)
-        val timedOut = completedReply == null && (targetSession.isGenerating || status == "running")
-        val finalReply = completedReply ?: latestChild.currentMessages
-            .lastOrNull { it.role == MessageRole.ASSISTANT }
-            ?.toText()
-
-        return SubConversationSendResult(
-            conversationId = targetId,
-            title = latestChild.title,
-            status = if (timedOut) "running" else "completed",
-            timedOut = timedOut,
-            reply = finalReply,
-            toolSteps = extractRecentToolSteps(latestChild),
-            processingStatus = procStatus,
-            assistantId = childAssistant.id,
-            assistantName = childAssistantName,
-            modelName = childModelName,
-        )
     }
 
     /**
@@ -1978,17 +2359,11 @@ class ChatService(
         limit: Int = 20,
         waitMs: Long = 0L,
     ): SubConversationReadResult {
-        val activeSession = sessionManager.get(targetConversationId)
-        if (activeSession != null && activeSession.isGenerating && waitMs > 0L) {
-            withTimeoutOrNull(waitMs.coerceIn(100L, 600_000L)) {
-                while (activeSession.isGenerating) {
-                    activeSession.getJob()?.join() ?: delay(100)
-                }
-            }
+        if (waitMs > 0L) {
+            waitForSubConversations(listOf(targetConversationId), waitMs, waitAll = true)
         }
 
-        val conversation = activeSession?.state?.value
-            ?: conversationRepo.getConversationById(targetConversationId)
+        val conversation = getOrLoadConversation(targetConversationId)
             ?: error("Conversation not found: $targetConversationId")
 
         val settings = settingsStore.awaitLoaded()
@@ -2028,32 +2403,268 @@ class ChatService(
         )
     }
 
-    private suspend fun registerChildConversation(parentId: Uuid, childId: Uuid) {
-        if (parentId == childId) return
-        val parentSession = sessionManager.get(parentId)
-        val parentConv = parentSession?.state?.value ?: conversationRepo.getConversationById(parentId) ?: return
-        val settings = settingsStore.awaitLoaded()
-        val boundParent = parentConv.bindConfig(settings)
-        val oldConfig = boundParent.config ?: return
-        if (childId in oldConfig.childConversationIds && childId !in oldConfig.deletedChildConversationIds) return
+    /**
+     * 在内存中同步为新建子代理预订 `sub_N` 局部编号（无挂起点），
+     * 配合 `GenerationLoop` 的 `CoroutineStart.UNDISPATCHED` 确保同一轮并发调用多个 `conversation_send` 时，
+     * 100% 严格按照模型生成的工具调用顺序分配 `sub_1`、`sub_2`。
+     */
+    fun reserveChildConversationIdImmediate(parentId: Uuid, childId: Uuid): String? {
+        if (parentId == childId) return null
+        synchronized(subAgentNotificationLock) {
+            val parentSession = sessionManager.get(parentId) ?: return null
+            val parentConv = parentSession.state.value
+            val settings = settingsStore.settingsFlow.value
+            val boundParent = parentConv.bindConfig(settings)
+            val oldConfig = boundParent.config ?: return null
 
-        val newConfig = oldConfig.copy(
-            childConversationIds = oldConfig.childConversationIds + childId,
-            deletedChildConversationIds = oldConfig.deletedChildConversationIds - childId,
-        )
-        val updatedParent = boundParent.copy(config = newConfig)
-        if (parentSession != null) {
-            parentSession.updateConversation(updatedParent)
+            val existing = oldConfig.subAgentIdMap.entries
+                .firstOrNull { (k, v) -> v == childId && k.startsWith("sub_") }
+                ?.key
+            if (existing != null) return existing
+
+            val maxIdx = oldConfig.subAgentIdMap.keys
+                .mapNotNull { k -> k.removePrefix("sub_").toIntOrNull() }
+                .maxOrNull() ?: oldConfig.childConversationIds.size
+            var candidateIdx = maxIdx + 1
+            while ("sub_$candidateIdx" in oldConfig.subAgentIdMap) {
+                candidateIdx++
+            }
+            val logicalId = "sub_$candidateIdx"
+            val newConfig = oldConfig.copy(
+                childConversationIds = oldConfig.childConversationIds + childId,
+                deletedChildConversationIds = oldConfig.deletedChildConversationIds - childId,
+                subAgentIdMap = oldConfig.subAgentIdMap + (logicalId to childId),
+            )
+            parentSession.updateConversation(boundParent.copy(config = newConfig))
+            return logicalId
         }
-        if (conversationRepo.existsConversationById(parentId)) {
-            conversationRepo.updateConversationConfig(updatedParent)
+    }
+
+    private suspend fun registerChildConversation(
+        parentId: Uuid,
+        childId: Uuid,
+        preassignedLogicalId: String? = null,
+    ): String {
+        if (parentId == childId) return childId.toString()
+        return subAgentRegistrationMutex.withLock {
+            val parentSession = sessionManager.get(parentId)
+            val parentConv = parentSession?.state?.value ?: conversationRepo.getConversationById(parentId)
+                ?: return@withLock preassignedLogicalId ?: childId.toString()
+            val settings = settingsStore.awaitLoaded()
+            val boundParent = parentConv.bindConfig(settings)
+            val oldConfig = boundParent.config ?: return@withLock preassignedLogicalId ?: childId.toString()
+
+            val existingLogicalId = oldConfig.subAgentIdMap.entries
+                .firstOrNull { (k, v) -> v == childId && k.startsWith("sub_") }
+                ?.key
+                ?: preassignedLogicalId
+
+            val logicalId = existingLogicalId ?: synchronized(subAgentNotificationLock) {
+                val maxIdx = oldConfig.subAgentIdMap.keys
+                    .mapNotNull { k -> k.removePrefix("sub_").toIntOrNull() }
+                    .maxOrNull() ?: oldConfig.childConversationIds.size
+                var candidateIdx = maxIdx + 1
+                while ("sub_$candidateIdx" in oldConfig.subAgentIdMap) {
+                    candidateIdx++
+                }
+                "sub_$candidateIdx"
+            }
+
+            val newConfig = synchronized(subAgentNotificationLock) {
+                val latestConv = parentSession?.state?.value?.bindConfig(settings) ?: boundParent
+                val latestCfg = latestConv.config ?: oldConfig
+                latestCfg.copy(
+                    childConversationIds = latestCfg.childConversationIds + childId,
+                    deletedChildConversationIds = latestCfg.deletedChildConversationIds - childId,
+                    subAgentIdMap = latestCfg.subAgentIdMap + (logicalId to childId),
+                )
+            }
+            val updatedParent = (parentSession?.state?.value ?: boundParent).copy(config = newConfig)
+            if (parentSession != null) {
+                parentSession.updateConversation(updatedParent)
+            }
+            if (conversationRepo.existsConversationById(parentId)) {
+                conversationRepo.updateConversationConfig(updatedParent)
+            }
+            logicalId
+        }
+    }
+
+    /**
+     * 标记某个后台子代理的完成结果已被主代理（通过 `conversation_read` 或新一轮 `conversation_send`）消费，
+     * 撤回其待发送的后台完成通知，避免重复通知。
+     */
+    fun markSubAgentResultConsumed(parentId: Uuid, childId: Uuid) {
+        synchronized(subAgentNotificationLock) {
+            pendingBackgroundSubAgents[parentId]?.remove(childId)
+            unconsumedCompletedSubAgents[parentId]?.remove(childId)
+        }
+    }
+
+    private fun registerBackgroundSubAgentWatch(
+        parentConversationId: Uuid,
+        targetId: Uuid,
+        logicalId: String,
+        replyDeferred: CompletableDeferred<String?>,
+        allowInspect: Boolean,
+    ) {
+        synchronized(subAgentNotificationLock) {
+            pendingBackgroundSubAgents.getOrPut(parentConversationId) { linkedSetOf() }.add(targetId)
+        }
+        appScope.launch {
+            val completedReply = try {
+                replyDeferred.await()
+            } catch (e: CancellationException) {
+                synchronized(subAgentNotificationLock) {
+                    pendingBackgroundSubAgents[parentConversationId]?.remove(targetId)
+                }
+                return@launch
+            } catch (t: Throwable) {
+                "⚠️ 子代理执行异常: ${t.message ?: t.javaClass.simpleName}"
+            }
+
+            val latestChild = getOrLoadConversation(targetId)
+            val settings = settingsStore.awaitLoaded()
+            val childAssistant = latestChild?.let { settings.getAssistantOf(it) }
+            val childModel = latestChild?.let { settings.getChatModelOf(it) }
+            val finalReply = completedReply?.takeIf { it.isNotBlank() }
+                ?: latestChild?.currentMessages?.lastOrNull { it.role == MessageRole.ASSISTANT }?.toText()
+                ?: "(无文本回复)"
+            val currentParent = getOrLoadConversation(parentConversationId)
+            val resolvedLogicalId = currentParent?.resolveLogicalSubAgentId(targetId) ?: logicalId
+
+            val report = CompletedSubAgentReport(
+                childId = targetId,
+                logicalId = resolvedLogicalId,
+                title = latestChild?.title?.ifBlank { null } ?: resolvedLogicalId,
+                assistantName = childAssistant?.name?.ifBlank { null },
+                modelName = childModel?.displayName,
+                status = "completed",
+                reply = finalReply,
+                toolSteps = if (allowInspect && latestChild != null) extractRecentToolSteps(latestChild) else emptyList(),
+                allowInspect = allowInspect,
+            )
+
+            // 原子地从 pendingBackgroundSubAgents 移入 unconsumedCompletedSubAgents；
+            // 若在运行期间已被停止/删除或被主动清除，则不再投递
+            val shouldSchedule = synchronized(subAgentNotificationLock) {
+                val wasPending = pendingBackgroundSubAgents[parentConversationId]?.remove(targetId) == true
+                if (wasPending) {
+                    unconsumedCompletedSubAgents
+                        .getOrPut(parentConversationId) { LinkedHashMap() }[targetId] = report
+                    true
+                } else {
+                    false
+                }
+            }
+
+            if (shouldSchedule) {
+                scheduleParentSubAgentNotification(parentConversationId)
+            }
+        }
+    }
+
+    private fun drainCompletedSubAgentNotificationText(parentId: Uuid): String? {
+        val reports: List<CompletedSubAgentReport> = synchronized(subAgentNotificationLock) {
+            val map = unconsumedCompletedSubAgents[parentId] ?: return null
+            if (map.isEmpty()) return null
+            // 若其中有子代理正在被 waitForSubConversations 同步阻塞等待读取，暂不抢先消费
+            val anyBeingWaitedByRead = map.keys.any { cid ->
+                (activeWaitingSubAgentReaders[cid]?.get() ?: 0) > 0
+            }
+            if (anyBeingWaitedByRead) return null
+            val list = map.values.toList()
+            map.clear()
+            list
+        }
+        if (reports.isEmpty()) return null
+
+        return buildString {
+            appendLine(SUB_AGENT_NOTIFICATION_HEADER)
+            appendLine("The following background sub-agent task(s) spawned by this conversation have finished execution:")
+            reports.forEach { r ->
+                appendLine()
+                append("### Sub-Agent `").append(r.logicalId).append("`: ").append(r.title)
+                if (!r.assistantName.isNullOrBlank()) {
+                    append(" (Assistant: ").append(r.assistantName)
+                    if (r.allowInspect && !r.modelName.isNullOrBlank()) {
+                        append(", Model: ").append(r.modelName)
+                    }
+                    append(")")
+                }
+                appendLine()
+                appendLine("- Status: ${r.status}")
+                if (r.allowInspect && r.toolSteps.isNotEmpty()) {
+                    val toolSummary = r.toolSteps.joinToString(", ") { it.toolName }
+                    appendLine("- Tool Steps (${r.toolSteps.size}): $toolSummary")
+                }
+                appendLine("- Final Reply:")
+                appendLine(r.reply.trim())
+            }
+        }.trim()
+    }
+
+    private fun scheduleParentSubAgentNotification(parentId: Uuid) {
+        synchronized(subAgentNotificationLock) {
+            parentSubAgentNotifyJobs[parentId]?.cancel()
+            parentSubAgentNotifyJobs[parentId] = appScope.launch {
+                // 留出 350ms 窗口，供正在退出 waitForSubConversations 的 conversation_read 直接消费，并合并同时完成的并发子代理
+                delay(350)
+
+                while (true) {
+                    val hasUnconsumed = synchronized(subAgentNotificationLock) {
+                        !unconsumedCompletedSubAgents[parentId].isNullOrEmpty()
+                    }
+                    if (!hasUnconsumed) return@launch
+
+                    val parentSession = sessionManager.get(parentId)
+                    val isParentGenerating = parentSession?.isGenerating == true ||
+                        parentSession?.submittingMessage != null
+
+                    val remainingPendingIds = synchronized(subAgentNotificationLock) {
+                        pendingBackgroundSubAgents[parentId]?.toList().orEmpty()
+                    }
+                    val anyOtherSubAgentStillRunning = remainingPendingIds.any { childId ->
+                        getConversationRuntimeStatus(childId).first == "running"
+                    }
+                    if (!anyOtherSubAgentStillRunning && remainingPendingIds.isNotEmpty()) {
+                        synchronized(subAgentNotificationLock) {
+                            pendingBackgroundSubAgents[parentId]?.removeAll(remainingPendingIds.toSet())
+                        }
+                    }
+
+                    val anyActiveReaderWaiting = synchronized(subAgentNotificationLock) {
+                        unconsumedCompletedSubAgents[parentId]?.keys?.any { cid ->
+                            (activeWaitingSubAgentReaders[cid]?.get() ?: 0) > 0
+                        } == true
+                    }
+
+                    if (!isParentGenerating && !anyOtherSubAgentStillRunning && !anyActiveReaderWaiting) {
+                        break
+                    }
+                    delay(250)
+                }
+
+                val parentConv = getOrLoadConversation(parentId) ?: return@launch
+                val hasPendingApproval = parentConv.currentMessages.any { msg ->
+                    msg.parts.any { it is UIMessagePart.Tool && it.isPending }
+                }
+                if (hasPendingApproval) return@launch
+
+                val notificationText = drainCompletedSubAgentNotificationText(parentId) ?: return@launch
+                sendMessage(
+                    conversationId = parentId,
+                    content = listOf(UIMessagePart.Text(notificationText)),
+                    answer = true,
+                )
+            }
         }
     }
 
     /**
      * 彻底删除指定的子代理对话（供主代理 `conversation_delete` 工具及人类用户 UI 手动删除共用）：
      * 1. 若该子代理正在生成，先立即停止；
-     * 2. 从主对话的 `childConversationIds` 移除并记入 `deletedChildConversationIds`，使其从顶栏胶囊和侧边栏树立即消失；
+     * 2. 从主对话的 `childConversationIds` 与 `subAgentIdMap` 移除并记入 `deletedChildConversationIds`，使其从顶栏胶囊和侧边栏树立即消失；
      * 3. 从数据库删除该子对话。
      */
     suspend fun deleteSubConversation(
@@ -2065,26 +2676,32 @@ class ChatService(
         }
         stopGeneration(targetConversationId)
 
-        val targetConv = sessionManager.get(targetConversationId)?.state?.value
-            ?: conversationRepo.getConversationById(targetConversationId)
+        val targetConv = getOrLoadConversation(targetConversationId)
         val effectiveParentId = parentConversationId ?: targetConv?.config?.parentConversationId
+        if (effectiveParentId != null) {
+            markSubAgentResultConsumed(effectiveParentId, targetConversationId)
+        }
 
         if (effectiveParentId != null && effectiveParentId != targetConversationId) {
-            val parentSession = sessionManager.get(effectiveParentId)
-            val parentConv = parentSession?.state?.value ?: conversationRepo.getConversationById(effectiveParentId)
-            if (parentConv != null) {
-                val settings = settingsStore.awaitLoaded()
-                val boundParent = parentConv.bindConfig(settings)
-                val oldConfig = boundParent.config
-                if (oldConfig != null) {
-                    val newConfig = oldConfig.copy(
-                        childConversationIds = oldConfig.childConversationIds - targetConversationId,
-                        deletedChildConversationIds = oldConfig.deletedChildConversationIds + targetConversationId,
-                    )
-                    val updatedParent = boundParent.copy(config = newConfig)
-                    parentSession?.updateConversation(updatedParent)
-                    if (conversationRepo.existsConversationById(effectiveParentId)) {
-                        conversationRepo.updateConversationConfig(updatedParent)
+            subAgentRegistrationMutex.withLock {
+                val parentSession = sessionManager.get(effectiveParentId)
+                val parentConv = parentSession?.state?.value ?: conversationRepo.getConversationById(effectiveParentId)
+                if (parentConv != null) {
+                    val settings = settingsStore.awaitLoaded()
+                    val boundParent = parentConv.bindConfig(settings)
+                    val oldConfig = boundParent.config
+                    if (oldConfig != null) {
+                        val cleanedIdMap = oldConfig.subAgentIdMap.filterValues { it != targetConversationId }
+                        val newConfig = oldConfig.copy(
+                            childConversationIds = oldConfig.childConversationIds - targetConversationId,
+                            deletedChildConversationIds = oldConfig.deletedChildConversationIds + targetConversationId,
+                            subAgentIdMap = cleanedIdMap,
+                        )
+                        val updatedParent = boundParent.copy(config = newConfig)
+                        parentSession?.updateConversation(updatedParent)
+                        if (conversationRepo.existsConversationById(effectiveParentId)) {
+                            conversationRepo.updateConversationConfig(updatedParent)
+                        }
                     }
                 }
             }
@@ -2110,3 +2727,6 @@ class ChatService(
         }
     }
 }
+
+const val SUB_AGENT_NOTIFICATION_HEADER = "[System Notification: Background Sub-Agent Completed]"
+

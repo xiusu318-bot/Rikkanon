@@ -44,7 +44,9 @@ data class Assistant(
     val subAgentIds: Set<Uuid> = emptySet(),            // 勾选绑定的子代理助手 ID 集合（支持单选或多选）
     val subAgentAssistantId: Uuid? = null,              // 兼容旧版单选字段
     val subAgentShareWorkspace: Boolean = true,         // 子代理是否自动继承并共享主对话的工作区与交互式终端池
+    val subAgentMaxConcurrency: Int = 2,                // 子代理同时并发运行上限（默认 2，最低 1）
     val subAgentAutoApproveTools: Boolean = true,       // 作为子代理运行时工具调用是否自动免审批
+    val subAgentMaxSteps: Int = 0,                      // 作为子代理运行时单轮默认最大工具调用步数（0 表示不设限）
     // 主代理对子代理的 4 项进阶控制权限开关（最低基础权限为单次同步派发并仅拿最终回复）
     val subAgentAllowInspect: Boolean = true,           // 权限1：允许窥屏读取子代理状态/消息历史 (conversation_read) 及返回工具步骤 (tool_steps)
     val subAgentAllowMultiTurnAndAsync: Boolean = true, // 权限2：允许对已有子代理多轮追问 (conversation_id) 与后台异步并发 (wait=false)

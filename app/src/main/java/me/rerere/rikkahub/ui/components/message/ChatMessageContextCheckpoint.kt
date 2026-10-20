@@ -28,13 +28,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.UIMessagePart
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowDown01
 import me.rerere.hugeicons.stroke.ArrowUp01
+import me.rerere.hugeicons.stroke.Message02
 import me.rerere.hugeicons.stroke.Package01
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.service.SUB_AGENT_NOTIFICATION_HEADER
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
+
+private val SUB_AGENT_ID_TAG_REGEX = Regex("""### Sub-Agent `([^`]+)`""")
+
+val UIMessage.isSubAgentNotification: Boolean
+    get() = role == MessageRole.USER &&
+        parts.firstOrNull()?.let { it is UIMessagePart.Text && it.text.startsWith(SUB_AGENT_NOTIFICATION_HEADER) } == true
 
 /**
  * 压缩检查点：分隔线上方的消息仍可查看，但不再发送给模型，由这里的摘要代替。
@@ -122,3 +132,95 @@ fun ChatMessageContextCheckpoint(
         }
     }
 }
+
+/**
+ * 后台子代理自动完成通知条：默认折叠为紧凑分隔条，点击可展开查看子代理回传详情，并支持重发、编辑或删除。
+ */
+@Composable
+fun ChatMessageSubAgentNotification(
+    message: UIMessage,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onRegenerate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val rawText = message.toText()
+    val subIds = SUB_AGENT_ID_TAG_REGEX.findAll(rawText)
+        .map { it.groupValues[1] }
+        .toList()
+    val labelSuffix = if (subIds.isNotEmpty()) " (${subIds.joinToString(", ")})" else ""
+    val bodyMarkdown = rawText.removePrefix(SUB_AGENT_NOTIFICATION_HEADER).trim()
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.small)
+                .clickable { expanded = !expanded }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            HorizontalDivider(modifier = Modifier.weight(1f))
+            Icon(
+                imageVector = HugeIcons.Message02,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "子代理后台任务已完成$labelSuffix",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Icon(
+                imageVector = if (expanded) HugeIcons.ArrowUp01 else HugeIcons.ArrowDown01,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            HorizontalDivider(modifier = Modifier.weight(1f))
+        }
+
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
+                Column(
+                    modifier = Modifier.padding(start = 12.dp, top = 12.dp, end = 12.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    MarkdownBlock(content = bodyMarkdown)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        TextButton(onClick = onRegenerate) {
+                            Text("重新触发汇报")
+                        }
+                        TextButton(onClick = onEdit) {
+                            Text(stringResource(R.string.edit))
+                        }
+                        TextButton(onClick = onDelete) {
+                            Text(
+                                text = stringResource(R.string.delete),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

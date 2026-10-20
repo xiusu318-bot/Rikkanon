@@ -74,10 +74,9 @@ internal fun createWorkspaceTerminalSession(
 
     // 当 Android 宿主机锁死 /proc/stat、/proc/loadavg、/proc/uptime、/proc/vmstat 时挂载可读兜底节点
     val fakeProcDir = File(linuxDir, RootfsPatcher.FAKE_PROC_REL_DIR)
-    RootfsPatcher.FAKE_PROC_FILES.forEach { name ->
-        val hostProc = File("/proc/$name")
+    RootfsPatcher.UNREADABLE_HOST_PROC_FILES.forEach { name ->
         val fakeProc = File(fakeProcDir, name)
-        if (!hostProc.canRead() && fakeProc.isFile) {
+        if (fakeProc.isFile) {
             args += "-b"
             args += "${fakeProc.absolutePath}:/proc/$name"
         }
@@ -387,6 +386,10 @@ private data class ProcStatEntry(
     val tpgid: Int,
 )
 
+private val cachedShellPids = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+private val lastSlowScanCache = java.util.concurrent.ConcurrentHashMap<Int, Pair<Long, TerminalProcessTreeState>>()
+private const val SLOW_SCAN_THROTTLE_MS = 250L
+
 private fun readProcStat(pid: Int): ProcStatEntry? {
     if (pid <= 0) return null
     return runCatching {
@@ -411,6 +414,8 @@ private fun readProcStat(pid: Int): ProcStatEntry? {
 
 /**
  * 检查指定终端会话 (以 PRoot 进程 [prootPid] 为会话首进程 sid == prootPid) 的进程树状态:
+ * - 优先使用缓存的 `shellPid` 和 `tpgid` 走 O(1) 快速路径（仅读取 2~3 个已知 PID 的 `/proc/<pid>/stat`），
+ *   彻底避免轮询期间反复全盘扫描 `/proc` 目录。
  * - 自动识别 PRoot 内部的顶层交互式 Shell 进程 (bash/sh/ash/dash/zsh)
  * - 判断顶层 Shell 是否已退出 (如执行了 `exit` 或 `Ctrl+D`)
  * - 判断当前是否回到了顶层 Shell 提示符 (`isAtPrompt`) 还是有前台子命令正在运行 (`foregroundCommand`)
@@ -429,6 +434,8 @@ internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState
 
     val prootStat = readProcStat(prootPid)
     if (prootStat == null || prootStat.state == 'Z' || prootStat.state == 'X') {
+        cachedShellPids.remove(prootPid)
+        lastSlowScanCache.remove(prootPid)
         return TerminalProcessTreeState(
             prootPid = prootPid,
             shellPid = 0,
@@ -440,6 +447,62 @@ internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState
     }
 
     val targetSid = if (prootStat.session > 0) prootStat.session else prootPid
+
+    // O(1) 快速路径：若已缓存该终端的顶层交互式 Shell PID，直接按 PID 精确读取，无需遍历 /proc
+    val knownShellPid = cachedShellPids[prootPid]
+    if (knownShellPid != null) {
+        val shellStat = readProcStat(knownShellPid)
+        if (shellStat != null &&
+            shellStat.state != 'Z' &&
+            shellStat.state != 'X' &&
+            (shellStat.ppid == prootPid || shellStat.session == targetSid)
+        ) {
+            val fgPgid = shellStat.tpgid.takeIf { it > 0 } ?: prootStat.tpgid.takeIf { it > 0 }
+            if (fgPgid != null && (fgPgid == shellStat.pgrp || fgPgid == prootStat.pgrp)) {
+                return TerminalProcessTreeState(
+                    prootPid = prootPid,
+                    shellPid = shellStat.pid,
+                    foregroundPgid = fgPgid,
+                    foregroundCommand = null,
+                    isAtPrompt = true,
+                    processExited = false,
+                )
+            }
+            if (fgPgid != null) {
+                val fgLeader = readProcStat(fgPgid)
+                if (fgLeader != null && fgLeader.state != 'Z' && fgLeader.state != 'X') {
+                    return TerminalProcessTreeState(
+                        prootPid = prootPid,
+                        shellPid = shellStat.pid,
+                        foregroundPgid = fgPgid,
+                        foregroundCommand = fgLeader.comm,
+                        isAtPrompt = false,
+                        processExited = false,
+                    )
+                }
+            }
+        } else {
+            // 之前存活的顶层 Shell 已退出（例如在终端执行了 exit 或 Ctrl+D）
+            cachedShellPids.remove(prootPid)
+            lastSlowScanCache.remove(prootPid)
+            return TerminalProcessTreeState(
+                prootPid = prootPid,
+                shellPid = 0,
+                foregroundPgid = null,
+                foregroundCommand = null,
+                isAtPrompt = false,
+                processExited = true,
+            )
+        }
+    }
+
+    // 慢路径节流：仅在首次发现 shellPid 或前台进程组组长已退出需查找组内其余进程时触发
+    val now = System.currentTimeMillis()
+    val cachedSlow = lastSlowScanCache[prootPid]
+    if (cachedSlow != null && now - cachedSlow.first < SLOW_SCAN_THROTTLE_MS) {
+        return cachedSlow.second
+    }
+
     val sessionProcs = runCatching {
         File("/proc").listFiles()
             ?.asSequence()
@@ -458,11 +521,15 @@ internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState
         .filter { it.pid != prootPid && it.ppid == prootPid }
         .minByOrNull { it.pid }
 
-    // 如果 PRoot 已经启动过子进程但现在没有任何存活的直接子进程，说明顶层 Shell 已经 exit
+    if (shellProc != null) {
+        cachedShellPids[prootPid] = shellProc.pid
+    }
+
+    // 如果 PRoot 尚未完成顶层 Shell 启动
     val childProcesses = sessionProcs.filter { it.pid != prootPid }
     if (shellProc == null && childProcesses.isEmpty()) {
         val fgPgid = prootStat.tpgid.takeIf { it > 0 }
-        return TerminalProcessTreeState(
+        val state = TerminalProcessTreeState(
             prootPid = prootPid,
             shellPid = prootPid,
             foregroundPgid = fgPgid,
@@ -470,6 +537,8 @@ internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState
             isAtPrompt = false,
             processExited = false,
         )
+        lastSlowScanCache[prootPid] = now to state
+        return state
     }
 
     val topShell = shellProc ?: childProcesses.minByOrNull { it.pid } ?: prootStat
@@ -486,7 +555,7 @@ internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState
     val isAtPrompt = fgSubprocs.isEmpty() && (fgPgid == null || fgPgid == topShell.pgrp || fgPgid == prootStat.pgrp)
     val fgCommand = fgSubprocs.lastOrNull()?.comm
 
-    return TerminalProcessTreeState(
+    val result = TerminalProcessTreeState(
         prootPid = prootPid,
         shellPid = topShell.pid,
         foregroundPgid = fgPgid,
@@ -494,6 +563,8 @@ internal fun inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState
         isAtPrompt = isAtPrompt,
         processExited = false,
     )
+    lastSlowScanCache[prootPid] = now to result
+    return result
 }
 
 internal fun readTerminalForegroundPgid(pid: Int): Int? =

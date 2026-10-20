@@ -5,6 +5,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -22,10 +23,15 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.allChildConversationIds
 import me.rerere.rikkahub.data.model.getAssistantOf
 import me.rerere.rikkahub.data.model.getChatModelOf
+import me.rerere.rikkahub.data.model.resolveLogicalSubAgentId
+import me.rerere.rikkahub.data.model.resolveRealSubAgentId
+import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.utils.JsonInstantPretty
 import me.rerere.rikkahub.utils.toLocalDate
+import me.rerere.workspace.WorkspaceShellStatus
 import kotlin.uuid.Uuid
 
 /**
@@ -33,7 +39,7 @@ import kotlin.uuid.Uuid
  * assistants.
  * - Only the bound sub-agent names and `assistant_id`s are included in the tool prompt so the model can
  *   distinguish and call them cleanly without exposing or depending on model names in the prompt.
- * - Full sub-agent assistant status (including current model, provider, etc.) and sub-agent conversation
+ * - Full sub-agent assistant status (including current model, provider, tools, etc.) and sub-agent conversation
  *   runtime status can be inspected on demand via `conversation_read` or `recent_chats`.
  */
 fun createConversationTools(
@@ -46,9 +52,11 @@ fun createConversationTools(
     boundSubAgentIds: Set<Uuid> = emptySet(),
     settings: Settings? = null,
     assistant: me.rerere.rikkahub.data.model.Assistant? = null,
+    workspaceRepository: WorkspaceRepository? = null,
 ): List<Tool> = buildList {
     val boundSubAssistants = settings?.assistants?.filter { it.id in boundSubAgentIds }.orEmpty()
     val tagMap = settings?.assistantTags?.associateBy { it.id }.orEmpty()
+    val enableRecentChats = assistant?.enableRecentChatsReference == true
 
     val allowInspect = assistant?.subAgentAllowInspect ?: true
     val allowMultiTurnAndAsync = assistant?.subAgentAllowMultiTurnAndAsync ?: true
@@ -64,11 +72,112 @@ fun createConversationTools(
     fun me.rerere.rikkahub.data.model.Assistant.resolveTagDescriptions(): List<String> =
         tags.mapNotNull { id -> tagMap[id]?.name?.trim()?.takeIf { it.isNotEmpty() } }
 
-    fun buildBoundSubAgentsStatusJson() = buildJsonArray {
+    suspend fun resolveTargetConversation(targetId: Uuid): Conversation? =
+        chatService?.getOrLoadConversation(targetId)
+            ?: conversationRepo.getConversationById(targetId)
+
+    suspend fun getParentConversation(): Conversation? =
+        currentConversationId?.let { cid -> resolveTargetConversation(cid) }
+
+    suspend fun resolveSubAgentRealId(rawId: String): Uuid? =
+        getParentConversation()?.resolveRealSubAgentId(rawId)
+
+    suspend fun toLogicalSubAgentId(realId: Uuid): String =
+        getParentConversation()?.resolveLogicalSubAgentId(realId) ?: realId.toString()
+
+    suspend fun isOwnedSubAgentConversation(targetId: Uuid): Boolean {
+        val parentId = currentConversationId ?: return false
+        if (targetId == parentId) return false
+        val targetConv = resolveTargetConversation(targetId) ?: return false
+        if (targetConv.config?.parentConversationId == parentId) return true
+        val parentConv = getParentConversation()
+        return parentConv != null &&
+            targetId in parentConv.allChildConversationIds &&
+            targetConv.config?.parentConversationId != null
+    }
+
+    suspend fun requireOwnedSubAgentConversation(targetId: Uuid) {
+        require(targetId != currentConversationId) { "Cannot target the current parent conversation itself" }
+        require(isOwnedSubAgentConversation(targetId)) {
+            "Permission denied: conversation $targetId is not a sub-agent of the current conversation"
+        }
+    }
+
+    suspend fun buildBoundSubAgentsStatusJson() = buildJsonArray {
+        val parentConv = getParentConversation()
+        val shareWorkspace = assistant?.subAgentShareWorkspace ?: true
+        val parentWorkspaceId = parentConv?.config?.workspaceId ?: assistant?.workspaceId
+
         boundSubAssistants.forEach { subAssistant ->
             val model = settings?.findModelById(subAssistant.chatModelId ?: settings.chatModelId)
             val provider = model?.let { m -> settings?.providers?.let { m.findProvider(it, checkOverwrite = false) } }
             val tagDescs = subAssistant.resolveTagDescriptions()
+            val effectiveWorkspaceId = if (shareWorkspace) {
+                parentWorkspaceId ?: subAssistant.workspaceId
+            } else {
+                subAssistant.workspaceId
+            }
+            val workspaceEntity = effectiveWorkspaceId?.toString()?.let { wid ->
+                workspaceRepository?.getById(wid)
+            }
+            val workspaceReady = workspaceEntity != null &&
+                workspaceEntity.shellStatus == WorkspaceShellStatus.READY.name
+            val enabledOverrides = workspaceEntity?.toolEnabledOverrides().orEmpty()
+
+            val availableTools = buildList {
+                if (workspaceReady) {
+                    AllWorkspaceToolNames.forEach { toolName ->
+                        if (resolveWorkspaceToolEnabled(toolName, enabledOverrides) &&
+                            toolName !in subAssistant.disabledWorkspaceTools
+                        ) {
+                            add(toolName)
+                        }
+                    }
+                }
+                if (subAssistant.enableWebSearch) {
+                    add("search_web")
+                    add("scrape_web")
+                }
+                if (subAssistant.enableMemory) {
+                    add("memory_query")
+                    add("memory_create")
+                    add("memory_str_replace")
+                    add("memory_append")
+                    add("memory_delete")
+                }
+                subAssistant.localTools.forEach { opt ->
+                    when (opt) {
+                        LocalToolOption.JavascriptEngine -> add("eval_javascript")
+                        LocalToolOption.TimeInfo -> add("get_time_info")
+                        LocalToolOption.Clipboard -> add("clipboard_tool")
+                        LocalToolOption.Tts -> add("text_to_speech")
+                        LocalToolOption.ScreenTime -> add("get_screen_time")
+                        LocalToolOption.Calendar -> {
+                            add("query_calendar_events")
+                            add("create_calendar_event")
+                        }
+                        LocalToolOption.ChartDisplay -> add("display_chart")
+                        // 子对话后台运行时不弹出交互式提问卡片
+                        else -> Unit
+                    }
+                }
+                if (subAssistant.enabledSkills.isNotEmpty()) {
+                    add("use_skill")
+                }
+                val activeMcpServers = settings?.mcpServers
+                    ?.filter { it.commonOptions.enable && it.id in subAssistant.mcpServers }
+                    .orEmpty()
+                activeMcpServers.forEach { server ->
+                    server.commonOptions.tools
+                        .filter { it.enable }
+                        .forEach { t -> add("mcp__${server.commonOptions.name}__${t.name}") }
+                }
+            }
+            val activeMcpServerNames = settings?.mcpServers
+                ?.filter { it.commonOptions.enable && it.id in subAssistant.mcpServers }
+                ?.map { it.commonOptions.name }
+                .orEmpty()
+
             add(buildJsonObject {
                 put("assistant_id", subAssistant.id.toString())
                 put("name", subAssistant.name.ifBlank { "Default Assistant" })
@@ -84,106 +193,122 @@ fun createConversationTools(
                 }
                 put("reasoning_level", subAssistant.reasoningLevel.name)
                 put("enable_web_search", subAssistant.enableWebSearch)
+                put("default_max_steps", subAssistant.subAgentMaxSteps.coerceAtLeast(0))
+                put("share_workspace", shareWorkspace && effectiveWorkspaceId != null)
+                put("tools", buildJsonArray {
+                    availableTools.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                })
+                if (subAssistant.enabledSkills.isNotEmpty()) {
+                    put("skills", buildJsonArray {
+                        subAssistant.enabledSkills.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                    })
+                }
+                if (activeMcpServerNames.isNotEmpty()) {
+                    put("mcp_servers", buildJsonArray {
+                        activeMcpServerNames.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                    })
+                }
             })
         }
     }
 
-    add(
-        Tool(
-            name = "recent_chats",
-            description = """
-                List bound sub-agent assistants status (including each assistant's current model) and recent conversations / active sub-agent conversations.
-            """.trimIndent().replace("\n", " "),
-            parameters = {
-                InputSchema.Obj(
-                    properties = buildJsonObject {
-                        put("limit", buildJsonObject {
-                            put("type", "integer")
-                            put(
-                                "description",
-                                "Maximum number of recent conversations to return (default: 15, max: 30)"
-                            )
-                        })
-                    }
-                )
-            },
-            execute = {
-                val limit = (it.jsonObject["limit"]?.jsonPrimitive?.intOrNull ?: 15).coerceIn(1, 30)
-                val recent = conversationRepo.getRecentConversations(
-                    assistantId = assistantId,
-                    limit = limit,
-                )
-                val childIds = currentConversationId?.let { cid ->
-                    chatService?.getConversationFlow(cid)?.value?.allChildConversationIds
-                }.orEmpty()
-                val childConversations = childIds.mapNotNull { childId ->
-                    chatService?.getConversationFlow(childId)?.value
-                        ?: conversationRepo.getConversationById(childId)
-                }
-                val merged = (childConversations + recent)
-                    .distinctBy { conv -> conv.id }
-                    .filter { conv -> conv.id != currentConversationId }
-                    .take(limit)
+    // 仅当用户在「记忆 -> 参考最近对话」中显式开启了 enableRecentChatsReference 时，才暴露 recent_chats 与 conversation_search
+    if (enableRecentChats) {
+        add(
+            Tool(
+                name = "recent_chats",
+                description = """
+                    List recent user conversations of this assistant to recall past context.
+                """.trimIndent().replace("\n", " "),
+                parameters = {
+                    InputSchema.Obj(
+                        properties = buildJsonObject {
+                            put("limit", buildJsonObject {
+                                put("type", "integer")
+                                put(
+                                    "description",
+                                    "Maximum number of recent conversations to return (default: 15, max: 30)"
+                                )
+                            })
+                        }
+                    )
+                },
+                execute = {
+                    val limit = (it.jsonObject["limit"]?.jsonPrimitive?.intOrNull ?: 15).coerceIn(1, 30)
+                    val childIds = currentConversationId?.let { cid ->
+                        chatService?.getConversationFlow(cid)?.value?.allChildConversationIds
+                    }.orEmpty()
+                    val recent = conversationRepo.getRecentConversations(
+                        assistantId = assistantId,
+                        limit = limit,
+                    )
+                        .filter { conv ->
+                            conv.id != currentConversationId &&
+                                conv.id !in childIds &&
+                                conversationRepo.getConversationById(conv.id)?.config?.parentConversationId == null
+                        }
+                        .take(limit)
 
-                val conversationsArray = buildJsonArray {
-                    merged.forEach { conversation ->
-                        val (status, procStatus) = chatService?.getConversationRuntimeStatus(conversation.id)
-                            ?: ("idle" to null)
-                        val convAssistant = settings?.getAssistantOf(conversation)
-                        val convModel = settings?.getChatModelOf(conversation)
-                        add(buildJsonObject {
-                            put("conversation_id", conversation.id.toString())
-                            put("title", conversation.title.ifBlank { "Untitled" })
-                            put("status", status)
-                            if (!procStatus.isNullOrBlank()) put("processing_status", procStatus)
-                            if (convAssistant != null) {
-                                put("assistant_id", convAssistant.id.toString())
-                                put("assistant_name", convAssistant.name.ifBlank { "Default Assistant" })
-                            }
-                            if (convModel != null) {
-                                put("model", convModel.displayName)
-                            }
-                            put("is_sub_agent", conversation.id in childIds || conversation.config?.parentConversationId == currentConversationId)
-                            put("last_chat", conversation.updateAt.toLocalDate())
-                        })
+                    val conversationsArray = buildJsonArray {
+                        recent.forEach { conversation ->
+                            add(buildJsonObject {
+                                put("conversation_id", conversation.id.toString())
+                                put("title", conversation.title.ifBlank { "Untitled" })
+                                put("last_chat", conversation.updateAt.toLocalDate())
+                            })
+                        }
                     }
+                    listOf(UIMessagePart.Text(JsonInstantPretty.encodeToString(conversationsArray)))
                 }
-
-                val payload = if (enableSubAgent && allowInspect && boundSubAssistants.isNotEmpty()) {
-                    buildJsonObject {
-                        put("bound_sub_agents", buildBoundSubAgentsStatusJson())
-                        put("conversations", conversationsArray)
-                    }
-                } else {
-                    conversationsArray
-                }
-                listOf(UIMessagePart.Text(JsonInstantPretty.encodeToString(payload)))
-            }
+            )
         )
-    )
 
-    add(conversationSearchTool { query -> conversationRepo.searchMessages(query, MessageSearchSort.RELEVANCE) })
+        add(conversationSearchTool { query -> conversationRepo.searchMessages(query, MessageSearchSort.RELEVANCE) })
+    }
 
-    // 仅在允许窥屏读取子代理状态 (allowInspect) 或开启了历史对话引用时暴露 conversation_read
-    if (!enableSubAgent || allowInspect || assistant?.enableRecentChatsReference == true) {
+    // 仅在允许窥屏读取子代理状态 (enableSubAgent && allowInspect) 或开启了历史对话引用 (enableRecentChats) 时暴露 conversation_read
+    if ((enableSubAgent && allowInspect && !isSubConversation) || enableRecentChats) {
         add(
             Tool(
                 name = "conversation_read",
-                description = """
-                    Inspect sub-agent status or read a conversation/sub-agent by `conversation_id`.
-                    - Omit `conversation_id` to inspect all bound sub-agent assistants' current status (including their active models) and all spawned sub-agent conversations of the current chat.
-                    - Pass `conversation_id` to read the real-time status, bound assistant/model info, tool execution progress, and messages of that specific conversation or sub-agent (optionally with `wait_sec`).
-                """.trimIndent().replace("\n", " "),
+                description = if (enableRecentChats) {
+                    """
+                        Inspect sub-agent status or read a conversation/sub-agent by `conversation_id`.
+                        - Omit `conversation_id` to inspect all bound sub-agent assistants' current status (including their active models) and all spawned sub-agent conversations of the current chat.
+                        - Pass `conversation_id` to read the real-time status, bound assistant/model info, tool execution progress, and messages of that specific conversation or sub-agent (optionally with `wait_sec`).
+                    """.trimIndent().replace("\n", " ")
+                } else {
+                    """
+                        Inspect bound sub-agent assistants and sub-agent conversations spawned by the current chat.
+                        - Omit `conversation_id` (and `conversation_ids`) to inspect all bound sub-agent assistants' current status and all spawned sub-agent conversations of the current chat (pass `wait_sec` > 0 to wait for all running sub-agents to finish).
+                        - Pass `conversation_id` or `conversation_ids` of sub-agents belonging to the current chat to read their real-time status, bound assistant/model info, tool execution progress, and messages (optionally with `wait_sec` to wait for completion).
+                    """.trimIndent().replace("\n", " ")
+                },
                 parameters = {
                     InputSchema.Obj(
                         properties = buildJsonObject {
                             put("conversation_id", buildJsonObject {
                                 put("type", "string")
-                                put("description", "ID of the target conversation or sub-agent. Omit to inspect bound sub-agent assistants status (including current models) and active sub-agent conversations.")
+                                put(
+                                    "description",
+                                    if (enableRecentChats) {
+                                        "ID of the target conversation or sub-agent. Omit to inspect bound sub-agent assistants status and active sub-agent conversations."
+                                    } else {
+                                        "ID of the target sub-agent conversation spawned by this chat. Omit to inspect bound sub-agent assistants status and active sub-agent conversations."
+                                    }
+                                )
+                            })
+                            put("conversation_ids", buildJsonObject {
+                                put("type", "array")
+                                put("items", buildJsonObject { put("type", "string") })
+                                put(
+                                    "description",
+                                    "Optional list of multiple sub-agent conversation IDs to inspect (and wait for when wait_sec > 0) in a single batch call."
+                                )
                             })
                             put("wait_sec", buildJsonObject {
                                 put("type", "integer")
-                                put("description", "Optional seconds to wait if the target conversation is currently running (default: 0, max: 600)")
+                                put("description", "Optional seconds to wait if the target sub-agent conversation(s) are currently running (default: 0, max: 600)")
                             })
                             put("offset", buildJsonObject {
                                 put("type", "integer")
@@ -202,14 +327,92 @@ fun createConversationTools(
                 needsApproval = { enableSubAgent && approveInspect },
                 execute = {
                 val args = it.jsonObject
+                val waitSec = (args["wait_sec"]?.jsonPrimitive?.intOrNull ?: 0).coerceIn(0, 600)
+                val offset = (args["offset"]?.jsonPrimitive?.intOrNull ?: 0).coerceAtLeast(0)
+                val limit = (args["limit"]?.jsonPrimitive?.intOrNull ?: READ_DEFAULT_LIMIT).coerceIn(1, READ_MAX_LIMIT)
                 val rawId = args["conversation_id"]?.jsonPrimitive?.contentOrNull?.trim()
+                val rawIds = args["conversation_ids"]
+                    ?.let { elem -> runCatching { elem.jsonArray }.getOrNull() }
+                    ?.mapNotNull { elem -> elem.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                    .orEmpty()
+
+                if (rawIds.isNotEmpty()) {
+                    val targetIds = rawIds.map { idStr ->
+                        resolveSubAgentRealId(idStr)
+                            ?: error("Sub-agent '$idStr' not found in the current conversation")
+                    }.distinct()
+                    targetIds.forEach { tid -> requireOwnedSubAgentConversation(tid) }
+                    if (chatService != null && waitSec > 0) {
+                        chatService.waitForSubConversations(targetIds, waitSec * 1_000L, waitAll = true)
+                    }
+                    val parentConv = getParentConversation()
+                    val batchPayload = buildJsonObject {
+                        put("conversations", buildJsonArray {
+                            for (tid in targetIds) {
+                                if (chatService != null) {
+                                    val result = chatService.readSubConversation(
+                                        targetConversationId = tid,
+                                        offset = offset,
+                                        limit = limit,
+                                        waitMs = 0L,
+                                    )
+                                    // 仅当读取结束时子代理确实已完成 (status != "running")，才标记为已消费，避免取消运行中子代理的完成通知
+                                    if (result.status != "running" && currentConversationId != null) {
+                                        chatService.markSubAgentResultConsumed(currentConversationId, tid)
+                                    }
+                                    val logicalId = parentConv?.resolveLogicalSubAgentId(result.conversationId)
+                                        ?: result.conversationId.toString()
+                                    add(buildJsonObject {
+                                        put("conversation_id", logicalId)
+                                        put("title", result.title)
+                                        put("status", result.status)
+                                        result.assistantId?.let { id -> put("assistant_id", id.toString()) }
+                                        result.assistantName?.let { name -> put("assistant_name", name) }
+                                        result.modelName?.let { model -> put("model", model) }
+                                        if (!result.processingStatus.isNullOrBlank()) {
+                                            put("processing_status", result.processingStatus)
+                                        }
+                                        put("total_messages", result.totalMessages)
+                                        put("messages", buildJsonArray {
+                                            result.messages.forEach { msg ->
+                                                add(buildJsonObject {
+                                                    put("position", msg.position)
+                                                    put("role", msg.role)
+                                                    put("text", msg.text)
+                                                    if (msg.toolSteps.isNotEmpty()) {
+                                                        put("tool_steps", buildJsonArray {
+                                                            msg.toolSteps.forEach { step ->
+                                                                add(buildJsonObject {
+                                                                    put("tool", step.toolName)
+                                                                    put("input", step.inputPreview)
+                                                                    put("executed", step.isExecuted)
+                                                                })
+                                                            }
+                                                        })
+                                                    }
+                                                })
+                                            }
+                                        })
+                                    })
+                                }
+                            }
+                        })
+                    }
+                    return@Tool listOf(UIMessagePart.Text(JsonInstantPretty.encodeToString(batchPayload)))
+                }
+
                 if (rawId.isNullOrBlank()) {
-                    val childIds = currentConversationId?.let { cid ->
-                        chatService?.getConversationFlow(cid)?.value?.allChildConversationIds
-                    }.orEmpty()
+                    val parentConv = getParentConversation()
+                    val childIds = parentConv?.allChildConversationIds.orEmpty()
+                    if (chatService != null && waitSec > 0 && childIds.isNotEmpty()) {
+                        chatService.waitForSubConversations(childIds, waitSec * 1_000L, waitAll = true)
+                    }
+                    val refreshedParent = getParentConversation() ?: parentConv
                     val childConversations = childIds.mapNotNull { childId ->
-                        chatService?.getConversationFlow(childId)?.value
-                            ?: conversationRepo.getConversationById(childId)
+                        resolveTargetConversation(childId)?.takeIf { conv ->
+                            conv.config?.parentConversationId == currentConversationId ||
+                                conv.config?.parentConversationId != null
+                        }
                     }
                     val overview = buildJsonObject {
                         put("bound_sub_agents", buildBoundSubAgentsStatusJson())
@@ -219,10 +422,23 @@ fun createConversationTools(
                                     ?: ("idle" to null)
                                 val convAssistant = settings?.getAssistantOf(conv)
                                 val convModel = settings?.getChatModelOf(conv)
+                                val dialogue = conv.currentMessages.filter {
+                                    it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT
+                                }
+                                val latestReply = dialogue.lastOrNull { it.role == MessageRole.ASSISTANT }
+                                    ?.toText()
+                                    ?.take(4_000)
+                                // 仅当子代理已完成且返回了最终回复时，才标记完成通知已消费
+                                if (status != "running" && !latestReply.isNullOrBlank() && currentConversationId != null) {
+                                    chatService?.markSubAgentResultConsumed(currentConversationId, conv.id)
+                                }
+                                val logicalId = refreshedParent?.resolveLogicalSubAgentId(conv.id)
+                                    ?: conv.id.toString()
                                 add(buildJsonObject {
-                                    put("conversation_id", conv.id.toString())
+                                    put("conversation_id", logicalId)
                                     put("title", conv.title.ifBlank { "Untitled" })
                                     put("status", status)
+                                    put("total_messages", dialogue.size)
                                     if (!procStatus.isNullOrBlank()) put("processing_status", procStatus)
                                     if (convAssistant != null) {
                                         put("assistant_id", convAssistant.id.toString())
@@ -231,6 +447,9 @@ fun createConversationTools(
                                     if (convModel != null) {
                                         put("model", convModel.displayName)
                                     }
+                                    if (!latestReply.isNullOrBlank()) {
+                                        put("latest_reply", latestReply)
+                                    }
                                 })
                             }
                         })
@@ -238,21 +457,36 @@ fun createConversationTools(
                     return@Tool listOf(UIMessagePart.Text(JsonInstantPretty.encodeToString(overview)))
                 }
 
-                val targetId = runCatching { Uuid.parse(rawId) }.getOrNull()
-                    ?: error("Invalid conversation_id UUID: $rawId")
-                val waitSec = (args["wait_sec"]?.jsonPrimitive?.intOrNull ?: 0).coerceIn(0, 600)
-                val offset = (args["offset"]?.jsonPrimitive?.intOrNull ?: 0).coerceAtLeast(0)
-                val limit = (args["limit"]?.jsonPrimitive?.intOrNull ?: READ_DEFAULT_LIMIT).coerceIn(1, READ_MAX_LIMIT)
+                val targetId = resolveSubAgentRealId(rawId)
+                    ?: (if (enableRecentChats) runCatching { Uuid.parse(rawId) }.getOrNull() else null)
+                    ?: error("Sub-agent or conversation '$rawId' not found in current conversation")
+                val isSubAgentTarget = isOwnedSubAgentConversation(targetId)
+                if (!enableRecentChats) {
+                    // 未开启「参考最近对话」时，严格限制只能读取当前主对话派生的子代理
+                    requireOwnedSubAgentConversation(targetId)
+                } else {
+                    // 即使开启了「参考最近对话」，也不允许跨主对话读取其他主对话派生的私有子代理
+                    val targetConv = resolveTargetConversation(targetId)
+                        ?: error("Conversation not found: $rawId")
+                    if (targetConv.config?.parentConversationId != null && !isSubAgentTarget) {
+                        error("Permission denied: conversation $rawId belongs to another parent conversation")
+                    }
+                }
 
-                if (chatService != null) {
+                if (chatService != null && isSubAgentTarget) {
                     val result = chatService.readSubConversation(
                         targetConversationId = targetId,
                         offset = offset,
                         limit = limit,
                         waitMs = waitSec * 1_000L,
                     )
+                    // 仅当读取结束时子代理已完成 (status != "running")，才标记为已消费
+                    if (result.status != "running" && currentConversationId != null) {
+                        chatService.markSubAgentResultConsumed(currentConversationId, targetId)
+                    }
+                    val logicalId = toLogicalSubAgentId(result.conversationId)
                     val payload = buildJsonObject {
-                        put("conversation_id", result.conversationId.toString())
+                        put("conversation_id", logicalId)
                         put("title", result.title)
                         put("status", result.status)
                         result.assistantId?.let { id -> put("assistant_id", id.toString()) }
@@ -353,7 +587,7 @@ fun createConversationTools(
                             if (allowMultiTurnAndAsync) {
                                 put("conversation_id", buildJsonObject {
                                     put("type", "string")
-                                    put("description", "Existing sub-agent conversation ID to message. Omit when creating a new sub-agent conversation.")
+                                    put("description", "Existing sub-agent local ID to message (e.g. 'sub_1', 'sub_2'). Omit when creating a new sub-agent conversation.")
                                 })
                             }
                             put("title", buildJsonObject {
@@ -380,6 +614,13 @@ fun createConversationTools(
                                     put("description", "When true and the target sub-agent is currently running, immediately stop its current turn and start a new turn with `message`. Defaults to false.")
                                 })
                             }
+                            put("max_steps", buildJsonObject {
+                                put("type", "integer")
+                                put(
+                                    "description",
+                                    "Optional max tool-calling steps allowed for the sub-agent in this turn (0 = unlimited, >0 = max tool steps before forcing final response; omit to use the sub-agent's configured default)."
+                                )
+                            })
                         },
                         required = listOf("message")
                     )
@@ -401,10 +642,21 @@ fun createConversationTools(
                     val rawTargetId = if (allowMultiTurnAndAsync) {
                         args["conversation_id"]?.jsonPrimitive?.contentOrNull?.trim()
                     } else null
-                    val targetId = if (!rawTargetId.isNullOrBlank()) {
-                        runCatching { Uuid.parse(rawTargetId) }.getOrNull()
-                            ?: error("Invalid conversation_id UUID: $rawTargetId")
+                    // 当创建新子代理 (rawTargetId 为空) 时，在任何挂起操作前同步预订 sub_N 编号，
+                    // 配合 GenerationLoop 的 CoroutineStart.UNDISPATCHED 确保同一批并发调用严格按顺序分配 sub_1, sub_2
+                    val preallocatedNewTargetId = if (rawTargetId.isNullOrBlank()) {
+                        Uuid.random().also { newChildId ->
+                            chatService.reserveChildConversationIdImmediate(currentConversationId, newChildId)
+                        }
                     } else null
+
+                    val targetId = if (!rawTargetId.isNullOrBlank()) {
+                        resolveSubAgentRealId(rawTargetId)
+                            ?: error("Sub-agent '$rawTargetId' not found in the current conversation")
+                    } else null
+                    if (targetId != null) {
+                        requireOwnedSubAgentConversation(targetId)
+                    }
                     val rawAssistantId = args["assistant_id"]?.jsonPrimitive?.contentOrNull?.trim()
                     val targetAssistantId = if (!rawAssistantId.isNullOrBlank()) {
                         runCatching { Uuid.parse(rawAssistantId) }.getOrNull()
@@ -420,20 +672,23 @@ fun createConversationTools(
                     val interrupt = if (allowInterruptAndStop) {
                         args["interrupt"]?.jsonPrimitive?.booleanOrNull ?: false
                     } else false
+                    val maxStepsOverride = args["max_steps"]?.jsonPrimitive?.intOrNull?.coerceAtLeast(0)
 
                     val result = chatService.sendToSubConversation(
                         parentConversationId = currentConversationId,
                         targetConversationId = targetId,
+                        preallocatedNewTargetId = preallocatedNewTargetId,
                         targetAssistantId = targetAssistantId,
                         title = title,
                         message = message,
                         wait = wait,
                         timeoutMs = timeoutSec * 1_000L,
                         interrupt = interrupt,
+                        maxStepsOverride = maxStepsOverride,
                     )
 
                     val payload = buildJsonObject {
-                        put("conversation_id", result.conversationId.toString())
+                        put("conversation_id", result.logicalId)
                         put("title", result.title)
                         put("status", result.status)
                         put("timed_out", result.timedOut)
@@ -460,10 +715,10 @@ fun createConversationTools(
                                 }
                             })
                         }
-                        if (result.status == "running" && allowInspect) {
+                        if (result.status == "running") {
                             put(
                                 "hint",
-                                "Sub-agent is running in the background. Use `conversation_read` with conversation_id='${result.conversationId}' to check progress or wait."
+                                "Sub-agent '${result.logicalId}' is running in the background. You will be automatically notified when it finishes, or you can call `conversation_read` with conversation_id='${result.logicalId}' (or wait_sec > 0) at any time."
                             )
                         }
                     }
@@ -477,14 +732,14 @@ fun createConversationTools(
                 Tool(
                     name = "conversation_stop",
                     description = """
-                        Immediately stop/cancel a running sub-agent conversation by `conversation_id`.
+                        Immediately stop/cancel a running sub-agent conversation by `conversation_id` (e.g. 'sub_1', 'sub_2').
                     """.trimIndent().replace("\n", " "),
                     parameters = {
                         InputSchema.Obj(
                             properties = buildJsonObject {
                                 put("conversation_id", buildJsonObject {
                                     put("type", "string")
-                                    put("description", "ID of the running sub-agent conversation to stop")
+                                    put("description", "ID of the running sub-agent conversation to stop (e.g. 'sub_1', 'sub_2')")
                                 })
                             },
                             required = listOf("conversation_id")
@@ -492,16 +747,18 @@ fun createConversationTools(
                     },
                     needsApproval = { approveInterruptAndStop },
                     execute = {
-                        val rawId = it.jsonObject["conversation_id"]?.jsonPrimitive?.contentOrNull
+                        val rawId = it.jsonObject["conversation_id"]?.jsonPrimitive?.contentOrNull?.trim()
                             ?: error("conversation_id is required")
-                        val targetId = runCatching { Uuid.parse(rawId.trim()) }.getOrNull()
-                            ?: error("Invalid conversation_id UUID: $rawId")
-                        require(targetId != currentConversationId) { "Cannot stop the current conversation itself" }
+                        val targetId = resolveSubAgentRealId(rawId)
+                            ?: error("Sub-agent '$rawId' not found in the current conversation")
+                        requireOwnedSubAgentConversation(targetId)
+                        val logicalId = toLogicalSubAgentId(targetId)
+                        chatService.markSubAgentResultConsumed(currentConversationId, targetId)
                         chatService.stopGeneration(targetId)
                         listOf(
                             UIMessagePart.Text(
                                 buildJsonObject {
-                                    put("conversation_id", targetId.toString())
+                                    put("conversation_id", logicalId)
                                     put("status", "stopped")
                                 }.toString()
                             )
@@ -516,7 +773,7 @@ fun createConversationTools(
                 Tool(
                     name = "conversation_delete",
                     description = """
-                        Permanently delete and remove a spawned sub-agent conversation by `conversation_id`.
+                        Permanently delete and remove a spawned sub-agent conversation by `conversation_id` (e.g. 'sub_1', 'sub_2').
                         Only sub-agent conversations belonging to the current chat can be deleted.
                     """.trimIndent().replace("\n", " "),
                     parameters = {
@@ -524,7 +781,7 @@ fun createConversationTools(
                             properties = buildJsonObject {
                                 put("conversation_id", buildJsonObject {
                                     put("type", "string")
-                                    put("description", "ID of the sub-agent conversation to delete")
+                                    put("description", "ID of the sub-agent conversation to delete (e.g. 'sub_1', 'sub_2')")
                                 })
                             },
                             required = listOf("conversation_id")
@@ -532,21 +789,12 @@ fun createConversationTools(
                     },
                     needsApproval = { approveDelete },
                     execute = {
-                        val rawId = it.jsonObject["conversation_id"]?.jsonPrimitive?.contentOrNull
+                        val rawId = it.jsonObject["conversation_id"]?.jsonPrimitive?.contentOrNull?.trim()
                             ?: error("conversation_id is required")
-                        val targetId = runCatching { Uuid.parse(rawId.trim()) }.getOrNull()
-                            ?: error("Invalid conversation_id UUID: $rawId")
-                        require(targetId != currentConversationId) { "Cannot delete the current parent conversation itself" }
-
-                        val parentConv = chatService.getConversationFlow(currentConversationId).value
-                        val targetConv = chatService.getConversationFlow(targetId).value
-                            .takeIf { it.messageNodes.isNotEmpty() || it.config != null }
-                            ?: conversationRepo.getConversationById(targetId)
-                        val isChildOfCurrent = targetId in parentConv.allChildConversationIds ||
-                            targetConv?.config?.parentConversationId == currentConversationId
-                        require(isChildOfCurrent) {
-                            "Permission denied: conversation $targetId is not a sub-agent of the current conversation"
-                        }
+                        val targetId = resolveSubAgentRealId(rawId)
+                            ?: error("Sub-agent '$rawId' not found in the current conversation")
+                        requireOwnedSubAgentConversation(targetId)
+                        val logicalId = toLogicalSubAgentId(targetId)
 
                         chatService.deleteSubConversation(
                             parentConversationId = currentConversationId,
@@ -555,7 +803,7 @@ fun createConversationTools(
                         listOf(
                             UIMessagePart.Text(
                                 buildJsonObject {
-                                    put("conversation_id", targetId.toString())
+                                    put("conversation_id", logicalId)
                                     put("status", "deleted")
                                 }.toString()
                             )

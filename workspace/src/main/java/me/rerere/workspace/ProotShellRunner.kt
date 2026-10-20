@@ -99,10 +99,9 @@ class ProotShellRunner(
 
         // 当 Android 宿主机锁死 /proc/stat、/proc/loadavg、/proc/uptime、/proc/vmstat 时挂载可读兜底节点
         val fakeProcDir = File(context.linuxDir, RootfsPatcher.FAKE_PROC_REL_DIR)
-        RootfsPatcher.FAKE_PROC_FILES.forEach { name ->
-            val hostProc = File("/proc/$name")
+        RootfsPatcher.UNREADABLE_HOST_PROC_FILES.forEach { name ->
             val fakeProc = File(fakeProcDir, name)
-            if (!hostProc.canRead() && fakeProc.isFile) {
+            if (fakeProc.isFile) {
                 command += "-b"
                 command += "${fakeProc.absolutePath}:/proc/$name"
             }

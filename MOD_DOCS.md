@@ -37,7 +37,7 @@
    - `createWorkspaceTerminalSession(...)`：补齐了 `/upload` 和 `/tool_outputs` 两个 `-b` 挂载目录（与 `RepositoryModule.kt` 对齐）。
    - `WorkspaceTerminalSessionClient`：新增 `lastOutputAtMs: AtomicLong` 与 `outputEvents: MutableSharedFlow<Long>`，在 `onTextChanged` 和 `onSessionFinished` 时记录最后输出时间，供 AI 工具判断输出是否已稳定（Settle Detection）。
    - `inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState`：
-     - 扫描 `/proc/<pid>/stat` 中属于当前终端会话（`session == prootPid`）的进程树，定位 PRoot 内部的顶层交互式 Shell 进程（`shellPid` / `shellPgrp`）以及活跃前台子进程（`foregroundPgid` / `foregroundCommand`，如 `python3`、`node`、`ssh`）。
+     - 维护 `cachedShellPids`（`prootPid -> shellPid`）缓存，常规轮询直接走 **O(1) 快速路径**（仅读取 `/proc/<prootPid>/stat`、`/proc/<shellPid>/stat` 及有前台任务时的 `/proc/<fgPgid>/stat` 共 2~3 个文件），避免遍历整个 `/proc` 目录；首次发现或边缘慢路径带 250ms 节流缓存。
      - 当顶层 Shell 存活且无活跃前台子进程（或 `tpgid == shellPgrp`）时，精确判定 `isAtPrompt = true`（`prompt_ready`），无需傻等超时即可立即返回。
      - 当 `prootPid` 或顶层 Shell 进程已退出（如在终端内执行了 `exit`、`logout` 或发送了 `\u0004` `Ctrl+D`）时，立即判定 `processExited = true`。
 3. **`app/src/main/java/me/rerere/rikkahub/ui/pages/extensions/workspace/WorkspaceTerminalSessionManager.kt`**
@@ -72,7 +72,7 @@
      - 在 `conversation_send` 工具定义中，自动注入已勾选绑定子代理的 **名称、`assistant_id` 以及标签描述 (`tags/description`)**（不包含模型名等易变细节，换模型不会破坏主代理缓存）；无论绑定了 1 个还是多个子代理，主代理创建子对话时统一根据名称与标签描述按规范传 `assistant_id` + `title` + `message` 调用。
    - **子代理独立工具管理面板 (`SubAgentToolsSheet`)**：
      - 点击子代理列表右侧的 `⚙` 按钮，直接弹出「子代理工具管理」面板（名称、标签、模型仍跟随助手基础设定），一站式管理该子代理的：**工具自动免审批开关 (`subAgentAutoApproveTools`)**、**5 项工作区工具独立开关 (`disabledWorkspaceTools`)**、**MCP 工具服务 (`mcpServers`)**、**联网搜索 / 记忆 / 本地工具 (`localTools`)** 以及 **Skills (`enabledSkills`)**。
-   - **工具按需查看子代理状态**：主代理想看已绑定子代理助手的具体状态（包括当前绑定的模型名称、供应商、思考预算、标签描述等）以及已派生子对话的运行状态时，直接调用 `conversation_read`（不传 `conversation_id` 即返回全局子代理助手模型状态与活跃子会话概览）或 `recent_chats`。
+   - **工具按需查看子代理状态与严格权限边界**：主代理想看已绑定子代理助手的具体状态（包括当前绑定的模型名称、供应商、思考预算、标签描述等）以及已派生子对话的运行状态时，直接调用 `conversation_read`（不传 `conversation_id` 即返回全局子代理助手模型状态与当前会话派生的活跃子会话概览）；所有带 `conversation_id` 的子代理操作均强制校验 `config.parentConversationId == currentConversationId`，与普通用户对话严格隔离。
 
 #### 涉及文件与函数：
 1. **`app/src/main/java/me/rerere/rikkahub/data/model/Assistant.kt` & `ConversationConfig.kt` & `Conversation.kt`**
@@ -80,12 +80,17 @@
      - `enableSubAgent: Boolean = false`：子代理独立模块总开关。
      - `subAgentIds: Set<Uuid> = emptySet()`：勾选绑定的子代理助手 ID 集合（支持单选或多选）。
      - `subAgentShareWorkspace: Boolean = true`：子代理是否自动继承并共享主对话绑定的工作区与交互式 PTY 终端池。
+     - `subAgentMaxConcurrency: Int = 2`：同一主对话下同时并发运行的子代理上限（默认 2，最低 1，超出自动排队）。
+     - `subAgentAutoApproveTools: Boolean = true`：作为子代理运行时调用工具是否自动免审批。
+     - `subAgentMaxSteps: Int = 0`：作为子代理运行时单轮默认最大工具调用步数（0 表示不设限）。
      - `isSubAgentEnabled: Boolean`：当开关开启且至少勾选绑定了 1 个子代理助手时生效。
    - `ConversationConfig` 新增字段：
-     - `childConversationIds: Set<Uuid> = emptySet()`：主对话记录其关联的子对话 ID（Fork 复制对话时随 `config` 自动继承）。
+     - `childConversationIds: Set<Uuid> = emptySet()`：主对话记录其关联的真实子对话 UUID。
+     - `subAgentIdMap: Map<String, Uuid> = emptyMap()`：主对话局部子代理编号（如 `"sub_1"`、`"sub_2"` 及兼容旧历史 ID）到数据库真实子对话 `Uuid` 的映射表。
      - `parentConversationId: Uuid? = null`：若为子对话，记录创建它的主对话 ID。
      - `autoApproveTools: Boolean = false`：子对话在后台执行工具时自动免除审批弹窗。
-   - `Conversation.allChildConversationIds: Set<Uuid>`（`Conversation.kt`）：自动合并 `config?.childConversationIds` 以及从当前对话消息树 `conversation_send` / `conversation_read` 历史调用中扫描出的所有子对话 ID。
+     - `subAgentMaxStepsOverride: Int? = null`：主代理在 `conversation_send` 时显式传入的单轮最大工具步数（`null` 取子代理默认 `subAgentMaxSteps`，`0` 为不设限）。
+   - `Conversation.resolveRealSubAgentId` / `resolveLogicalSubAgentId` / `allChildConversationIds`（`Conversation.kt`）：负责主对话局部代号（`sub_1`）与底层真实子对话 `Uuid` 的双向解析，以及合并当前主对话所属的全部真实子代理 ID。
 2. **`app/src/main/java/me/rerere/rikkahub/ui/pages/assistant/detail/AssistantSubAgentPage.kt` & `AssistantDetailPage.kt` & `AssistantDetailVM.kt` & `RouteActivity.kt` & `FilesPicker.kt`**
    - 新增 `Screen.AssistantSubAgent(id)` 路由与 `AssistantSubAgentPage` 页面。
    - 在 `AssistantDetailPage.kt`（助手详情）和 `FilesPicker.kt`（聊天页底部 `+` 面板）展示独立入口与已绑定子代理数量/名称摘要。
@@ -93,18 +98,19 @@
 3. **`app/src/main/java/me/rerere/rikkahub/service/ChatService.kt`**
    - `sendToSubConversation(...)`：
      - 创建新子对话时，根据传入的 `targetAssistantId` 解析绑定的子代理助手 `resolvedSubAssistant` 及其模型 `resolvedSubModel`。
-     - 新建的 `Conversation` 绑定 `assistantId = resolvedSubAssistant.id`，其 `ConversationConfig` 采用 `resolvedSubAssistant` 的模型、思考预算、MCP、Skills，并在 `subAgentShareWorkspace = true` 时自动继承主对话的 `workspaceId` 与 `workspaceCwd`。
+     - 若传入了已有 `targetConversationId`（多轮追问），强制校验其 `config.parentConversationId == parentConversationId`，严禁触碰或劫持普通用户对话。
+     - 新建的 `Conversation` 绑定 `assistantId = resolvedSubAssistant.id`，其 `ConversationConfig` 记录 `parentConversationId = parentConversationId`，并在 `subAgentShareWorkspace = true` 时自动继承主对话的 `workspaceId` 与 `workspaceCwd`。
      - 支持 `wait = true`（同步等待，超时自动转后台不杀任务）、`wait = false`（异步后台并行）、`interrupt = true`（打断正在生成的子代理并立即改派新指令）。
      - 返回 `SubConversationSendResult`（含 `assistantId`、`assistantName`、`modelName`、`status`、`reply`、`toolSteps`）。
    - `readSubConversation(...)`：读取目标子对话实时状态、所用助手与模型名称、工具步骤与消息列表，支持 `waitMs > 0` 等待完成。
 4. **`app/src/main/java/me/rerere/rikkahub/data/ai/tools/ConversationTools.kt` & `ChatToolFactory.kt`**
-   - `conversation_send`：描述中仅注入已勾选绑定子代理的 `Name` 与 `assistant_id`；新建子对话传 `assistant_id` + `title` + `message`，追问传 `conversation_id` + `message`。
+   - `conversation_send`：描述中仅注入已勾选绑定子代理的 `Name`、`assistant_id` 与 `tags/description`；新建子对话传 `assistant_id` + `title` + `message`，追问传 `conversation_id` + `message`（强制校验 `requireOwnedSubAgentConversation`）。
    - `conversation_read`：
-     - 不传 `conversation_id` 时：返回 `bound_sub_agents`（所有已绑定子代理助手的 `assistant_id`、`name`、当前实时 `model`、`provider`、`reasoning_level`）与 `active_sub_conversations`（当前已派生的所有子对话及其运行状态、所用模型）。
-     - 传 `conversation_id` 时：返回该子对话的详细状态、所用模型、工具执行轨迹与消息内容。
-   - `conversation_stop`：立即停止指定 `conversation_id` 子代理对话。
-   - `recent_chats`：合并当前主对话的所有子对话（即使子对话绑定在其他助手名下也能完整列出），并附带 `bound_sub_agents` 状态。
-   - 当 `isSubConversation == true` 时，自动隐藏 `ask_user`、`conversation_send`、`conversation_stop`。
+     - 不传 `conversation_id` 时：返回 `bound_sub_agents`（所有已绑定子代理助手的 `assistant_id`、`name`、`tags/description`、当前实时 `model`、`provider`、`reasoning_level`）与 `active_sub_conversations`（当前主对话已派生的所有子对话及其运行状态、所用模型）。
+     - 传 `conversation_id` 时：在未开启 `enableRecentChatsReference` 时强制校验目标对话必须属于当前主对话派生的子代理（`requireOwnedSubAgentConversation`），返回该子对话的详细状态、所用模型、工具执行轨迹与消息内容。
+   - `conversation_stop` / `conversation_delete`：强制校验 `requireOwnedSubAgentConversation` 后，立即停止或彻底删除当前主对话派生的指定 `conversation_id` 子代理对话。
+   - `recent_chats` / `conversation_search`：仅在用户显式开启了「记忆 -> 参考最近对话 (`enableRecentChatsReference`)」时才注册暴露，并自动过滤掉所有 `parentConversationId != null` 的子代理会话。
+   - 当 `isSubConversation == true` 时，自动隐藏 `ask_user`、`conversation_send`、`conversation_stop`、`conversation_delete`。
 
 ---
 
@@ -165,13 +171,14 @@
 
 ```bash
 set -e
-# 1. 若通过外部文件工具修改了代码，先 touch 一下确保 PRoot 内时间戳更新
-find /workspace/hub/app/src/main/java -type f -exec touch {} +
+# 1. 清理 Kotlin 增量缓存（防止外部文件工具时间戳偏移导致未重编）并更新时间戳
+rm -rf /workspace/hub/app/build/kotlin
+find /workspace/hub/app/src/main/java /workspace/hub/workspace/src/main -type f -exec touch {} +
 
 # 2. 执行增量编译与打包（注意保留 -XX:-UseCompressedOops 规避 ARM64 PRoot JVM 偏移崩溃）
 export ANDROID_HOME=/opt/android-sdk
 export JAVA_TOOL_OPTIONS="-XX:-UseCompressedOops -XX:-UseCompressedClassPointers -Xmx6144m"
-cd /workspace/hub && ./gradlew packageDebug packageRelease -x lintVitalRelease -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x generateReleaseLintVitalReportModel --no-daemon
+cd /workspace/hub && ./gradlew packageDebug packageRelease -Pandroid.aapt2FromMavenOverride=/usr/local/bin/aapt2 -x lintVitalRelease -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x generateReleaseLintVitalReportModel --no-daemon
 
 # 3. 拷贝生成的 Debug 与 Release APK 并导出最新补丁
 cp -f /workspace/hub/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk /workspace/Rikkanon_arm64-v8a.apk
@@ -300,6 +307,45 @@ rm -f /tmp/arm64_fixed.apk /tmp/universal_fixed.apk /workspace/*.idsig /workspac
    - 开启时：恢复后台自动归纳整理机制。
 12. **正式定名 `Rikkanon`、专属签名证书与 Release 正式版构建（`app/build.gradle.kts` / `rikkanon.jks` / `SettingAboutPage.kt` / `strings.xml`）**：
    - 应用名与关于页标题统一为 **`Rikkanon`**，包名定为 **`me.rerere.rikkahub.rikkanon`**，版本标识 `2.5.6-rikkanon`，使用专属证书 `/workspace/hub/app/rikkanon.jks` 签名，同时产出无开发模式水印的 Release 正式版与 Debug 版安装包。
+
+### 2026-10-19 迭代更新
+1. **终端进程树状态检测 O(1) 快速路径优化（`WorkspaceTerminalSession.kt`）**：
+   - 缓存每个终端会话 `prootPid -> shellPid` 映射，在常规轮询中直接按已知 PID 精确读取 `/proc/<prootPid>/stat`、`/proc/<shellPid>/stat` 与 `/proc/<fgPgid>/stat`（每次仅读 2~3 个文件），消除轮询期间反复调用 `File("/proc").listFiles()` 全盘遍历 `/proc` 目录的性能开销；对首次发现与边缘慢路径增加 250ms 节流缓存。
+2. **工作区 Rootfs 补丁与 `/proc` 可读性探测幂等缓存（`RootfsPatcher.kt` / `ProotShellRunner.kt`）**：
+   - 在 `RootfsPatcher` 中增加基于工作区路径与配置参数的内存幂等缓存（结合关键补丁文件存在性校验），并静态缓存宿主机不可读 `/proc` 节点列表与附加用户组 ID，避免每次调用 `workspace_shell` 启动 PRoot 前重复对十几个配置文件执行同步磁盘 I/O 检查。
+3. **聊天气泡 UI 回退 2.5.6 经典样式（`ChatMessage.kt`）**：
+   - 移除上游 3.0 新增的用户气泡强制左侧缩进（`.padding(start = 48.dp)`）与异形水滴尖角（`24.dp` / `6.dp`）及过宽内边距（`12.dp`），恢复为 2.5.6 经典的 `RoundedCornerShape(16.dp)` 四角对称圆角与 `8.dp` 紧凑内边距。
+4. **严格收紧子代理与「参考最近对话」的权限边界（`ChatToolFactory.kt` / `ConversationTools.kt` / `ChatService.kt` / `Conversation.kt`）**：
+   - **隔离 `recent_chats` 与 `conversation_search`**：移除工作区触发对话工具的冗余条件，仅当用户在「记忆 -> 参考最近对话 (`enableRecentChatsReference`)」中显式开启时才暴露 `recent_chats` 与 `conversation_search`（且 `recent_chats` 自动过滤掉 `parentConversationId != null` 的子代理会话）。
+   - **基于 `config.parentConversationId` 的子代理强制归属校验 (`requireOwnedSubAgentConversation`)**：在 `conversation_read`（未开启参考最近对话时）、`conversation_send`（追问已有子代理时）、`conversation_stop`、`conversation_delete` 以及 `ChatService.sendToSubConversation` 中，强制验证目标 `conversation_id` 的 `config.parentConversationId == currentConversationId`，严禁主代理越权读取、停止、删除或向任何普通用户对话及其他主对话的子代理发送消息。
+   - **收敛 `Conversation.allChildConversationIds`**：仅扫描 `conversation_send` 实际创建/派发的子代理 ID，不再将 `conversation_read` 读取过的普通会话误纳入子代理集合。
+5. **修复侧边栏历史对话标题半行截断 `…` 与历史子代理条目外溢（`ConversationList.kt` / `ConversationDAO.kt` / `ConversationRepository.kt`）**：
+   - 移除 `ConversationItem` 中多余的 `Spacer(Modifier.weight(1f))`，让标题 `Text(Modifier.weight(1f))` 占满整行宽度，解决所有历史对话标题在 6 个汉字处被平分宽度截断为 `…` 的问题。
+   - 在分页摘要实体 `LightConversationEntity` 中补齐 `config` 字段解析，使侧边栏列表中的历史子代理（`config.parentConversationId != null`）始终严格归属在对应父对话树下折叠/展开，不再平铺混入正常历史列表。
+6. **同步上游主分支 `3.1.0` 升级工作区内置 PRoot 引擎至 `5.1.107.96`（`workspace/src/main/jniLibs/*/libproot_*.so`）**：
+   - 根据上游 RikkaHub 主分支 `3.1.0`（commit `bf8ff5a`）同步更新，将 `arm64-v8a` 与 `x86_64` 的 `libproot_exec.so` 及 `libproot_loader.so` 从 `5.1.107.92` 升级至 `5.1.107.96`，修复 Ubuntu 26.04 等新版 Rootfs 中 `rust-coreutils` 在 `--link2symlink` (L2S) 模式下因 `AT_EXECFN` 路径不匹配报 `Security violation` 导致基础命令不可用的问题。
+7. **子代理并发限制池 (`subAgentMaxConcurrency`)、单轮工具调用步数限制 (`subAgentMaxSteps` / `max_steps`)、批量等待与防空壳加固（`AssistantSubAgentPage.kt` / `Assistant.kt` / `ConversationConfig.kt` / `ChatService.kt` / `ConversationTools.kt` / `GenerationLoop.kt`）**：
+   - **子代理并发限制（默认 `2`，最低 `1`）**：在「子代理设置」顶部总面板（开启子代理功能后显示）新增 **「子代理并发限制 (`subAgentMaxConcurrency`)」** 设置；底层通过动态并发池控制同一主对话下同时请求模型的子代理上限，超出上限的子代理任务自动在队列中平滑等待（排队等待时间不计入 `wait=true` 的执行超时），避免高并发瞬间击穿上游接口限流。
+   - **单轮工具调用次数限制（`0` = 不设限）**：
+     - 在每个子代理的「子代理工具管理 (`SubAgentToolsSheet`)」面板中新增 **「工具调用次数限制 (`subAgentMaxSteps`)」**，作为该子代理未传参时的默认单轮步数上限（`0` 表示不设限）。
+     - 在 `conversation_send` 工具中新增可选整数参数 `max_steps`（`0` 表示不设限，`>0` 表示单轮最多连续调用工具步数）：若主代理调用时显式传参，则以主代理参数为准；若未传参，则取该子代理工具管理面板中的默认设置。每次追加新消息按单轮独立重新计数，到达步数上限时自动停止继续调用工具并强制输出最终回复交卷。
+   - **消灭异步空壳会话与并发竞态 + 429/503 限流退避重试**：
+     - 子代理创建瞬间立即持久化落库并持有会话引用计数，杜绝 5 秒空闲内存卸载后触发默认助手空白会话的 Bug；子代理请求失败时自动将错误详情写入子对话消息记录；`registerChildConversation` 增加 `Mutex` 锁保护。
+     - `GenerationLoop` 将 HTTP `429`、`502`、`503`、`504`、`529` 等限流/过载错误纳入指数退避自动重试。
+   - **`conversation_read` 支持批量等待 (`conversation_ids`)**：支持一次传入多个子代理 ID（或不传 ID 配合 `wait_sec > 0` 等待全部运行中的子代理完成），1 次调用即可收齐多个异步子代理的状态与回复。
+8. **子代理局部编号路由 (`sub_1` / `sub_2`) 与主对话分支 (Fork) 自动克隆独立子代理（`ConversationConfig.kt` / `Conversation.kt` / `ChatService.kt` / `ConversationTools.kt`）**：
+   - **主代理全链路统一 `sub_N` 编号与严格并发顺序分配**：`conversation_send`、`conversation_read`、`conversation_stop`、`conversation_delete` 的入参与返回值全程统一使用当前主对话内的局部编号（如 `sub_1`、`sub_2`）；通过 `CoroutineStart.UNDISPATCHED` 与 `reserveChildConversationIdImmediate` 在内存同步预订编号，确保同一轮并发派发多个子代理时 `sub_1`、`sub_2` 严格按模型调用顺序分配。
+   - **主对话分支（Fork）自动深拷贝独立子代理**：当对含有子代理的主对话执行分支（Fork）时，自动将关联子代理深拷贝一份全新的独立子对话副本（将其 `parentConversationId` 指向新分支主对话），并在新分支主对话的 `subAgentIdMap` 中将 `sub_1`（及兼容旧历史 ID）映射到新克隆的子代理副本。既无需改动历史消息上下文（100% 保护 Prompt Cache），又保证原主对话与分支主对话的子代理完全隔离，且从分支子代理点击「⬅ 返回主对话」100% 准确返回该分支主对话。
+9. **`bound_sub_agents` 工具与工作区能力摘要 & 后台子代理完成自动通知唤醒（`ConversationTools.kt` / `ChatService.kt` / `ChatMessageContextCheckpoint.kt` / `ChatMessage.kt`）**：
+   - **`bound_sub_agents` 补充能力摘要**：`conversation_read()` 返回的 `bound_sub_agents` 列表中新增 `share_workspace`、`tools`（根据工作区启用状态与该子代理 `disabledWorkspaceTools` 动态计算出的真实可用工具名称列表）、`skills` 与 `mcp_servers`，方便主代理直接按工具能力挑选合适的子代理。
+   - **后台子代理完成自动通知与唤醒状态机**：
+     - 当子代理因 `wait=false` 或 `wait=true` 超时转入后台运行时，自动挂载后台完成监听；若主代理中途调 `conversation_read` 时子代理仍在运行（`status == "running"`），保留待通知状态；仅当读取到已完成状态（`status != "running"`）时才标记结果已消费。
+     - 当后台子代理执行完毕且未被主动消费时：若主代理正在运行工具循环，通过 `pollQueuedUserMessages`（Steer 通道）在下一步立即注入完成报告；若主代理已停下等待，待当前所有运行中的后台子代理全部完成后合并发送一条完成通知自动唤醒主代理（UI 渲染为紧凑可折叠的 `ChatMessageSubAgentNotification` 卡片）。
+
+
+
+
+
 
 
 
