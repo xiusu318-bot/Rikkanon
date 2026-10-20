@@ -173,17 +173,34 @@ fun ColumnScope.ConversationList(
                 }
 
                 is ConversationListItem.Item -> {
-                    val isAttachedChild = item.conversation.id in currentChildIds && item.conversation.id != activeMainId
-                    if (!isAttachedChild) {
+                    val isSubAgentOrAttachedChild = item.conversation.config?.parentConversationId != null ||
+                        (item.conversation.id in currentChildIds && item.conversation.id != activeMainId)
+                    if (!isSubAgentOrAttachedChild) {
                         val isCurrentMain = item.conversation.id == activeMainId
+                        val itemChildIds = if (isCurrentMain) {
+                            currentChildIds
+                        } else {
+                            item.conversation.config?.childConversationIds.orEmpty() -
+                                item.conversation.config?.deletedChildConversationIds.orEmpty()
+                        }
+                        var itemChildrenExpanded by remember(item.conversation.id, isCurrentMain) {
+                            mutableStateOf(isCurrentMain)
+                        }
+                        val effectiveExpanded = if (isCurrentMain) childrenExpanded else itemChildrenExpanded
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             ConversationItem(
                                 conversation = item.conversation,
                                 selected = item.conversation.id == current.id,
                                 loading = item.conversation.id in conversationJobs,
-                                childCount = if (isCurrentMain) currentChildIds.size else 0,
-                                childrenExpanded = childrenExpanded,
-                                onToggleChildren = { childrenExpanded = !childrenExpanded },
+                                childCount = itemChildIds.size,
+                                childrenExpanded = effectiveExpanded,
+                                onToggleChildren = {
+                                    if (isCurrentMain) {
+                                        childrenExpanded = !childrenExpanded
+                                    } else {
+                                        itemChildrenExpanded = !itemChildrenExpanded
+                                    }
+                                },
                                 onClick = onClick,
                                 onDelete = onDelete,
                                 onRegenerateTitle = onRegenerateTitle,
@@ -192,8 +209,8 @@ fun ColumnScope.ConversationList(
                                 onMoveToFolder = onMoveToFolder,
                                 modifier = Modifier.animateItem()
                             )
-                            if (isCurrentMain && childrenExpanded && currentChildIds.isNotEmpty()) {
-                                currentChildIds.forEach { childId ->
+                            if (effectiveExpanded && itemChildIds.isNotEmpty()) {
+                                itemChildIds.forEach { childId ->
                                     val childFlow = remember(childId) { chatService.getConversationFlow(childId) }
                                     val childConv by childFlow.collectAsStateWithLifecycle()
                                     SubConversationTreeItem(
@@ -392,9 +409,8 @@ private fun ConversationItem(
                 text = conversation.title.ifBlank { stringResource(id = R.string.chat_page_new_message) },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
 
             if (childCount > 0) {
                 Surface(

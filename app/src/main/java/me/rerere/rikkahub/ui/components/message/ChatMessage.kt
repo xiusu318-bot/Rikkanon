@@ -153,6 +153,16 @@ fun ChatMessage(
         )
         return
     }
+    if (message.isSubAgentNotification) {
+        ChatMessageSubAgentNotification(
+            message = message,
+            onEdit = onEdit,
+            onDelete = onDelete,
+            onRegenerate = onRegenerate,
+            modifier = modifier,
+        )
+        return
+    }
     val settings = LocalSettings.current.displaySetting
     val chatFontFamily = LocalChatFontFamily.current ?: rememberChatFontFamily(settings)
     val textStyle = LocalTextStyle.current.copy(
@@ -450,17 +460,14 @@ private fun MessagePartsBlock(
                 when (val part = block.part) {
                     is UIMessagePart.Text -> {
                         val textContent = @Composable {
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                if (role == MessageRole.USER) {
-                                    ChatMessageBubble(
-                                        role = role,
-                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = settings.displaySetting.bubbleOpacity),
-                                        onClick = { onUserMessageClick?.invoke() },
-                                        // 用户气泡不占满整行，和助手的回复错开
-                                        modifier = Modifier
-                                            .padding(start = 48.dp)
-                                            .animateContentSize(),
-                                    ) {
+                            if (role == MessageRole.USER) {
+                                Surface(
+                                    modifier = Modifier.animateContentSize(),
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = settings.displaySetting.bubbleOpacity),
+                                    onClick = { onUserMessageClick?.invoke() },
+                                ) {
+                                    Column(modifier = Modifier.padding(8.dp)) {
                                         MarkdownBlock(
                                             content = part.text.replaceRegexes(
                                                 assistant = assistant,
@@ -470,13 +477,15 @@ private fun MessagePartsBlock(
                                             onClickCitation = handleClickCitation
                                         )
                                     }
-                                } else {
-                                    if (settings.displaySetting.showAssistantBubble) {
-                                        ChatMessageBubble(
-                                            role = role,
-                                            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity),
-                                            modifier = Modifier.animateContentSize(),
-                                        ) {
+                                }
+                            } else {
+                                if (settings.displaySetting.showAssistantBubble) {
+                                    Surface(
+                                        modifier = Modifier.animateContentSize(),
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity),
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
                                             MarkdownBlock(
                                                 content = part.text.replaceRegexes(
                                                     assistant = assistant,
@@ -486,18 +495,18 @@ private fun MessagePartsBlock(
                                                 onClickCitation = handleClickCitation,
                                             )
                                         }
-                                    } else {
-                                        MarkdownBlock(
-                                            content = part.text.replaceRegexes(
-                                                assistant = assistant,
-                                                scope = AssistantAffectScope.ASSISTANT,
-                                                visual = true,
-                                            ),
-                                            onClickCitation = handleClickCitation,
-                                            modifier = Modifier
-                                                .animateContentSize()
-                                        )
                                     }
+                                } else {
+                                    MarkdownBlock(
+                                        content = part.text.replaceRegexes(
+                                            assistant = assistant,
+                                            scope = AssistantAffectScope.ASSISTANT,
+                                            visual = true,
+                                        ),
+                                        onClickCitation = handleClickCitation,
+                                        modifier = Modifier
+                                            .animateContentSize()
+                                    )
                                 }
                             }
                         }

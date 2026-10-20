@@ -181,27 +181,88 @@ internal fun List<UIMessagePart>.localFileUrls(): Set<String> = buildSet {
     }
 }
 
-private val SUB_CONVERSATION_TOOL_NAMES = setOf("conversation_send", "conversation_read", "conversation_stop")
-private val CONVERSATION_ID_JSON_REGEX = Regex(""""conversation_id"\s*:\s*"([0-9a-fA-F-]{36})"""")
+private val SUB_CONVERSATION_TOOL_NAMES = setOf("conversation_send")
+private val CONVERSATION_ID_JSON_REGEX = Regex(""""conversation_id"\s*:\s*"([^"]+)"""")
+private val SUB_AGENT_INDEX_REGEX = Regex("""^(?:sub[_-]?|#)?(\d+)$""", RegexOption.IGNORE_CASE)
 
 /**
- * 提取当前主对话所关联/操控的所有子对话 ID：
- * 既包含持久化在 [ConversationConfig.childConversationIds] 中的 ID（Fork 对话时自动继承），
- * 也自动扫描当前消息树中 `conversation_send` / `conversation_read` 工具调用记录的 ID。
+ * 将主代理传入的局部子代理代号（如 `"sub_1"`、`"#1"`、`"1"` 或 Fork 映射前的旧 UUID 字符串）
+ * 解析为当前主对话名下对应的真实子对话 [Uuid]。
+ */
+fun Conversation.resolveRealSubAgentId(rawId: String): Uuid? {
+    val token = rawId.trim()
+    if (token.isEmpty()) return null
+    val deleted = config?.deletedChildConversationIds.orEmpty()
+    val idMap = config?.subAgentIdMap.orEmpty()
+
+    // 1. 直接命中映射表（含 "sub_1" 或 Fork 后的旧 UUID 字符串映射）
+    idMap[token]?.takeIf { it != id && it !in deleted }?.let { return it }
+
+    // 2. 归一化匹配（例如传入 "1"、"#1"、"sub-1" 均可匹配 "sub_1"）
+    val indexMatch = SUB_AGENT_INDEX_REGEX.matchEntire(token)
+    if (indexMatch != null) {
+        val normalizedKey = "sub_${indexMatch.groupValues[1]}"
+        idMap[normalizedKey]?.takeIf { it != id && it !in deleted }?.let { return it }
+        val oneBasedIdx = indexMatch.groupValues[1].toIntOrNull()
+        if (oneBasedIdx != null && oneBasedIdx >= 1) {
+            val ordered = allChildConversationIds.toList()
+            if (oneBasedIdx - 1 in ordered.indices) {
+                return ordered[oneBasedIdx - 1]
+            }
+        }
+    }
+
+    // 3. 兼容未映射的旧对话真实 UUID
+    val parsedUuid = runCatching { Uuid.parse(token) }.getOrNull() ?: return null
+    if (parsedUuid == id || parsedUuid in deleted) return null
+    if (parsedUuid in allChildConversationIds) return parsedUuid
+    return null
+}
+
+/**
+ * 获取当前主对话下某个真实子对话 [realChildId] 对主代理暴露的局部代号（如 `"sub_1"`、`"sub_2"`）。
+ */
+fun Conversation.resolveLogicalSubAgentId(realChildId: Uuid): String {
+    val idMap = config?.subAgentIdMap.orEmpty()
+    idMap.entries.firstOrNull { (k, v) -> v == realChildId && k.startsWith("sub_") }?.key?.let { return it }
+    val idx = allChildConversationIds.indexOf(realChildId)
+    if (idx >= 0) return "sub_${idx + 1}"
+    return realChildId.toString()
+}
+
+/**
+ * 提取当前主对话所关联/操控的所有真实子对话 UUID：
+ * - 包含 [ConversationConfig.childConversationIds] 与 [ConversationConfig.subAgentIdMap] 中的真实子对话 ID；
+ * - 扫描消息树中 `conversation_send` 的 `conversation_id`：若在 `subAgentIdMap` 中有映射则取映射后的真实 UUID
+ *   （避免 Fork 后把原主对话的旧子代理 UUID 混入新分支），否则兼容解析原始 UUID。
  */
 val Conversation.allChildConversationIds: Set<Uuid>
     get() = buildSet {
+        val idMap = config?.subAgentIdMap.orEmpty()
         config?.childConversationIds?.let(::addAll)
+        addAll(idMap.values)
         messageNodes.forEach { node ->
             node.messages.forEach { message ->
                 message.getTools().forEach { tool ->
                     if (tool.toolName in SUB_CONVERSATION_TOOL_NAMES) {
                         CONVERSATION_ID_JSON_REGEX.findAll(tool.input).forEach { match ->
-                            runCatching { Uuid.parse(match.groupValues[1]) }.getOrNull()?.let(::add)
+                            val rawToken = match.groupValues[1].trim()
+                            val mapped = idMap[rawToken]
+                            if (mapped != null) {
+                                add(mapped)
+                            } else if (rawToken !in idMap.keys) {
+                                runCatching { Uuid.parse(rawToken) }.getOrNull()?.let(::add)
+                            }
                         }
                         tool.output.filterIsInstance<UIMessagePart.Text>().forEach { textPart ->
                             CONVERSATION_ID_JSON_REGEX.findAll(textPart.text).forEach { match ->
-                                runCatching { Uuid.parse(match.groupValues[1]) }.getOrNull()?.let(::add)
+                                val rawToken = match.groupValues[1].trim()
+                                val mapped = idMap[rawToken]
+                                if (mapped != null) {
+                                    add(mapped)
+                                } else if (rawToken !in idMap.keys) {
+                                    runCatching { Uuid.parse(rawToken) }.getOrNull()?.let(::add)
+                                }
                             }
                         }
                     }

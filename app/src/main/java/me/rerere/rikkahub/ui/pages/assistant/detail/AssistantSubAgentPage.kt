@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
@@ -34,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -98,6 +101,7 @@ fun AssistantSubAgentPage(id: String) {
 
     var showCreateSubAssistantDialog by remember { mutableStateOf(false) }
     var showMainPermissionsSheet by remember { mutableStateOf(false) }
+    var showConcurrencyDialog by remember { mutableStateOf(false) }
     var editingToolsTargetId by remember { mutableStateOf<Uuid?>(null) }
 
     val tagMap = remember(tags) { tags.associateBy { it.id } }
@@ -251,6 +255,56 @@ fun AssistantSubAgentPage(id: String) {
                     headlineContent = { Text("主代理控制权限与审批") },
                     supportingContent = { Text(permSummary) },
                 )
+
+                if (switchEnabled) {
+                    val currentConcurrency = assistant.subAgentMaxConcurrency.coerceAtLeast(1)
+                    item(
+                        onClick = { showConcurrencyDialog = true },
+                        leadingContent = {
+                            CardGroupIcon(
+                                icon = HugeIcons.Clock01,
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        },
+                        headlineContent = { Text("子代理并发限制") },
+                        supportingContent = {
+                            Text("同时运行的子代理上限")
+                        },
+                        trailingContent = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        if (currentConcurrency > 1) {
+                                            vm.update(assistant.copy(subAgentMaxConcurrency = currentConcurrency - 1))
+                                        }
+                                    },
+                                    enabled = currentConcurrency > 1,
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Text("-", fontWeight = FontWeight.Bold)
+                                }
+                                Text(
+                                    text = "$currentConcurrency",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp),
+                                )
+                                FilledTonalIconButton(
+                                    onClick = {
+                                        vm.update(assistant.copy(subAgentMaxConcurrency = currentConcurrency + 1))
+                                    },
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Text("+", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        },
+                    )
+                }
             }
 
             CardGroup(
@@ -313,6 +367,7 @@ fun AssistantSubAgentPage(id: String) {
                                 }
                                 Text(
                                     text = "工具: 工作区 $enabledWsCount/${AllWorkspaceToolNames.size} · MCP $enabledMcpCount · 本地 $enabledLocalCount" +
+                                        (if (candidate.subAgentMaxSteps > 0) " · 限${candidate.subAgentMaxSteps}步" else "") +
                                         if (candidate.subAgentAutoApproveTools) " · 免审批" else " · 需审批",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.outline,
@@ -382,6 +437,51 @@ fun AssistantSubAgentPage(id: String) {
             assistant = assistant,
             onUpdateAssistant = { updated -> vm.update(updated) },
             onDismiss = { showMainPermissionsSheet = false },
+        )
+    }
+
+    if (showConcurrencyDialog) {
+        var inputText by remember(assistant.subAgentMaxConcurrency) {
+            mutableStateOf(assistant.subAgentMaxConcurrency.coerceAtLeast(1).toString())
+        }
+        AlertDialog(
+            onDismissRequest = { showConcurrencyDialog = false },
+            title = { Text("设置子代理并发限制") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "设置同一时间最多允许多少个子代理并发请求模型（最低为 1，默认为 2）。超出此数量的子代理任务会自动排队等待。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { value ->
+                            inputText = value.filter { it.isDigit() }
+                        },
+                        label = { Text("最大并发数（>= 1）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val parsed = inputText.toIntOrNull()?.coerceAtLeast(1) ?: 2
+                        vm.update(assistant.copy(subAgentMaxConcurrency = parsed))
+                        showConcurrencyDialog = false
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConcurrencyDialog = false }) {
+                    Text("取消")
+                }
+            },
         )
     }
 
@@ -692,6 +792,7 @@ private fun SubAgentToolsSheet(
     )
 
     val enabledMcpServers = remember(mcpServers) { mcpServers.filter { it.commonOptions.enable } }
+    var showMaxStepsDialog by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -721,9 +822,9 @@ private fun SubAgentToolsSheet(
                 )
             }
 
-            // 1. 审批策略
+            // 1. 审批策略与工具步数限制
             CardGroup(
-                title = { Text("执行审批策略") }
+                title = { Text("执行审批与步数限制") }
             ) {
                 switchItem(
                     checked = targetAssistant.subAgentAutoApproveTools,
@@ -748,6 +849,62 @@ private fun SubAgentToolsSheet(
                     headlineContent = { Text("调用工具自动免审批") },
                     supportingContent = {
                         Text("子代理在后台调用工具时直接执行，无需弹窗确认；关闭后遵循原工具审批设置")
+                    },
+                )
+
+                val currentMaxSteps = targetAssistant.subAgentMaxSteps.coerceAtLeast(0)
+                item(
+                    onClick = { showMaxStepsDialog = true },
+                    leadingContent = {
+                        CardGroupIcon(
+                            icon = HugeIcons.Clock01,
+                            containerColor = if (currentMaxSteps > 0) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.surfaceContainerHigh
+                            },
+                            contentColor = if (currentMaxSteps > 0) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    },
+                    headlineContent = { Text("工具调用次数限制") },
+                    supportingContent = {
+                        Text("主代理未填参时按此默认值执行")
+                    },
+                    trailingContent = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            FilledTonalIconButton(
+                                onClick = {
+                                    if (currentMaxSteps > 0) {
+                                        onUpdateAssistant(targetAssistant.copy(subAgentMaxSteps = currentMaxSteps - 1))
+                                    }
+                                },
+                                enabled = currentMaxSteps > 0,
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Text("-", fontWeight = FontWeight.Bold)
+                            }
+                            Text(
+                                text = if (currentMaxSteps <= 0) "不设限" else "${currentMaxSteps}步",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp),
+                            )
+                            FilledTonalIconButton(
+                                onClick = {
+                                    onUpdateAssistant(targetAssistant.copy(subAgentMaxSteps = currentMaxSteps + 1))
+                                },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Text("+", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     },
                 )
             }
@@ -966,6 +1123,51 @@ private fun SubAgentToolsSheet(
             }
         }
     }
+
+    if (showMaxStepsDialog) {
+        var inputText by remember(targetAssistant.subAgentMaxSteps) {
+            mutableStateOf(targetAssistant.subAgentMaxSteps.coerceAtLeast(0).toString())
+        }
+        AlertDialog(
+            onDismissRequest = { showMaxStepsDialog = false },
+            title = { Text("工具调用次数限制") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "设置该子代理单次任务默认最多连续调用工具的步数。填 0 表示不设限；当达到步数上限时，子代理会停止继续调用工具并直接输出最终回复。若主代理在调用时显式传入了步数参数，则以主代理参数为准。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { value ->
+                            inputText = value.filter { it.isDigit() }
+                        },
+                        label = { Text("最大工具步数（0 = 不设限）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val parsed = inputText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                        onUpdateAssistant(targetAssistant.copy(subAgentMaxSteps = parsed))
+                        showMaxStepsDialog = false
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMaxStepsDialog = false }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -1035,7 +1237,7 @@ private fun CreateSubAssistantDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.cancel))
+                Text("取消")
             }
         },
     )

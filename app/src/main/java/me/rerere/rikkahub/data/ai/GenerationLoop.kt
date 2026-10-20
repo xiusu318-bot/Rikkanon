@@ -3,6 +3,7 @@ package me.rerere.rikkahub.data.ai
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -63,8 +64,9 @@ private const val TOOL_OUTPUT_PREVIEW_CHARS = 4 * 1024
 
 // 搜索结果的体积由用户设置的结果数决定，且结果列表 UI 与引用跳转都依赖完整的 JSON 结构，不参与截断
 private val TOOLS_WITHOUT_OUTPUT_TRUNCATION = setOf("search_web")
-private const val MAX_PROVIDER_NETWORK_RETRIES = 3
-private const val INITIAL_PROVIDER_RETRY_DELAY_MS = 1_000L
+private const val MAX_PROVIDER_NETWORK_RETRIES = 4
+private const val INITIAL_PROVIDER_RETRY_DELAY_MS = 1_200L
+private const val RATE_LIMIT_RETRY_DELAY_MS = 2_500L
 
 private class StreamChunkHandlingException(cause: Throwable) : RuntimeException(cause)
 
@@ -101,9 +103,12 @@ class GenerationLoop(
         val providerImpl = providerManager.getProviderByType(provider)
 
         var messages: List<UIMessage> = messages
+        val hasCustomStepLimit = maxSteps in 1..255
+        val maxToolRounds = if (hasCustomStepLimit) maxSteps else 256
+        val loopLimit = if (hasCustomStepLimit) maxToolRounds + 1 else maxToolRounds
 
-        for (stepIndex in 0 until maxSteps) {
-            Log.i(TAG, "streamText: start step #$stepIndex (${model.id})")
+        for (stepIndex in 0 until loopLimit) {
+            Log.i(TAG, "streamText: start step #$stepIndex (${model.id}, maxToolRounds=$maxToolRounds)")
 
             // Check if we have tool calls ready to continue after user interaction.
             val pendingTools = messages.lastOrNull()?.getTools()?.filter {
@@ -183,6 +188,22 @@ class GenerationLoop(
                     break
                 }
 
+                // 若设置了单轮最大工具调用步数（hasCustomStepLimit）且已用尽全部允许的工具步数，
+                // 不再执行新的工具调用，剥离未执行的悬挂工具块以保持会话历史合法并结束本轮
+                if (hasCustomStepLimit && stepIndex >= maxToolRounds) {
+                    Log.i(TAG, "generateText: tool step limit ($maxToolRounds) reached, stopping further tool calls")
+                    val lastMsg = messages.last()
+                    val cleanedParts = lastMsg.parts.filterNot { it is UIMessagePart.Tool && !it.isExecuted }
+                    val finalParts = if (cleanedParts.any { it is UIMessagePart.Text && it.text.isNotBlank() }) {
+                        cleanedParts
+                    } else {
+                        cleanedParts + UIMessagePart.Text("（已达到单轮工具调用步数上限 $maxToolRounds 步，停止继续调用工具）")
+                    }
+                    messages = messages.dropLast(1) + lastMsg.copy(parts = finalParts)
+                    emit(GenerationChunk.Messages(messages))
+                    break
+                }
+
                 // Check for tools that need approval (bypass if autoApproveTools is enabled on sub-conversations,
                 // except interactive HITL tools like ask_user / ask_key which always require user input)
                 var hasPendingApproval = false
@@ -233,9 +254,11 @@ class GenerationLoop(
             }
 
             // Handle tools concurrently (supports parallel sub-agents & parallel workspace tools)
+            // Use CoroutineStart.UNDISPATCHED so concurrent tool calls (e.g. multiple conversation_send)
+            // enter their initial synchronous registration/reservation block strictly in list order.
             val executedTools = coroutineScope {
                 toolsToProcess.map { tool ->
-                    async {
+                    async(start = CoroutineStart.UNDISPATCHED) {
                         when (tool.approvalState) {
                             is ToolApprovalState.Denied -> {
                                 val reason = (tool.approvalState as ToolApprovalState.Denied).reason
@@ -326,9 +349,19 @@ class GenerationLoop(
 
             // Update last message with executed tools (NOT create TOOL message)
             val lastMessage = messages.last()
+            val reachedStepLimitNow = hasCustomStepLimit && (stepIndex + 1 >= maxToolRounds)
+            val lastExecutedToolId = executedTools.lastOrNull()?.toolCallId
             val updatedParts = lastMessage.parts.map { part ->
                 if (part is UIMessagePart.Tool) {
-                    executedTools.find { it.toolCallId == part.toolCallId } ?: part
+                    val executed = executedTools.find { it.toolCallId == part.toolCallId } ?: part
+                    if (reachedStepLimitNow && executed.toolCallId == lastExecutedToolId) {
+                        val limitNotice = UIMessagePart.Text(
+                            "\n\n[System Notice: You have reached the maximum tool call step limit (${stepIndex + 1}/$maxToolRounds steps) for this turn. Do NOT call any more tools. Immediately summarize and output your final response based on the information gathered so far.]"
+                        )
+                        executed.copy(output = executed.output + limitNotice)
+                    } else {
+                        executed
+                    }
                 } else part
             }
             messages = messages.dropLast(1) + lastMessage.copy(parts = updatedParts)
@@ -527,26 +560,62 @@ class GenerationLoop(
         // 用户主动停止生成时，底层连接也可能以 IOException("canceled") 收尾；
         // 先检查协程状态，确保取消不会被当作网络波动重新拉起。
         currentCoroutineContext().ensureActive()
-        if (!enabled || error !is IOException || retryCount >= MAX_PROVIDER_NETWORK_RETRIES) {
+        if (error is CancellationException) throw error
+        val isRateLimitOrOverload = isRateLimitOrOverloadError(error)
+        if ((!enabled && !isRateLimitOrOverload) || (!isRateLimitOrOverload && error !is IOException) || retryCount >= MAX_PROVIDER_NETWORK_RETRIES) {
             throw error
         }
 
         val nextRetryCount = retryCount + 1
-        val retryDelay = INITIAL_PROVIDER_RETRY_DELAY_MS shl retryCount
+        val baseDelay = if (isRateLimitOrOverload) RATE_LIMIT_RETRY_DELAY_MS else INITIAL_PROVIDER_RETRY_DELAY_MS
+        val retryDelay = baseDelay shl retryCount
+        val errorLabel = if (error is IOException) {
+            getNetworkErrorMessage(error)
+        } else {
+            "接口限流或繁忙"
+        }
         processingStatus.value = context.getString(
             R.string.chat_generation_network_retrying,
-            getNetworkErrorMessage(error),
+            errorLabel,
             nextRetryCount,
             MAX_PROVIDER_NETWORK_RETRIES,
         )
         Log.w(
             TAG,
-            "Provider connection failed, retrying in ${retryDelay}ms " +
+            "Provider request failed ($errorLabel), retrying in ${retryDelay}ms " +
                     "($nextRetryCount/$MAX_PROVIDER_NETWORK_RETRIES)",
             error,
         )
         delay(retryDelay)
         return nextRetryCount
+    }
+
+    private fun isRateLimitOrOverloadError(throwable: Throwable): Boolean {
+        var current: Throwable? = throwable
+        while (current != null) {
+            if (current is CancellationException) return false
+            val msg = current.message?.lowercase().orEmpty()
+            if (
+                "429" in msg ||
+                "502" in msg ||
+                "503" in msg ||
+                "504" in msg ||
+                "529" in msg ||
+                "rate limit" in msg ||
+                "rate_limit" in msg ||
+                "too many requests" in msg ||
+                "resource_exhausted" in msg ||
+                "overloaded" in msg ||
+                "bad gateway" in msg ||
+                "service unavailable" in msg ||
+                "gateway timeout" in msg ||
+                "temporarily unavailable" in msg
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
     }
 
     private fun getNetworkErrorMessage(error: IOException): String {
