@@ -554,8 +554,23 @@ object ConversationStopToolUI : ToolUIRenderer {
 
     @Composable
     override fun title(context: ToolUIContext): String {
-        val id = context.arguments.getStringContent("conversation_id")?.take(8) ?: ""
-        return "停止子代理 ($id)"
+        val cid = context.arguments.getStringContent("conversation_id")?.take(8) ?: ""
+        return "停止子代理 ($cid)"
+    }
+}
+
+object ConversationApproveToolUI : ToolUIRenderer {
+    override val toolName: String = "conversation_approve"
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.Message02
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val cid = context.arguments.getStringContent("conversation_id") ?: ""
+        val approved = context.arguments.jsonObjectOrNull?.get("approved")?.jsonPrimitiveOrNull?.contentOrNull != "false"
+        val status = context.content.getStringContent("status")
+        val actionText = if (approved) "批准子代理工具" else "拒绝子代理工具"
+        return if (status == "already_handled") "$actionText ($cid · 已由用户处理)" else "$actionText ($cid)"
     }
 }
 

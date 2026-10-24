@@ -353,6 +353,16 @@ class ChatVM(
         chatService.handleToolApproval(_conversationId, toolCallId, approved, reason)
     }
 
+    fun handleSubAgentToolApproval(
+        targetConversationId: Uuid,
+        toolCallId: String,
+        approved: Boolean,
+        reason: String = "",
+    ) {
+        analytics.logEvent("ai_tool_approval", null)
+        chatService.handleToolApproval(targetConversationId, toolCallId, approved, reason)
+    }
+
     fun handleToolAnswer(
         toolCallId: String,
         answer: String,

@@ -1,6 +1,15 @@
 import com.android.build.api.dsl.Packaging
+import com.android.build.api.instrumentation.AsmClassVisitorFactory
+import com.android.build.api.instrumentation.ClassContext
+import com.android.build.api.instrumentation.ClassData
+import com.android.build.api.instrumentation.FramesComputationMode
+import com.android.build.api.instrumentation.InstrumentationParameters
+import com.android.build.api.instrumentation.InstrumentationScope
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
 import java.io.FileInputStream
 import java.util.Properties
 
@@ -23,7 +32,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 191
-        versionName = "2.5.6-rikkanon"
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -127,6 +136,173 @@ composeCompiler {
     stabilityConfigurationFiles.add(
         project.layout.projectDirectory.file("compose_compiler_config.conf")
     )
+}
+
+/**
+ * 防御性字节码补丁：修复 Compose Foundation 1.13.0-alpha01 中 LazyList / LazyGrid / LazyStaggeredGrid
+ * 在 Lookahead 滚动快路径中重复保留并累加旧 `scrollBackAmount`，导致尾项离屏触发重测量时画面猛烈回跳到底部的缺陷。
+ *
+ * 三层正交防线（全无分支指令织入，不改变 StackMapTable 帧结构）：
+ * 1. 数据源头净化：在 `copyWithScrollDeltaWithoutRemeasure` 创建纯位移副本时，将继承的 `this.scrollBackAmount` 替换为 `0f`；
+ * 2. 消费端免测量守卫：在 `applyMeasureResult$foundation` 读取 `result.getScrollBackAmount()` 后，若 `visibleItemsStayedTheSame == true` 则将其乘以 `0f`；
+ * 3. 瞬移生命周期清理：在 `snapToItemIndexInternal$foundation` / `snapToItemInternal$foundation` 发生位置改变重置 `itemAnimator` 时，同步调用 `_lazyLayoutScrollDeltaBetweenPasses.stop$foundation()`。
+ */
+abstract class ComposeLazyScrollBackFixVisitorFactory :
+    AsmClassVisitorFactory<InstrumentationParameters.None> {
+
+    override fun isInstrumentable(classData: ClassData): Boolean {
+        return classData.className in TARGET_CLASSES
+    }
+
+    override fun createClassVisitor(
+        classContext: ClassContext,
+        nextClassVisitor: ClassVisitor,
+    ): ClassVisitor {
+        val className = classContext.currentClassData.className
+        val internalClassName = className.replace('.', '/')
+        return object : ClassVisitor(Opcodes.ASM9, nextClassVisitor) {
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<out String>?,
+            ): MethodVisitor {
+                val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
+
+                // 防线 A：copyWithScrollDeltaWithoutRemeasure(int, boolean) 不再携带旧 scrollBackAmount
+                if (
+                    className.endsWith("MeasureResult") &&
+                        name == "copyWithScrollDeltaWithoutRemeasure" &&
+                        descriptor.startsWith("(IZ)L")
+                ) {
+                    return object : MethodVisitor(Opcodes.ASM9, mv) {
+                        override fun visitFieldInsn(
+                            opcode: Int,
+                            owner: String,
+                            fieldName: String,
+                            fieldDesc: String,
+                        ) {
+                            if (
+                                opcode == Opcodes.GETFIELD &&
+                                    owner == internalClassName &&
+                                    fieldName == "scrollBackAmount" &&
+                                    fieldDesc == "F"
+                            ) {
+                                super.visitInsn(Opcodes.POP)
+                                super.visitInsn(Opcodes.FCONST_0)
+                            } else {
+                                super.visitFieldInsn(opcode, owner, fieldName, fieldDesc)
+                            }
+                        }
+                    }
+                }
+
+                // 防线 B：applyMeasureResult$foundation(..., isLookingAhead, visibleItemsStayedTheSame)
+                // 当 visibleItemsStayedTheSame (slot 3) 为 true 时，无分支将 scrollBackAmount 置 0f
+                if (
+                    className.endsWith("State") &&
+                        name.startsWith("applyMeasureResult") &&
+                        descriptor.endsWith(";ZZ)V")
+                ) {
+                    return object : MethodVisitor(Opcodes.ASM9, mv) {
+                        override fun visitMethodInsn(
+                            opcode: Int,
+                            owner: String,
+                            methodName: String,
+                            methodDesc: String,
+                            isInterface: Boolean,
+                        ) {
+                            super.visitMethodInsn(opcode, owner, methodName, methodDesc, isInterface)
+                            if (
+                                opcode == Opcodes.INVOKEVIRTUAL &&
+                                    methodName == "getScrollBackAmount" &&
+                                    methodDesc == "()F"
+                            ) {
+                                super.visitInsn(Opcodes.ICONST_1)
+                                super.visitVarInsn(Opcodes.ILOAD, 3)
+                                super.visitInsn(Opcodes.ISUB)
+                                super.visitInsn(Opcodes.I2F)
+                                super.visitInsn(Opcodes.FMUL)
+                            }
+                        }
+
+                        override fun visitMaxs(maxStack: Int, maxLocals: Int) {
+                            super.visitMaxs(maxStack + 2, maxLocals)
+                        }
+                    }
+                }
+
+                // 防线 C：snapToItemIndexInternal / snapToItemInternal 在 positionChanged 重置 itemAnimator 时
+                // 同步停止残留的 _lazyLayoutScrollDeltaBetweenPasses 差值动画
+                if (
+                    className.endsWith("State") &&
+                        (name.startsWith("snapToItemIndexInternal") || name.startsWith("snapToItemInternal")) &&
+                        descriptor == "(IIZ)V"
+                ) {
+                    return object : MethodVisitor(Opcodes.ASM9, mv) {
+                        override fun visitMethodInsn(
+                            opcode: Int,
+                            owner: String,
+                            methodName: String,
+                            methodDesc: String,
+                            isInterface: Boolean,
+                        ) {
+                            super.visitMethodInsn(opcode, owner, methodName, methodDesc, isInterface)
+                            if (
+                                opcode == Opcodes.INVOKEVIRTUAL &&
+                                    owner == "androidx/compose/foundation/lazy/layout/LazyLayoutItemAnimator" &&
+                                    methodName == "reset" &&
+                                    methodDesc == "()V"
+                            ) {
+                                super.visitVarInsn(Opcodes.ALOAD, 0)
+                                super.visitFieldInsn(
+                                    Opcodes.GETFIELD,
+                                    internalClassName,
+                                    "_lazyLayoutScrollDeltaBetweenPasses",
+                                    "Landroidx/compose/foundation/lazy/layout/LazyLayoutScrollDeltaBetweenPasses;",
+                                )
+                                super.visitMethodInsn(
+                                    Opcodes.INVOKEVIRTUAL,
+                                    "androidx/compose/foundation/lazy/layout/LazyLayoutScrollDeltaBetweenPasses",
+                                    "stop\$foundation",
+                                    "()V",
+                                    false,
+                                )
+                            }
+                        }
+
+                        override fun visitMaxs(maxStack: Int, maxLocals: Int) {
+                            super.visitMaxs(maxStack + 1, maxLocals)
+                        }
+                    }
+                }
+
+                return mv
+            }
+        }
+    }
+
+    companion object {
+        private val TARGET_CLASSES = setOf(
+            "androidx.compose.foundation.lazy.LazyListMeasureResult",
+            "androidx.compose.foundation.lazy.LazyListState",
+            "androidx.compose.foundation.lazy.grid.LazyGridMeasureResult",
+            "androidx.compose.foundation.lazy.grid.LazyGridState",
+            "androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridMeasureResult",
+            "androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridState",
+        )
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.instrumentation.transformClassesWith(
+            ComposeLazyScrollBackFixVisitorFactory::class.java,
+            InstrumentationScope.ALL,
+        ) {}
+        variant.instrumentation.setAsmFramesComputationMode(FramesComputationMode.COPY_FRAMES)
+    }
 }
 
 tasks.register("buildAll") {

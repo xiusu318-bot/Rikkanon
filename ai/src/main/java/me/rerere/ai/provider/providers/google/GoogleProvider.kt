@@ -673,7 +673,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     }
 
     private fun buildContents(messages: List<UIMessage>): JsonArray {
-        return buildJsonArray {
+        val rawArray = buildJsonArray {
             messages
                 .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
                 .forEach { message ->
@@ -684,6 +684,24 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     }
                 }
         }
+        // 合并相邻同角色（如 functionResponse 后紧跟 Steer 注入的子代理通知或连续两条 user 消息）
+        val merged = mutableListOf<JsonObject>()
+        for (element in rawArray) {
+            val obj = element.jsonObject
+            val role = obj["role"]?.jsonPrimitive?.contentOrNull
+            val prev = merged.lastOrNull()
+            val prevRole = prev?.get("role")?.jsonPrimitive?.contentOrNull
+            if (role != null && role == prevRole) {
+                val prevParts = prev["parts"]?.jsonArray.orEmpty()
+                val curParts = obj["parts"]?.jsonArray.orEmpty()
+                merged[merged.lastIndex] = JsonObject(
+                    prev + ("parts" to JsonArray(prevParts + curParts))
+                )
+            } else {
+                merged.add(obj)
+            }
+        }
+        return JsonArray(merged)
     }
 
     private fun JsonArrayBuilder.addModelMessage(message: UIMessage) {

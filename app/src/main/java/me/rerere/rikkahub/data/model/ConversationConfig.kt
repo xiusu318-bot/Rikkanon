@@ -39,6 +39,7 @@ data class ConversationConfig(
     val childConversationIds: Set<Uuid> = emptySet(),
     val deletedChildConversationIds: Set<Uuid> = emptySet(),
     val subAgentIdMap: Map<String, Uuid> = emptyMap(), // 主对话局部子代理代号（如 "sub_1" 或旧对话历史ID） -> 数据库真实子对话 UUID
+    val nextSubAgentIndex: Int = 0, // 单调递增的子代理编号计数器，防止删除后复用旧 sub_N 编号
     val parentConversationId: Uuid? = null,
     val autoApproveTools: Boolean = false,
     val subAgentMaxStepsOverride: Int? = null, // 主代理调用时显式传入的单轮最大工具步数（null 则取子代理默认 subAgentMaxSteps，0 为不设限）
@@ -51,11 +52,11 @@ val Conversation.isSubAgentConversation: Boolean
 /**
  * 会话视角下的助手：
  * 始终 100% 实时使用助手自身的最新设置（不再用会话快照覆盖助手设置）；
- * 若为子代理会话且开启了共享主对话工作区，则自动继承主对话的 [ConversationConfig.workspaceId]。
+ * 若为子代理会话且配置了会话工作区（含继承自主对话的共享工作区），则优先使用 [ConversationConfig.workspaceId]。
  */
 fun Assistant.withConversation(conversation: Conversation): Assistant {
     val config = conversation.config ?: return this
-    return if (config.parentConversationId != null && config.workspaceId != null && workspaceId == null) {
+    return if (config.parentConversationId != null && config.workspaceId != null) {
         copy(workspaceId = config.workspaceId)
     } else {
         this

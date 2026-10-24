@@ -73,6 +73,7 @@ class WorkspaceTerminalSessionManager internal constructor(
     private val creationJobs = mutableMapOf<String, Job>()
     private val creationMutex = Mutex()
     private val tabCursors = ConcurrentHashMap<Long, Int>()
+    private val tabTailAnchors = ConcurrentHashMap<Long, String>()
 
     internal fun observeWorkspace(root: String): Flow<WorkspaceTerminalTabsState> =
         workspaceStates
@@ -114,6 +115,7 @@ class WorkspaceTerminalSessionManager internal constructor(
         }
 
         tabCursors.remove(tabId)
+        tabTailAnchors.remove(tabId)
         closedTab?.let { tab ->
             tab.client.terminalView = null
             tab.session.finishIfRunning()
@@ -247,6 +249,7 @@ class WorkspaceTerminalSessionManager internal constructor(
 
         val beforeTranscript = readTranscript(targetTab.session)
         val cursorOffset = tabCursors[targetTab.id]?.coerceAtMost(beforeTranscript.length) ?: beforeTranscript.length
+        val savedAnchor = tabTailAnchors[targetTab.id] ?: extractTailAnchor(beforeTranscript, cursorOffset)
         val sendTimestamp = System.currentTimeMillis()
 
         val trimmedInput = input?.trim()
@@ -317,13 +320,9 @@ class WorkspaceTerminalSessionManager internal constructor(
 
         val finalTab = currentState(root).tabs.firstOrNull { it.id == targetTab.id } ?: targetTab
         val afterTranscript = readTranscript(finalTab.session)
+        val incremental = extractIncrementalTranscript(afterTranscript, cursorOffset, savedAnchor)
         tabCursors[finalTab.id] = afterTranscript.length
-
-        val incremental = if (afterTranscript.length >= cursorOffset) {
-            afterTranscript.substring(cursorOffset).trimEnd()
-        } else {
-            afterTranscript.trimEnd()
-        }
+        tabTailAnchors[finalTab.id] = extractTailAnchor(afterTranscript, afterTranscript.length)
         val snapshot = afterTranscript.lineSequence().toList().takeLast(DEFAULT_TERMINAL_ROWS).joinToString("\n").trimEnd()
         val prootPid = runCatching { finalTab.session.pid }.getOrDefault(0)
         val finalTree = inspectTerminalProcessTree(prootPid)
@@ -424,8 +423,62 @@ class WorkspaceTerminalSessionManager internal constructor(
 
     private fun readTranscript(session: TerminalSession): String =
         runCatching {
-            session.emulator?.screen?.transcriptText.orEmpty()
+            session.emulator?.screen?.transcriptText?.replace("\r\n", "\n") ?: ""
         }.getOrDefault("")
+
+    /**
+     * Extracts a compact tail anchor (up to 512 chars before [endOffset]) for O(1) cursor validation
+     * and ring-buffer wrap-around recovery without retaining the full 2000-line transcript in memory.
+     */
+    private fun extractTailAnchor(transcript: String, endOffset: Int): String {
+        val safeEnd = endOffset.coerceIn(0, transcript.length)
+        if (safeEnd == 0) return ""
+        val rawStart = (safeEnd - 512).coerceAtLeast(0)
+        val lineStart = if (rawStart > 0) {
+            val nl = transcript.indexOf('\n', rawStart)
+            if (nl in rawStart until safeEnd) nl + 1 else rawStart
+        } else {
+            0
+        }
+        return transcript.substring(lineStart, safeEnd)
+    }
+
+    /**
+     * Extracts newly appended terminal output using O(1) [String.regionMatches] on the normal path,
+     * falling back to multi-line tail anchor lookup only when the 2000-line scrollback buffer wraps.
+     */
+    private fun extractIncrementalTranscript(
+        after: String,
+        cursorOffset: Int,
+        savedAnchor: String,
+    ): String {
+        if (after.isEmpty()) return ""
+        if (cursorOffset <= 0 || savedAnchor.isEmpty()) {
+            return if (cursorOffset in 0..after.length) after.substring(cursorOffset).trimEnd() else after.trimEnd()
+        }
+        // O(1) fast path: scrollback did not evict lines, so savedAnchor still sits right before cursorOffset
+        if (cursorOffset <= after.length &&
+            cursorOffset >= savedAnchor.length &&
+            after.regionMatches(cursorOffset - savedAnchor.length, savedAnchor, 0, savedAnchor.length)
+        ) {
+            return after.substring(cursorOffset).trimEnd()
+        }
+        // Slow path (only when 2000-line scrollback buffer evicted oldest lines): locate tail anchor in after
+        val directIdx = after.lastIndexOf(savedAnchor)
+        if (directIdx >= 0) {
+            return after.substring(directIdx + savedAnchor.length).trimStart('\r', '\n').trimEnd()
+        }
+        val anchorLines = savedAnchor.trimEnd('\n', '\r').lines()
+        for (window in minOf(6, anchorLines.size) downTo 2) {
+            val subAnchor = anchorLines.takeLast(window).joinToString("\n")
+            if (subAnchor.isBlank()) continue
+            val matchIdx = after.lastIndexOf(subAnchor)
+            if (matchIdx >= 0) {
+                return after.substring(matchIdx + subAnchor.length).trimStart('\r', '\n').trimEnd()
+            }
+        }
+        return after.trimEnd()
+    }
 
     internal fun readTabScreenSnapshot(root: String, tabId: Long, maxLines: Int = DEFAULT_TERMINAL_ROWS): String {
         val tab = currentState(root).tabs.firstOrNull { it.id == tabId } ?: return ""

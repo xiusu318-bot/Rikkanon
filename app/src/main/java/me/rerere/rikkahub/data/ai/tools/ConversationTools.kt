@@ -90,9 +90,10 @@ fun createConversationTools(
         if (targetId == parentId) return false
         val targetConv = resolveTargetConversation(targetId) ?: return false
         if (targetConv.config?.parentConversationId == parentId) return true
-        val parentConv = getParentConversation()
-        return parentConv != null &&
-            targetId in parentConv.allChildConversationIds &&
+        val parentConfig = getParentConversation()?.config ?: return false
+        val deleted = parentConfig.deletedChildConversationIds
+        if (targetId in deleted) return false
+        return (targetId in parentConfig.childConversationIds || targetId in parentConfig.subAgentIdMap.values) &&
             targetConv.config?.parentConversationId != null
     }
 
@@ -144,22 +145,6 @@ fun createConversationTools(
                     add("memory_str_replace")
                     add("memory_append")
                     add("memory_delete")
-                }
-                subAssistant.localTools.forEach { opt ->
-                    when (opt) {
-                        LocalToolOption.JavascriptEngine -> add("eval_javascript")
-                        LocalToolOption.TimeInfo -> add("get_time_info")
-                        LocalToolOption.Clipboard -> add("clipboard_tool")
-                        LocalToolOption.Tts -> add("text_to_speech")
-                        LocalToolOption.ScreenTime -> add("get_screen_time")
-                        LocalToolOption.Calendar -> {
-                            add("query_calendar_events")
-                            add("create_calendar_event")
-                        }
-                        LocalToolOption.ChartDisplay -> add("display_chart")
-                        // 子对话后台运行时不弹出交互式提问卡片
-                        else -> Unit
-                    }
                 }
                 if (subAssistant.enabledSkills.isNotEmpty()) {
                     add("use_skill")
@@ -356,8 +341,8 @@ fun createConversationTools(
                                         limit = limit,
                                         waitMs = 0L,
                                     )
-                                    // 仅当读取结束时子代理确实已完成 (status != "running")，才标记为已消费，避免取消运行中子代理的完成通知
-                                    if (result.status != "running" && currentConversationId != null) {
+                                    // 仅当读取结束时子代理确实已完成或停在需主代理介入的状态（非 running 且非 waiting_user_approval），才标记为已消费
+                                    if (result.status !in setOf("running", "waiting_user_approval") && currentConversationId != null) {
                                         chatService.markSubAgentResultConsumed(currentConversationId, tid)
                                     }
                                     val logicalId = parentConv?.resolveLogicalSubAgentId(result.conversationId)
@@ -372,6 +357,19 @@ fun createConversationTools(
                                         if (!result.processingStatus.isNullOrBlank()) {
                                             put("processing_status", result.processingStatus)
                                         }
+                                        if (result.pendingApprovalTools.isNotEmpty()) {
+                                            put("pending_approval_tools", buildJsonArray {
+                                                result.pendingApprovalTools.forEach { pt ->
+                                                    add(buildJsonObject {
+                                                        put("tool_call_id", pt.toolCallId)
+                                                        put("tool", pt.toolName)
+                                                        put("input", pt.input)
+                                                        put("allow_agent_approval", pt.allowAgentApproval)
+                                                        put("allow_user_approval", pt.allowUserApproval)
+                                                    })
+                                                }
+                                            })
+                                        }
                                         put("total_messages", result.totalMessages)
                                         put("messages", buildJsonArray {
                                             result.messages.forEach { msg ->
@@ -383,9 +381,11 @@ fun createConversationTools(
                                                         put("tool_steps", buildJsonArray {
                                                             msg.toolSteps.forEach { step ->
                                                                 add(buildJsonObject {
+                                                                    if (step.toolCallId.isNotEmpty()) put("tool_call_id", step.toolCallId)
                                                                     put("tool", step.toolName)
                                                                     put("input", step.inputPreview)
                                                                     put("executed", step.isExecuted)
+                                                                    if (step.isPendingApproval) put("pending_approval", true)
                                                                 })
                                                             }
                                                         })
@@ -428,8 +428,9 @@ fun createConversationTools(
                                 val latestReply = dialogue.lastOrNull { it.role == MessageRole.ASSISTANT }
                                     ?.toText()
                                     ?.take(4_000)
-                                // 仅当子代理已完成且返回了最终回复时，才标记完成通知已消费
-                                if (status != "running" && !latestReply.isNullOrBlank() && currentConversationId != null) {
+                                val pendingTools = chatService?.extractPendingApprovalTools(conv).orEmpty()
+                                // 仅当子代理已结束或停在主代理可审批状态时，才标记通知已消费；waiting_user_approval 与 running 不标记
+                                if (status !in setOf("running", "waiting_user_approval") && (!latestReply.isNullOrBlank() || pendingTools.isNotEmpty()) && currentConversationId != null) {
                                     chatService?.markSubAgentResultConsumed(currentConversationId, conv.id)
                                 }
                                 val logicalId = refreshedParent?.resolveLogicalSubAgentId(conv.id)
@@ -446,6 +447,19 @@ fun createConversationTools(
                                     }
                                     if (convModel != null) {
                                         put("model", convModel.displayName)
+                                    }
+                                    if (pendingTools.isNotEmpty()) {
+                                        put("pending_approval_tools", buildJsonArray {
+                                            pendingTools.forEach { pt ->
+                                                add(buildJsonObject {
+                                                    put("tool_call_id", pt.toolCallId)
+                                                    put("tool", pt.toolName)
+                                                    put("input", pt.input)
+                                                    put("allow_agent_approval", pt.allowAgentApproval)
+                                                    put("allow_user_approval", pt.allowUserApproval)
+                                                })
+                                            }
+                                        })
                                     }
                                     if (!latestReply.isNullOrBlank()) {
                                         put("latest_reply", latestReply)
@@ -480,8 +494,8 @@ fun createConversationTools(
                         limit = limit,
                         waitMs = waitSec * 1_000L,
                     )
-                    // 仅当读取结束时子代理已完成 (status != "running")，才标记为已消费
-                    if (result.status != "running" && currentConversationId != null) {
+                    // 仅当读取结束时子代理确实已完成或停在主代理可审批态（非 running 且非 waiting_user_approval），才标记为已消费
+                    if (result.status !in setOf("running", "waiting_user_approval") && currentConversationId != null) {
                         chatService.markSubAgentResultConsumed(currentConversationId, targetId)
                     }
                     val logicalId = toLogicalSubAgentId(result.conversationId)
@@ -495,6 +509,19 @@ fun createConversationTools(
                         if (!result.processingStatus.isNullOrBlank()) {
                             put("processing_status", result.processingStatus)
                         }
+                        if (result.pendingApprovalTools.isNotEmpty()) {
+                            put("pending_approval_tools", buildJsonArray {
+                                result.pendingApprovalTools.forEach { pt ->
+                                    add(buildJsonObject {
+                                        put("tool_call_id", pt.toolCallId)
+                                        put("tool", pt.toolName)
+                                        put("input", pt.input)
+                                        put("allow_agent_approval", pt.allowAgentApproval)
+                                        put("allow_user_approval", pt.allowUserApproval)
+                                    })
+                                }
+                            })
+                        }
                         put("total_messages", result.totalMessages)
                         put("messages", buildJsonArray {
                             result.messages.forEach { msg ->
@@ -506,9 +533,11 @@ fun createConversationTools(
                                         put("tool_steps", buildJsonArray {
                                             msg.toolSteps.forEach { step ->
                                                 add(buildJsonObject {
+                                                    if (step.toolCallId.isNotEmpty()) put("tool_call_id", step.toolCallId)
                                                     put("tool", step.toolName)
                                                     put("input", step.inputPreview)
                                                     put("executed", step.isExecuted)
+                                                    if (step.isPendingApproval) put("pending_approval", true)
                                                 })
                                             }
                                         })
@@ -703,23 +732,139 @@ fun createConversationTools(
                         if (result.reply != null) {
                             put("reply", result.reply)
                         }
+                        if (result.pendingApprovalTools.isNotEmpty()) {
+                            put("pending_approval_tools", buildJsonArray {
+                                result.pendingApprovalTools.forEach { pt ->
+                                    add(buildJsonObject {
+                                        put("tool_call_id", pt.toolCallId)
+                                        put("tool", pt.toolName)
+                                        put("input", pt.input)
+                                        put("allow_agent_approval", pt.allowAgentApproval)
+                                        put("allow_user_approval", pt.allowUserApproval)
+                                    })
+                                }
+                            })
+                        }
                         // 仅当开启了「窥屏与查看工具轨迹」权限时才向主代理返回 tool_steps；最低权限下只返回最终 reply
                         if (allowInspect && result.toolSteps.isNotEmpty()) {
                             put("tool_steps", buildJsonArray {
                                 result.toolSteps.forEach { step ->
                                     add(buildJsonObject {
+                                        if (step.toolCallId.isNotEmpty()) put("tool_call_id", step.toolCallId)
                                         put("tool", step.toolName)
                                         put("input", step.inputPreview)
                                         put("executed", step.isExecuted)
+                                        if (step.isPendingApproval) put("pending_approval", true)
                                     })
                                 }
                             })
                         }
-                        if (result.status == "running") {
-                            put(
+                        when (result.status) {
+                            "running" -> put(
                                 "hint",
-                                "Sub-agent '${result.logicalId}' is running in the background. You will be automatically notified when it finishes, or you can call `conversation_read` with conversation_id='${result.logicalId}' (or wait_sec > 0) at any time."
+                                "Sub-agent '${result.logicalId}' is running in the background. You will be automatically notified when it finishes or pauses, or you can call `conversation_read` with conversation_id='${result.logicalId}' (or wait_sec > 0) at any time."
                             )
+                            "waiting_approval" -> put(
+                                "hint",
+                                "Sub-agent '${result.logicalId}' is paused waiting for tool approval. Inspect `pending_approval_tools` and call `conversation_approve` with conversation_id='${result.logicalId}' and approved=true/false."
+                            )
+                            "waiting_user_approval" -> put(
+                                "hint",
+                                "Sub-agent '${result.logicalId}' is paused waiting for the human user to approve its tool call in the UI. You will be automatically notified once it finishes."
+                            )
+                        }
+                    }
+                    listOf(UIMessagePart.Text(JsonInstantPretty.encodeToString(payload)))
+                }
+            )
+        )
+
+        add(
+            Tool(
+                name = "conversation_approve",
+                description = """
+                    Approve or deny pending tool call(s) on a sub-agent conversation (e.g. 'sub_1', 'sub_2') when the sub-agent pauses in 'waiting_approval' state for tools configured with main-agent approval.
+                    Idempotent: if the user already approved or handled the tool call in the UI, returns 'already_handled' cleanly without error.
+                """.trimIndent().replace("\n", " "),
+                parameters = {
+                    InputSchema.Obj(
+                        properties = buildJsonObject {
+                            put("conversation_id", buildJsonObject {
+                                put("type", "string")
+                                put("description", "ID of the sub-agent conversation waiting for approval (e.g. 'sub_1', 'sub_2').")
+                            })
+                            put("approved", buildJsonObject {
+                                put("type", "boolean")
+                                put("description", "true to approve and execute the tool call(s), false to deny.")
+                            })
+                            put("tool_call_id", buildJsonObject {
+                                put("type", "string")
+                                put("description", "Optional specific tool_call_id to approve/deny. Omit to handle all currently pending agent-approvable tool calls on that sub-agent.")
+                            })
+                            put("reason", buildJsonObject {
+                                put("type", "string")
+                                put("description", "Optional reason when denying the tool call (passed back to the sub-agent).")
+                            })
+                            put("wait", buildJsonObject {
+                                put("type", "boolean")
+                                put("description", "Whether to wait synchronously for the sub-agent to finish its resumed turn (default: false; when false, it resumes in the background and notifies you automatically upon completion).")
+                            })
+                            put("timeout_sec", buildJsonObject {
+                                put("type", "integer")
+                                put("description", "Max seconds to wait when wait=true (default: 60, max: 600).")
+                            })
+                        },
+                        required = listOf("conversation_id", "approved")
+                    )
+                },
+                needsApproval = { false },
+                execute = {
+                    val args = it.jsonObject
+                    val rawId = args["conversation_id"]?.jsonPrimitive?.contentOrNull?.trim()
+                        ?: error("conversation_id is required")
+                    val targetId = resolveSubAgentRealId(rawId)
+                        ?: error("Sub-agent '$rawId' not found in the current conversation")
+                    requireOwnedSubAgentConversation(targetId)
+                    val approved = args["approved"]?.jsonPrimitive?.booleanOrNull
+                        ?: error("approved (boolean) is required")
+                    val toolCallId = args["tool_call_id"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() }
+                    val reason = args["reason"]?.jsonPrimitive?.contentOrNull ?: ""
+                    val wait = args["wait"]?.jsonPrimitive?.booleanOrNull ?: false
+                    val timeoutSec = (args["timeout_sec"]?.jsonPrimitive?.intOrNull ?: 60).coerceIn(1, 600)
+
+                    val result = chatService.approveSubConversationTool(
+                        parentConversationId = currentConversationId,
+                        targetConversationId = targetId,
+                        toolCallId = toolCallId,
+                        approved = approved,
+                        reason = reason,
+                        wait = wait,
+                        timeoutMs = timeoutSec * 1_000L,
+                    )
+
+                    val payload = buildJsonObject {
+                        put("conversation_id", result.logicalId)
+                        put("status", result.status)
+                        put("sub_agent_status", result.subAgentStatus)
+                        put("handled_tool_call_ids", buildJsonArray {
+                            result.handledToolCallIds.forEach { id -> add(kotlinx.serialization.json.JsonPrimitive(id)) }
+                        })
+                        put("message", result.message)
+                        if (result.reply != null) {
+                            put("reply", result.reply)
+                        }
+                        if (result.pendingApprovalTools.isNotEmpty()) {
+                            put("pending_approval_tools", buildJsonArray {
+                                result.pendingApprovalTools.forEach { pt ->
+                                    add(buildJsonObject {
+                                        put("tool_call_id", pt.toolCallId)
+                                        put("tool", pt.toolName)
+                                        put("input", pt.input)
+                                        put("allow_agent_approval", pt.allowAgentApproval)
+                                        put("allow_user_approval", pt.allowUserApproval)
+                                    })
+                                }
+                            })
                         }
                     }
                     listOf(UIMessagePart.Text(JsonInstantPretty.encodeToString(payload)))
@@ -754,7 +899,7 @@ fun createConversationTools(
                         requireOwnedSubAgentConversation(targetId)
                         val logicalId = toLogicalSubAgentId(targetId)
                         chatService.markSubAgentResultConsumed(currentConversationId, targetId)
-                        chatService.stopGeneration(targetId)
+                        chatService.stopGeneration(targetId, suppressedByParentAgent = true)
                         listOf(
                             UIMessagePart.Text(
                                 buildJsonObject {

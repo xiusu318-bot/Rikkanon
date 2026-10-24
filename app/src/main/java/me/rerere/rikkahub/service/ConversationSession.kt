@@ -32,6 +32,7 @@ class ConversationSession(
     val state: StateFlow<Conversation> = _state.asStateFlow()
     private val initializationMutex = Mutex()
     private val metadataMutex = Mutex()
+    internal val approvalMutex = Mutex()
     @Volatile
     private var initialized = false
     val messageQueue = MessageQueue()

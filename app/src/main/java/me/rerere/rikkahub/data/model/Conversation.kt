@@ -198,18 +198,12 @@ fun Conversation.resolveRealSubAgentId(rawId: String): Uuid? {
     // 1. 直接命中映射表（含 "sub_1" 或 Fork 后的旧 UUID 字符串映射）
     idMap[token]?.takeIf { it != id && it !in deleted }?.let { return it }
 
-    // 2. 归一化匹配（例如传入 "1"、"#1"、"sub-1" 均可匹配 "sub_1"）
+    // 2. 归一化匹配（例如传入 "1"、"#1"、"sub-1" 均可匹配 "sub_1"，仅认准 subAgentIdMap，不做列表下标兜底以防删除后错位）
     val indexMatch = SUB_AGENT_INDEX_REGEX.matchEntire(token)
     if (indexMatch != null) {
         val normalizedKey = "sub_${indexMatch.groupValues[1]}"
         idMap[normalizedKey]?.takeIf { it != id && it !in deleted }?.let { return it }
-        val oneBasedIdx = indexMatch.groupValues[1].toIntOrNull()
-        if (oneBasedIdx != null && oneBasedIdx >= 1) {
-            val ordered = allChildConversationIds.toList()
-            if (oneBasedIdx - 1 in ordered.indices) {
-                return ordered[oneBasedIdx - 1]
-            }
-        }
+        return null
     }
 
     // 3. 兼容未映射的旧对话真实 UUID
@@ -225,16 +219,13 @@ fun Conversation.resolveRealSubAgentId(rawId: String): Uuid? {
 fun Conversation.resolveLogicalSubAgentId(realChildId: Uuid): String {
     val idMap = config?.subAgentIdMap.orEmpty()
     idMap.entries.firstOrNull { (k, v) -> v == realChildId && k.startsWith("sub_") }?.key?.let { return it }
-    val idx = allChildConversationIds.indexOf(realChildId)
-    if (idx >= 0) return "sub_${idx + 1}"
     return realChildId.toString()
 }
 
 /**
  * 提取当前主对话所关联/操控的所有真实子对话 UUID：
  * - 包含 [ConversationConfig.childConversationIds] 与 [ConversationConfig.subAgentIdMap] 中的真实子对话 ID；
- * - 扫描消息树中 `conversation_send` 的 `conversation_id`：若在 `subAgentIdMap` 中有映射则取映射后的真实 UUID
- *   （避免 Fork 后把原主对话的旧子代理 UUID 混入新分支），否则兼容解析原始 UUID。
+ * - 仅扫描消息树中 `conversation_send` 成功执行后的 `tool.output`（不扫描不可信的 `tool.input`，防止入参伪造污染归属集合）。
  */
 val Conversation.allChildConversationIds: Set<Uuid>
     get() = buildSet {
@@ -245,23 +236,16 @@ val Conversation.allChildConversationIds: Set<Uuid>
             node.messages.forEach { message ->
                 message.getTools().forEach { tool ->
                     if (tool.toolName in SUB_CONVERSATION_TOOL_NAMES) {
-                        CONVERSATION_ID_JSON_REGEX.findAll(tool.input).forEach { match ->
-                            val rawToken = match.groupValues[1].trim()
-                            val mapped = idMap[rawToken]
-                            if (mapped != null) {
-                                add(mapped)
-                            } else if (rawToken !in idMap.keys) {
-                                runCatching { Uuid.parse(rawToken) }.getOrNull()?.let(::add)
-                            }
-                        }
                         tool.output.filterIsInstance<UIMessagePart.Text>().forEach { textPart ->
-                            CONVERSATION_ID_JSON_REGEX.findAll(textPart.text).forEach { match ->
-                                val rawToken = match.groupValues[1].trim()
-                                val mapped = idMap[rawToken]
-                                if (mapped != null) {
-                                    add(mapped)
-                                } else if (rawToken !in idMap.keys) {
-                                    runCatching { Uuid.parse(rawToken) }.getOrNull()?.let(::add)
+                            if (!textPart.text.contains("\"error\"")) {
+                                CONVERSATION_ID_JSON_REGEX.findAll(textPart.text).forEach { match ->
+                                    val rawToken = match.groupValues[1].trim()
+                                    val mapped = idMap[rawToken]
+                                    if (mapped != null) {
+                                        add(mapped)
+                                    } else if (rawToken !in idMap.keys) {
+                                        runCatching { Uuid.parse(rawToken) }.getOrNull()?.let(::add)
+                                    }
                                 }
                             }
                         }

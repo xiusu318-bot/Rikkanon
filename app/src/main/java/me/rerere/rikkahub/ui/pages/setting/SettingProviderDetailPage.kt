@@ -11,7 +11,9 @@ import me.rerere.hugeicons.stroke.Share01
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.Settings03
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,7 +42,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FloatingToolbarDefaults.ScreenOffset
 import androidx.compose.material3.FloatingToolbarDefaults.floatingToolbarVerticalNestedScroll
 import androidx.compose.material3.HorizontalFloatingToolbar
@@ -112,7 +117,8 @@ import me.rerere.rikkahub.ui.components.ui.ShareSheet
 import me.rerere.rikkahub.ui.components.ui.SiliconFlowPowerByIcon
 import me.rerere.rikkahub.ui.components.ui.Tag
 import me.rerere.rikkahub.ui.components.ui.TagType
-import me.rerere.rikkahub.ui.components.ui.longPressReorder
+import me.rerere.rikkahub.ui.components.ui.draggingScale
+import me.rerere.rikkahub.ui.components.ui.longPressReorderHandle
 import me.rerere.rikkahub.ui.components.ui.rememberShareSheetState
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
@@ -444,6 +450,39 @@ private fun ModelList(
         onUpdateProvider(providerSetting.moveMove(from.index, to.index))
     }
 
+    // 多选（长按模型卡片右侧三个点进入）
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(emptySet<Uuid>()) }
+    var showBatchDeleteDialog by remember { mutableStateOf(false) }
+
+    fun exitSelection() {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+
+    BackHandler(enabled = selectionMode) {
+        exitSelection()
+    }
+
+    RikkaConfirmDialog(
+        show = showBatchDeleteDialog,
+        title = stringResource(R.string.confirm_delete),
+        confirmText = stringResource(R.string.delete),
+        dismissText = stringResource(R.string.cancel),
+        onConfirm = {
+            showBatchDeleteDialog = false
+            onUpdateProvider(
+                providerSetting.copyProvider(
+                    models = providerSetting.models.filterNot { it.id in selectedIds }
+                )
+            )
+            exitSelection()
+        },
+        onDismiss = { showBatchDeleteDialog = false },
+    ) {
+        Text("确定删除选中的 ${selectedIds.size} 个模型吗？")
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier
@@ -495,7 +534,21 @@ private fun ModelList(
                                 onUpdateProvider(providerSetting.editModel(editedModel))
                             },
                             parentProvider = providerSetting,
-                            modifier = longPressReorder(isDragging),
+                            modifier = Modifier.draggingScale(isDragging),
+                            cardModifier = longPressReorderHandle(enabled = !selectionMode),
+                            selectionMode = selectionMode,
+                            selected = item.id in selectedIds,
+                            onToggleSelect = {
+                                selectedIds = if (item.id in selectedIds) {
+                                    selectedIds - item.id
+                                } else {
+                                    selectedIds + item.id
+                                }
+                            },
+                            onEnterSelection = {
+                                selectionMode = true
+                                selectedIds = setOf(item.id)
+                            },
                         )
                     }
                 }
@@ -507,19 +560,58 @@ private fun ModelList(
                 .align(Alignment.BottomCenter)
                 .offset(y = -ScreenOffset),
         ) {
-            AddModelButton(
-                models = modelList,
-                selectedModels = providerSetting.models,
-                onAddModel = {
-                    onUpdateProvider(providerSetting.addModel(it))
-                },
-                onRemoveModel = {
-                    onUpdateProvider(providerSetting.delModel(it))
-                },
-                expanded = expanded,
-                parentProvider = providerSetting,
-                onUpdateProvider = onUpdateProvider
-            )
+            if (selectionMode) {
+                val allSelected = providerSetting.models.all { it.id in selectedIds }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { exitSelection() }) {
+                        Icon(HugeIcons.Cancel01, contentDescription = stringResource(R.string.cancel))
+                    }
+                    Text(
+                        text = "已选 ${selectedIds.size} 个",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    TextButton(
+                        onClick = {
+                            selectedIds = if (allSelected) {
+                                emptySet()
+                            } else {
+                                providerSetting.models.map { it.id }.toSet()
+                            }
+                        }
+                    ) {
+                        Text(if (allSelected) "取消全选" else "全选")
+                    }
+                    Button(
+                        onClick = { showBatchDeleteDialog = true },
+                        enabled = selectedIds.isNotEmpty(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                    ) {
+                        Icon(HugeIcons.Delete01, contentDescription = null)
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text(stringResource(R.string.delete), style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+            } else {
+                AddModelButton(
+                    models = modelList,
+                    selectedModels = providerSetting.models,
+                    onAddModel = {
+                        onUpdateProvider(providerSetting.addModel(it))
+                    },
+                    onRemoveModel = {
+                        onUpdateProvider(providerSetting.delModel(it))
+                    },
+                    expanded = expanded,
+                    parentProvider = providerSetting,
+                    onUpdateProvider = onUpdateProvider
+                )
+            }
         }
     }
 }
@@ -1192,9 +1284,14 @@ fun ModalAbilitySelector(
 private fun ModelCard(
     model: Model,
     modifier: Modifier = Modifier,
+    cardModifier: Modifier = Modifier,
     onDelete: () -> Unit,
     onEdit: (Model) -> Unit,
-    parentProvider: ProviderSetting
+    parentProvider: ProviderSetting,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
+    onEnterSelection: () -> Unit = {},
 ) {
     val dialogState = useEditState<Model> {
         onEdit(it.copy(displayName = it.displayName.trim()))
@@ -1282,64 +1379,91 @@ private fun ModelCard(
         }
     }
 
-    OutlinedCard(
-        onClick = { dialogState.open(model.copy()) },
-        modifier = modifier,
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    // 三个点 / 复选框作为兄弟节点叠在卡片上方，不在卡片的长按拖拽范围内
+    Box(modifier = modifier) {
+        OutlinedCard(
+            onClick = {
+                if (selectionMode) onToggleSelect() else dialogState.open(model.copy())
+            },
+            modifier = cardModifier,
+            border = if (selected) {
+                BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+            } else {
+                CardDefaults.outlinedCardBorder()
+            },
         ) {
-            Surface(
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                shape = MaterialTheme.shapes.small,
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                AutoAIIcon(
-                    name = model.modelId,
-                    modifier = Modifier.size(36.dp),
-                )
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = model.displayName,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    AutoAIIcon(
+                        name = model.modelId,
+                        modifier = Modifier.size(36.dp),
+                    )
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (model.providerOverwrite != null) {
-                        Tag(type = TagType.INFO) {
-                            Text(
-                                model.providerOverwrite?.javaClass?.simpleName ?: model.providerOverwrite?.name
-                                ?: "ProviderOverwrite"
-                            )
+                    Text(
+                        text = model.displayName,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (model.providerOverwrite != null) {
+                            Tag(type = TagType.INFO) {
+                                Text(
+                                    model.providerOverwrite?.javaClass?.simpleName ?: model.providerOverwrite?.name
+                                    ?: "ProviderOverwrite"
+                                )
+                            }
                         }
+                        ModelTypeTag(model = model)
+                        ModelModalityTag(model = model)
+                        ModelAbilityTag(model = model)
                     }
-                    ModelTypeTag(model = model)
-                    ModelModalityTag(model = model)
-                    ModelAbilityTag(model = model)
                 }
-            }
 
-            ItemActionMenu(
-                actions = listOf(
-                    ItemAction(
-                        text = stringResource(R.string.delete),
-                        icon = HugeIcons.Delete01,
-                        destructive = true,
-                        onClick = { showDeleteDialog = true },
-                    ),
+                // 给叠在上方的三个点 / 复选框留位置
+                Spacer(modifier = Modifier.size(48.dp))
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 16.dp),
+        ) {
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onToggleSelect() },
                 )
-            )
+            } else {
+                ItemActionMenu(
+                    actions = listOf(
+                        ItemAction(
+                            text = stringResource(R.string.delete),
+                            icon = HugeIcons.Delete01,
+                            destructive = true,
+                            onClick = { showDeleteDialog = true },
+                        ),
+                    ),
+                    onLongClick = onEnterSelection,
+                )
+            }
         }
     }
 

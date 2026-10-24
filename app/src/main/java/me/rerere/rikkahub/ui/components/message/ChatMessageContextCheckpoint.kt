@@ -37,6 +37,7 @@ import me.rerere.hugeicons.stroke.ArrowUp01
 import me.rerere.hugeicons.stroke.Message02
 import me.rerere.hugeicons.stroke.Package01
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.service.SUB_AGENT_INTERRUPT_NOTIFICATION_HEADER
 import me.rerere.rikkahub.service.SUB_AGENT_NOTIFICATION_HEADER
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 
@@ -44,7 +45,12 @@ private val SUB_AGENT_ID_TAG_REGEX = Regex("""### Sub-Agent `([^`]+)`""")
 
 val UIMessage.isSubAgentNotification: Boolean
     get() = role == MessageRole.USER &&
-        parts.firstOrNull()?.let { it is UIMessagePart.Text && it.text.startsWith(SUB_AGENT_NOTIFICATION_HEADER) } == true
+        parts.firstOrNull()?.let {
+            it is UIMessagePart.Text && (
+                it.text.startsWith(SUB_AGENT_NOTIFICATION_HEADER) ||
+                    it.text.startsWith(SUB_AGENT_INTERRUPT_NOTIFICATION_HEADER)
+                )
+        } == true
 
 /**
  * 压缩检查点：分隔线上方的消息仍可查看，但不再发送给模型，由这里的摘要代替。
@@ -150,7 +156,24 @@ fun ChatMessageSubAgentNotification(
         .map { it.groupValues[1] }
         .toList()
     val labelSuffix = if (subIds.isNotEmpty()) " (${subIds.joinToString(", ")})" else ""
-    val bodyMarkdown = rawText.removePrefix(SUB_AGENT_NOTIFICATION_HEADER).trim()
+    val bodyMarkdown = rawText
+        .removePrefix(SUB_AGENT_NOTIFICATION_HEADER)
+        .removePrefix(SUB_AGENT_INTERRUPT_NOTIFICATION_HEADER)
+        .trim()
+    val isWaitingApproval = rawText.contains("- Status: waiting_approval")
+    val isErrorOrInterrupted = rawText.contains("- Status: failed") ||
+        rawText.contains("- Status: interrupted_by_user") ||
+        rawText.startsWith(SUB_AGENT_INTERRUPT_NOTIFICATION_HEADER)
+    val bannerTitle = when {
+        isWaitingApproval -> "子代理请求工具审批$labelSuffix"
+        isErrorOrInterrupted -> "子代理后台任务已中断/异常$labelSuffix"
+        else -> "子代理后台任务已完成$labelSuffix"
+    }
+    val bannerColor = when {
+        isWaitingApproval -> MaterialTheme.colorScheme.tertiary
+        isErrorOrInterrupted -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.primary
+    }
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -170,18 +193,18 @@ fun ChatMessageSubAgentNotification(
                 imageVector = HugeIcons.Message02,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.primary,
+                tint = bannerColor,
             )
             Text(
-                text = "子代理后台任务已完成$labelSuffix",
+                text = bannerTitle,
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = bannerColor,
             )
             Icon(
                 imageVector = if (expanded) HugeIcons.ArrowUp01 else HugeIcons.ArrowDown01,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.primary,
+                tint = bannerColor,
             )
             HorizontalDivider(modifier = Modifier.weight(1f))
         }

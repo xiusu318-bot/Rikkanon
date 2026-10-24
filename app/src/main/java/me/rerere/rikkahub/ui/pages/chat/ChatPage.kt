@@ -200,7 +200,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     }
 
     val chatListState = rememberLazyListState()
-    LaunchedEffect(nodeId, conversation.messageNodes.size) {
+    LaunchedEffect(id, nodeId, conversation.messageNodes.size) {
         if (!vm.chatListInitialized && conversation.messageNodes.isNotEmpty()) {
             if (nodeId != null) {
                 val index = conversation.messageNodes.indexOfFirst { it.id == nodeId }
@@ -208,7 +208,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                     chatListState.scrollToItem(index)
                 }
             } else {
-                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                chatListState.scrollToItem(conversation.currentMessages.size + 5)
             }
             vm.chatListInitialized = true
         }
@@ -411,7 +411,7 @@ private fun ChatPageContent(
                             vm.handleMessageSend(inputState.getContents())
                             scope.launch {
                                 delay(100.milliseconds)
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                                chatListState.scrollToItem(conversation.currentMessages.size + 5)
                             }
                         }
                         inputState.clearInput()
@@ -425,7 +425,7 @@ private fun ChatPageContent(
                         } else {
                             vm.handleMessageSend(content = inputState.getContents(), answer = false)
                             scope.launch {
-                                chatListState.requestScrollToItem(conversation.currentMessages.size + 5)
+                                chatListState.scrollToItem(conversation.currentMessages.size + 5)
                             }
                         }
                         inputState.clearInput()
@@ -500,7 +500,7 @@ private fun ChatPageContent(
                 onJumpToMessage = { index ->
                     previewMode = false
                     scope.launch {
-                        chatListState.requestScrollToItem(index)
+                        chatListState.scrollToItem(index)
                     }
                 },
                 onToolApproval = { toolCallId, approved, reason ->
@@ -748,7 +748,8 @@ private fun SubAgentFollowerBar(
     var peekingTerminalTabId by remember(conversation.id) { mutableStateOf<Long?>(null) }
 
     val terminalSessionManager: WorkspaceTerminalSessionManager = koinInject()
-    val workspaces by workspaceRepository.listFlow().collectAsStateWithLifecycle(initialValue = emptyList())
+    val workspacesFlow = remember(workspaceRepository) { workspaceRepository.listFlow() }
+    val workspaces by workspacesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val boundWorkspace = remember(workspaces, assistant.workspaceId) {
         workspaces.find { it.id == assistant.workspaceId?.toString() }
     }
@@ -854,13 +855,27 @@ private fun SubAgentFollowerBar(
                 val childModel = remember(settings, childConv.assistantId, childConv.config) {
                     settings.getChatModelOf(childConv)
                 }
+                val mcpServerNameToId = remember(settings.mcpServers) {
+                    settings.mcpServers.associate { it.commonOptions.name to it.id }
+                }
+                val pendingUserApprovalCount = remember(childConv.messageNodes, childAssistant, mcpServerNameToId) {
+                    childConv.currentMessages
+                        .flatMap { it.parts }
+                        .filterIsInstance<UIMessagePart.Tool>()
+                        .count { tool ->
+                            tool.isPending && (
+                                childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId) ||
+                                    !childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                                )
+                        }
+                }
                 val hasCustomSubAssistant = childConv.assistantId != conversation.assistantId
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = if (isRunning) {
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f)
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f)
+                    color = when {
+                        pendingUserApprovalCount > 0 -> MaterialTheme.colorScheme.errorContainer
+                        isRunning -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f)
+                        else -> MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f)
                     },
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
@@ -878,7 +893,13 @@ private fun SubAgentFollowerBar(
                                 modifier = Modifier
                                     .size(6.dp)
                                     .clip(CircleShape)
-                                    .background(MaterialTheme.extendColors.green6)
+                                    .background(
+                                        if (pendingUserApprovalCount > 0) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.extendColors.green6
+                                        }
+                                    )
                             )
                         }
                         val rawTitle = childConv.title.trim()
@@ -887,17 +908,27 @@ private fun SubAgentFollowerBar(
                                 "子代理-${childId.toString().take(4)}"
                             else -> rawTitle
                         }
-                        val badgeText = if (hasCustomSubAssistant) {
-                            val aName = childAssistant.name.ifBlank { "子代理" }
-                            "$baseTitle · $aName"
-                        } else if (childModel != null) {
-                            "$baseTitle (${childModel.displayName})"
-                        } else {
-                            baseTitle
+                        val badgeText = buildString {
+                            if (hasCustomSubAssistant) {
+                                val aName = childAssistant.name.ifBlank { "子代理" }
+                                append("$baseTitle · $aName")
+                            } else if (childModel != null) {
+                                append("$baseTitle (${childModel.displayName})")
+                            } else {
+                                append(baseTitle)
+                            }
+                            if (pendingUserApprovalCount > 0) {
+                                append(" · ⚠️待审批")
+                            }
                         }
                         Text(
                             text = badgeText,
                             style = MaterialTheme.typography.labelSmall,
+                            color = if (pendingUserApprovalCount > 0) {
+                                MaterialTheme.colorScheme.onErrorContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1185,6 +1216,21 @@ private fun SubAgentPeekSheet(
     val childModel = remember(settings, childConv.assistantId, childConv.config) {
         settings.getChatModelOf(childConv)
     }
+    val mcpServerNameToId = remember(settings.mcpServers) {
+        settings.mcpServers.associate { it.commonOptions.name to it.id }
+    }
+    // 仅筛选出允许【用户审批】的待审批工具（只开主代理审批的工具不对用户弹出审批卡片）
+    val userApprovablePendingTools = remember(childConv.messageNodes, childAssistant, mcpServerNameToId) {
+        childConv.currentMessages
+            .flatMap { it.parts }
+            .filterIsInstance<UIMessagePart.Tool>()
+            .filter { tool ->
+                tool.isPending && (
+                    childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId) ||
+                        !childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                    )
+            }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1305,6 +1351,79 @@ private fun SubAgentPeekSheet(
                                         text = body,
                                         style = MaterialTheme.typography.bodySmall,
                                     )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (userApprovablePendingTools.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "⚠️ 待你审批的工具调用 (${userApprovablePendingTools.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        userApprovablePendingTools.forEach { tool ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = tool.toolName,
+                                        style = MaterialTheme.typography.labelLarge,
+                                    )
+                                    Text(
+                                        text = tool.input.take(300),
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                        ),
+                                        maxLines = 4,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        TextButton(
+                                            onClick = {
+                                                vm.handleSubAgentToolApproval(
+                                                    targetConversationId = childId,
+                                                    toolCallId = tool.toolCallId,
+                                                    approved = false,
+                                                    reason = "Denied by user",
+                                                )
+                                            }
+                                        ) {
+                                            Text("拒绝", color = MaterialTheme.colorScheme.error)
+                                        }
+                                        FilledTonalButton(
+                                            onClick = {
+                                                vm.handleSubAgentToolApproval(
+                                                    targetConversationId = childId,
+                                                    toolCallId = tool.toolCallId,
+                                                    approved = true,
+                                                )
+                                            }
+                                        ) {
+                                            Text("批准执行")
+                                        }
+                                    }
                                 }
                             }
                         }

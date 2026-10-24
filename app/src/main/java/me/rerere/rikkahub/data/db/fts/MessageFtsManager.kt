@@ -33,6 +33,8 @@ class MessageFtsManager(private val database: AppDatabase) {
     suspend fun indexConversation(conversation: Conversation) = withContext(Dispatchers.IO) {
         val conversationId = conversation.id.toString()
         db.execSQL("DELETE FROM message_fts WHERE conversation_id = ?", arrayOf(conversationId))
+        // 子代理临时会话不纳入全局历史消息 FTS 索引，避免子代理高频工具调用时产生多余的 jieba 分词与磁盘 I/O
+        if (conversation.config?.parentConversationId != null) return@withContext
         conversation.messageNodes.forEach { node ->
             node.messages.forEach { message ->
                 val text = message.extractFtsText()
@@ -69,14 +71,8 @@ class MessageFtsManager(private val database: AppDatabase) {
     ): List<MessageSearchResult> = withContext(Dispatchers.IO) {
         val results = mutableListOf<MessageSearchResult>()
         if (assistantIds != null && assistantIds.isEmpty()) return@withContext results
-        val assistantFilter = if (assistantIds != null) {
-            """
-            AND EXISTS (
-                SELECT 1 FROM conversationentity AS conversation
-                WHERE conversation.id = message_fts.conversation_id
-                  AND conversation.assistant_id IN (${assistantIds.joinToString { "?" }})
-            )
-            """.trimIndent()
+        val assistantClause = if (assistantIds != null) {
+            "AND conversation.assistant_id IN (${assistantIds.joinToString { "?" }})"
         } else {
             ""
         }
@@ -86,7 +82,12 @@ class MessageFtsManager(private val database: AppDatabase) {
                    simple_snippet(message_fts, 0, '[', ']', '...', 30) AS snippet
             FROM message_fts
             WHERE text MATCH jieba_query(?)
-            $assistantFilter
+              AND EXISTS (
+                  SELECT 1 FROM conversationentity AS conversation
+                  WHERE conversation.id = message_fts.conversation_id
+                    AND (conversation.config IS NULL OR conversation.config NOT LIKE '%"parentConversationId":"%')
+                    $assistantClause
+              )
             ORDER BY ${sort.orderBy}
             LIMIT 50
             """.trimIndent(),

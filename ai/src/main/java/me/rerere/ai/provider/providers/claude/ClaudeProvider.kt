@@ -563,6 +563,26 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     addUserMessage(message)
                 }
             }
+    }.let { rawArray ->
+        // 合并相邻的同角色（尤其是连续 "user"，如 tool_result 后紧跟 Steer 注入的子代理通知或连续两条用户消息），
+        // 满足 Anthropic API 严格的 user/assistant 交替要求，同时保持 tool_result 块排在最前
+        val merged = mutableListOf<JsonObject>()
+        for (element in rawArray) {
+            val obj = element.jsonObject
+            val role = obj["role"]?.jsonPrimitive?.contentOrNull
+            val prev = merged.lastOrNull()
+            val prevRole = prev?.get("role")?.jsonPrimitive?.contentOrNull
+            if (role != null && role == prevRole) {
+                val prevContent = prev["content"]?.jsonArray.orEmpty()
+                val curContent = obj["content"]?.jsonArray.orEmpty()
+                merged[merged.lastIndex] = JsonObject(
+                    prev + ("content" to JsonArray(prevContent + curContent))
+                )
+            } else {
+                merged.add(obj)
+            }
+        }
+        JsonArray(merged)
     }.let { messagesArray ->
         if (!promptCaching) return@let messagesArray
         insertMessagesCacheControl(messagesArray, promptCacheTtl)
