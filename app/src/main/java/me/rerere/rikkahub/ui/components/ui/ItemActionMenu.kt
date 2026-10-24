@@ -1,6 +1,9 @@
 package me.rerere.rikkahub.ui.components.ui
 
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -8,15 +11,19 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.MoreVertical
 import me.rerere.rikkahub.R
@@ -40,14 +47,34 @@ data class ItemAction(
 fun ItemActionMenu(
     actions: List<ItemAction>,
     modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
-        IconButton(onClick = { expanded = true }) {
-            Icon(
-                imageVector = HugeIcons.MoreVertical,
-                contentDescription = stringResource(R.string.more_options),
-            )
+        if (onLongClick == null) {
+            IconButton(onClick = { expanded = true }) {
+                Icon(
+                    imageVector = HugeIcons.MoreVertical,
+                    contentDescription = stringResource(R.string.more_options),
+                )
+            }
+        } else {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .combinedClickable(
+                        onClick = { expanded = true },
+                        onLongClick = onLongClick,
+                    ),
+            ) {
+                Icon(
+                    imageVector = HugeIcons.MoreVertical,
+                    contentDescription = stringResource(R.string.more_options),
+                )
+            }
         }
         DropdownMenu(
             expanded = expanded,

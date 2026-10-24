@@ -56,8 +56,24 @@ fun ReorderableListItemScope.longPressReorder(
         )
 }
 
+/**
+ * 只有长按拖拽手势（不带缩放），配合 [draggingScale] 使用，
+ * 用于缩放和拖拽手势需要放在不同节点上的场景（例如 item 上叠加了不参与拖拽的按钮）。
+ */
 @Composable
-private fun Modifier.draggingScale(isDragging: Boolean): Modifier {
+fun ReorderableCollectionItemScope.longPressReorderHandle(
+    enabled: Boolean = true,
+): Modifier {
+    val haptic = LocalHapticFeedback.current
+    return Modifier.longPressDraggableHandle(
+        enabled = enabled,
+        onDragStarted = { haptic.dragStarted() },
+        onDragStopped = { haptic.dragStopped() },
+    )
+}
+
+@Composable
+fun Modifier.draggingScale(isDragging: Boolean): Modifier {
     val scale by animateFloatAsState(if (isDragging) DraggingScale else 1f, label = "reorder_scale")
     return graphicsLayer {
         scaleX = scale

@@ -14,6 +14,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
@@ -731,7 +732,8 @@ private fun MainAgentPermissionsSheet(
 }
 
 /**
- * 子代理编辑面板：专门管理该子代理可调用的工具（工作区工具、MCP 工具、本地工具、联网/记忆、Skills）以及免审批策略。
+ * 子代理编辑面板：上方管理该子代理可调用的工具（工作区工具、MCP、联网与记忆、技能），
+ * 下方针对每个已开启的工具独立配置「用户审批」与「主代理审批」。
  * 名称、标签描述与模型统一跟随助手自身的「基础设定」。
  */
 @Composable
@@ -753,46 +755,30 @@ private fun SubAgentToolsSheet(
         Triple("workspace_terminal", "交互式终端", HugeIcons.ComputerTerminal01),
     )
 
-    val localToolItems = listOf(
-        Triple(
-            LocalToolOption.JavascriptEngine,
-            stringResource(R.string.assistant_page_local_tools_javascript_engine_title),
-            HugeIcons.JavaScript,
-        ),
-        Triple(
-            LocalToolOption.TimeInfo,
-            stringResource(R.string.assistant_page_local_tools_time_info_title),
-            HugeIcons.Clock01,
-        ),
-        Triple(
-            LocalToolOption.Clipboard,
-            stringResource(R.string.assistant_page_local_tools_clipboard_title),
-            HugeIcons.ClipboardPaste,
-        ),
-        Triple(
-            LocalToolOption.Tts,
-            stringResource(R.string.assistant_page_local_tools_tts_title),
-            HugeIcons.VolumeHigh,
-        ),
-        Triple(
-            LocalToolOption.ScreenTime,
-            stringResource(R.string.assistant_page_local_tools_screen_time_title),
-            HugeIcons.SmartPhone01,
-        ),
-        Triple(
-            LocalToolOption.Calendar,
-            stringResource(R.string.assistant_page_local_tools_calendar_title),
-            HugeIcons.Calendar03,
-        ),
-        Triple(
-            LocalToolOption.ChartDisplay,
-            stringResource(R.string.assistant_page_local_tools_chart_display_title),
-            HugeIcons.ChartLineData01,
-        ),
-    )
-
     val enabledMcpServers = remember(mcpServers) { mcpServers.filter { it.commonOptions.enable } }
     var showMaxStepsDialog by remember { mutableStateOf(false) }
+
+    val activeApprovalItems = buildList {
+        workspaceToolItems.forEach { (toolName, label, icon) ->
+            if (toolName !in targetAssistant.disabledWorkspaceTools) {
+                add(Triple(toolName, label, icon))
+            }
+        }
+        enabledMcpServers.forEach { server ->
+            if (server.id in targetAssistant.mcpServers) {
+                add(Triple("mcp:${server.id}", "MCP: ${server.commonOptions.name}", HugeIcons.McpServer))
+            }
+        }
+        if (targetAssistant.enableWebSearch) {
+            add(Triple("web_search", "联网搜索", HugeIcons.GlobalSearch))
+        }
+        if (targetAssistant.enableMemory) {
+            add(Triple("memory", "长期记忆", HugeIcons.Brain02))
+        }
+        if (targetAssistant.enabledSkills.isNotEmpty() && skills.any { it.name in targetAssistant.enabledSkills }) {
+            add(Triple("skills", "技能调用", HugeIcons.Puzzle))
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -816,42 +802,16 @@ private fun SubAgentToolsSheet(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = "配置该子代理可使用的工具与技能（名称、标签与模型跟随该助手的基础设置）",
+                    text = "上方开启子代理可使用的工具，下方针对已开启的工具设置是否需要用户或主代理审批",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
-            // 1. 审批策略与工具步数限制
+            // 1. 工具步数限制
             CardGroup(
-                title = { Text("执行审批与步数限制") }
+                title = { Text("工具步数限制") }
             ) {
-                switchItem(
-                    checked = targetAssistant.subAgentAutoApproveTools,
-                    onCheckedChange = { autoApprove ->
-                        onUpdateAssistant(targetAssistant.copy(subAgentAutoApproveTools = autoApprove))
-                    },
-                    leadingContent = {
-                        CardGroupIcon(
-                            icon = HugeIcons.Tick01,
-                            containerColor = if (targetAssistant.subAgentAutoApproveTools) {
-                                MaterialTheme.colorScheme.primaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surfaceContainerHigh
-                            },
-                            contentColor = if (targetAssistant.subAgentAutoApproveTools) {
-                                MaterialTheme.colorScheme.onPrimaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    },
-                    headlineContent = { Text("调用工具自动免审批") },
-                    supportingContent = {
-                        Text("子代理在后台调用工具时直接执行，无需弹窗确认；关闭后遵循原工具审批设置")
-                    },
-                )
-
                 val currentMaxSteps = targetAssistant.subAgentMaxSteps.coerceAtLeast(0)
                 item(
                     onClick = { showMaxStepsDialog = true },
@@ -923,7 +883,13 @@ private fun SubAgentToolsSheet(
                             } else {
                                 targetAssistant.disabledWorkspaceTools + toolName
                             }
-                            onUpdateAssistant(targetAssistant.copy(disabledWorkspaceTools = nextDisabled))
+                            onUpdateAssistant(
+                                targetAssistant.copy(
+                                    disabledWorkspaceTools = nextDisabled,
+                                    subAgentUserApprovalTools = if (nextEnabled) targetAssistant.subAgentUserApprovalTools else targetAssistant.subAgentUserApprovalTools - toolName,
+                                    subAgentAgentApprovalTools = if (nextEnabled) targetAssistant.subAgentAgentApprovalTools else targetAssistant.subAgentAgentApprovalTools - toolName,
+                                )
+                            )
                         },
                         leadingContent = {
                             CardGroupIcon(
@@ -959,6 +925,7 @@ private fun SubAgentToolsSheet(
                     enabledMcpServers.forEach { server ->
                         val checked = server.id in targetAssistant.mcpServers
                         val toolCount = server.commonOptions.tools.count { it.enable }
+                        val ruleKey = "mcp:${server.id}"
                         switchItem(
                             checked = checked,
                             onCheckedChange = { nextChecked ->
@@ -967,7 +934,13 @@ private fun SubAgentToolsSheet(
                                 } else {
                                     targetAssistant.mcpServers - server.id
                                 }
-                                onUpdateAssistant(targetAssistant.copy(mcpServers = nextServers))
+                                onUpdateAssistant(
+                                    targetAssistant.copy(
+                                        mcpServers = nextServers,
+                                        subAgentUserApprovalTools = if (nextChecked) targetAssistant.subAgentUserApprovalTools else targetAssistant.subAgentUserApprovalTools - ruleKey,
+                                        subAgentAgentApprovalTools = if (nextChecked) targetAssistant.subAgentAgentApprovalTools else targetAssistant.subAgentAgentApprovalTools - ruleKey,
+                                    )
+                                )
                             },
                             leadingContent = {
                                 CardGroupIcon(
@@ -991,14 +964,20 @@ private fun SubAgentToolsSheet(
                 }
             }
 
-            // 4. 内置搜索、记忆与本地工具
+            // 4. 联网与记忆（已移除子代理无需使用的本地工具）
             CardGroup(
-                title = { Text("联网、记忆与本地工具") }
+                title = { Text("联网与记忆") }
             ) {
                 switchItem(
                     checked = targetAssistant.enableWebSearch,
                     onCheckedChange = { enabled ->
-                        onUpdateAssistant(targetAssistant.copy(enableWebSearch = enabled))
+                        onUpdateAssistant(
+                            targetAssistant.copy(
+                                enableWebSearch = enabled,
+                                subAgentUserApprovalTools = if (enabled) targetAssistant.subAgentUserApprovalTools else targetAssistant.subAgentUserApprovalTools - "web_search",
+                                subAgentAgentApprovalTools = if (enabled) targetAssistant.subAgentAgentApprovalTools else targetAssistant.subAgentAgentApprovalTools - "web_search",
+                            )
+                        )
                     },
                     leadingContent = {
                         CardGroupIcon(
@@ -1022,7 +1001,13 @@ private fun SubAgentToolsSheet(
                 switchItem(
                     checked = targetAssistant.enableMemory,
                     onCheckedChange = { enabled ->
-                        onUpdateAssistant(targetAssistant.copy(enableMemory = enabled))
+                        onUpdateAssistant(
+                            targetAssistant.copy(
+                                enableMemory = enabled,
+                                subAgentUserApprovalTools = if (enabled) targetAssistant.subAgentUserApprovalTools else targetAssistant.subAgentUserApprovalTools - "memory",
+                                subAgentAgentApprovalTools = if (enabled) targetAssistant.subAgentAgentApprovalTools else targetAssistant.subAgentAgentApprovalTools - "memory",
+                            )
+                        )
                     },
                     leadingContent = {
                         CardGroupIcon(
@@ -1042,37 +1027,6 @@ private fun SubAgentToolsSheet(
                     headlineContent = { Text("长期记忆") },
                     supportingContent = { Text("允许子代理读取和更新长期记忆") },
                 )
-
-                localToolItems.forEach { (option, title, icon) ->
-                    val checked = option in targetAssistant.localTools
-                    switchItem(
-                        checked = checked,
-                        onCheckedChange = { nextChecked ->
-                            val nextTools = if (nextChecked) {
-                                (targetAssistant.localTools + option).distinct()
-                            } else {
-                                targetAssistant.localTools - option
-                            }
-                            onUpdateAssistant(targetAssistant.copy(localTools = nextTools))
-                        },
-                        leadingContent = {
-                            CardGroupIcon(
-                                icon = icon,
-                                containerColor = if (checked) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerHigh
-                                },
-                                contentColor = if (checked) {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        },
-                        headlineContent = { Text(title) },
-                    )
-                }
             }
 
             // 5. 技能 (Skills)
@@ -1090,7 +1044,13 @@ private fun SubAgentToolsSheet(
                                 } else {
                                     targetAssistant.enabledSkills - skill.name
                                 }
-                                onUpdateAssistant(targetAssistant.copy(enabledSkills = nextSkills))
+                                onUpdateAssistant(
+                                    targetAssistant.copy(
+                                        enabledSkills = nextSkills,
+                                        subAgentUserApprovalTools = if (nextSkills.isNotEmpty()) targetAssistant.subAgentUserApprovalTools else targetAssistant.subAgentUserApprovalTools - "skills",
+                                        subAgentAgentApprovalTools = if (nextSkills.isNotEmpty()) targetAssistant.subAgentAgentApprovalTools else targetAssistant.subAgentAgentApprovalTools - "skills",
+                                    )
+                                )
                             },
                             leadingContent = {
                                 CardGroupIcon(
@@ -1117,6 +1077,94 @@ private fun SubAgentToolsSheet(
                                     )
                                 }
                             } else null,
+                        )
+                    }
+                }
+            }
+
+            // 6. 已开启工具的调用审批设置（分为【用户审批】与【主代理审批】）
+            CardGroup(
+                title = { Text("工具调用审批（默认免审批直接执行）") }
+            ) {
+                if (activeApprovalItems.isEmpty()) {
+                    item(
+                        headlineContent = { Text("当前未开启任何工具") },
+                        supportingContent = { Text("在上方开启工具后，可在此设置该工具是否需要用户或主代理审批") },
+                        leadingContent = { CardGroupIcon(HugeIcons.Tick01) },
+                    )
+                } else {
+                    activeApprovalItems.forEach { (ruleKey, label, icon) ->
+                        val userApprove = ruleKey in targetAssistant.subAgentUserApprovalTools
+                        val agentApprove = ruleKey in targetAssistant.subAgentAgentApprovalTools
+                        val modeHint = when {
+                            userApprove && agentApprove -> "用户或主代理均可审批"
+                            userApprove -> "仅用户审批"
+                            agentApprove -> "仅主代理审批（不弹用户窗）"
+                            else -> "免审批直接执行"
+                        }
+                        item(
+                            leadingContent = {
+                                CardGroupIcon(
+                                    icon = icon,
+                                    containerColor = if (userApprove || agentApprove) {
+                                        MaterialTheme.colorScheme.secondaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerHigh
+                                    },
+                                    contentColor = if (userApprove || agentApprove) {
+                                        MaterialTheme.colorScheme.onSecondaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            },
+                            headlineContent = { Text(label) },
+                            supportingContent = {
+                                Text(
+                                    text = modeHint,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (userApprove || agentApprove) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            },
+                            trailingContent = {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    FilterChip(
+                                        selected = userApprove,
+                                        onClick = {
+                                            val next = if (userApprove) {
+                                                targetAssistant.subAgentUserApprovalTools - ruleKey
+                                            } else {
+                                                targetAssistant.subAgentUserApprovalTools + ruleKey
+                                            }
+                                            onUpdateAssistant(targetAssistant.copy(subAgentUserApprovalTools = next))
+                                        },
+                                        label = {
+                                            Text("用户", style = MaterialTheme.typography.labelSmall)
+                                        },
+                                    )
+                                    FilterChip(
+                                        selected = agentApprove,
+                                        onClick = {
+                                            val next = if (agentApprove) {
+                                                targetAssistant.subAgentAgentApprovalTools - ruleKey
+                                            } else {
+                                                targetAssistant.subAgentAgentApprovalTools + ruleKey
+                                            }
+                                            onUpdateAssistant(targetAssistant.copy(subAgentAgentApprovalTools = next))
+                                        },
+                                        label = {
+                                            Text("主代理", style = MaterialTheme.typography.labelSmall)
+                                        },
+                                    )
+                                }
+                            },
                         )
                     }
                 }

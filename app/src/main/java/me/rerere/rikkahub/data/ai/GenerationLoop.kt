@@ -103,8 +103,31 @@ class GenerationLoop(
         val providerImpl = providerManager.getProviderByType(provider)
 
         var messages: List<UIMessage> = messages
-        val hasCustomStepLimit = maxSteps in 1..255
-        val maxToolRounds = if (hasCustomStepLimit) maxSteps else 256
+        val hasCustomStepLimit = maxSteps > 0
+        val priorCompletedToolRounds = if (hasCustomStepLimit && messages.lastOrNull()?.getTools()?.any { it.canResumeExecution } == true) {
+            // 若是从工具审批恢复执行，统计当前最后一条助手消息中已完成的工具轮数，避免恢复后步数从零重算突破总预算
+            val parts = messages.last().parts
+            var rounds = 0
+            var inToolGroup = false
+            for (part in parts) {
+                if (part is UIMessagePart.Tool && part.isExecuted && !part.canResumeExecution) {
+                    if (!inToolGroup) {
+                        rounds++
+                        inToolGroup = true
+                    }
+                } else if (part !is UIMessagePart.Tool) {
+                    inToolGroup = false
+                }
+            }
+            rounds
+        } else {
+            0
+        }
+        val maxToolRounds = if (hasCustomStepLimit) {
+            (maxSteps - priorCompletedToolRounds).coerceAtLeast(1)
+        } else {
+            256
+        }
         val loopLimit = if (hasCustomStepLimit) maxToolRounds + 1 else maxToolRounds
 
         for (stepIndex in 0 until loopLimit) {
@@ -290,6 +313,7 @@ class GenerationLoop(
                             is ToolApprovalState.Pending -> null
 
                             else -> {
+                                val useSecretAlias = settings.enableSecretKeyAlias
                                 runCatching {
                                     val toolDef = tools.find { toolDef -> toolDef.name == tool.toolName }
                                         ?: error("Tool ${tool.toolName} not found")
@@ -298,7 +322,6 @@ class GenerationLoop(
                                     }.getOrElse {
                                         error("Invalid tool arguments JSON for ${tool.toolName}: ${it.message}")
                                     }
-                                    val useSecretAlias = settings.enableSecretKeyAlias
                                     val args = rawArgs.replaceSecretKeyAliases(settings, useSecretAlias)
                                     Log.i(TAG, "generateText: executing tool ${toolDef.name}")
                                     val rawResult = toolDef.execute(args)
@@ -318,18 +341,17 @@ class GenerationLoop(
                                 }.getOrElse {
                                     if (it is CancellationException) throw it
                                     it.printStackTrace()
+                                    val rawErrText = buildString {
+                                        append("[${it.javaClass.name}] ${it.message}")
+                                        append("\n${it.stackTraceToString()}")
+                                    }
+                                    val safeErrText = settings.redactSecretKeyValues(rawErrText, useSecretAlias)
                                     tool.copy(
                                         output = listOf(
                                             UIMessagePart.Text(
                                                 json.encodeToString(
                                                     buildJsonObject {
-                                                        put(
-                                                            "error",
-                                                            JsonPrimitive(buildString {
-                                                                append("[${it.javaClass.name}] ${it.message}")
-                                                                append("\n${it.stackTraceToString()}")
-                                                            })
-                                                        )
+                                                        put("error", JsonPrimitive(safeErrText))
                                                     }
                                                 )
                                             )

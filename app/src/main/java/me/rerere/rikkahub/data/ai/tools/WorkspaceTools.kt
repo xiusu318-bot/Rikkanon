@@ -578,12 +578,25 @@ private fun String.parseRootfsEntries(): List<WorkspaceFileEntry> {
     }
 }
 
+private fun String.normalizeRootfsAbsolutePath(): String {
+    val parts = split('/')
+    val stack = ArrayDeque<String>()
+    for (part in parts) {
+        when (part) {
+            "", "." -> Unit
+            ".." -> if (stack.isNotEmpty()) stack.removeLast()
+            else -> stack.addLast(part)
+        }
+    }
+    return if (stack.isEmpty()) "/" else "/" + stack.joinToString("/")
+}
+
 private fun kotlinx.serialization.json.JsonObject.absolutePath(name: String): String {
     val path = string(name)?.replace('\\', '/')?.trim() ?: error("$name is required")
     require(path.isNotBlank()) { "$name is required" }
     require(path.startsWith("/")) { "$name must be an absolute path inside Rootfs" }
     require(!path.contains('\u0000')) { "$name contains invalid character" }
-    return path
+    return path.normalizeRootfsAbsolutePath()
 }
 
 // 免强制审批的可写安全区: 工作区文件目录、临时目录和技能目录
@@ -595,7 +608,7 @@ private fun kotlinx.serialization.json.JsonElement.pathOutsideWritableRoots(name
     }.getOrDefault(true)
 
 private fun String.isOutsideWritableRoots(): Boolean {
-    val normalized = trimEnd('/').ifBlank { "/" }
+    val normalized = normalizeRootfsAbsolutePath()
     return WRITABLE_ROOT_PREFIXES.none { prefix ->
         normalized == prefix || normalized.startsWith("$prefix/")
     }

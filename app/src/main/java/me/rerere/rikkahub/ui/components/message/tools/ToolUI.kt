@@ -108,6 +108,7 @@ object ToolUIRegistry {
         ConversationSendToolUI,
         ConversationReadToolUI,
         ConversationStopToolUI,
+        ConversationApproveToolUI,
         EditFileToolUI,
         ReadFileToolUI,
         WriteFileToolUI,

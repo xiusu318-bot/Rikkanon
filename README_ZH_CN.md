@@ -24,8 +24,10 @@
 
 前往 [**GitHub Releases 页面**](https://github.com/xiusu318-bot/Rikkanon/releases/latest) 直接下载已签名安装包（可与原版 RikkaHub 共存，互不覆盖）：
 
-- 📱 **ARM64 手机主力版（推荐）**：[`Rikkanon_Release_arm64-v8a.apk`](https://github.com/xiusu318-bot/Rikkanon/releases/download/v2.5.6-rikkanon/Rikkanon_Release_arm64-v8a.apk)
-- 📦 **全架构通用版（含模拟器/x86_64）**：[`Rikkanon_Release_universal.apk`](https://github.com/xiusu318-bot/Rikkanon/releases/download/v2.5.6-rikkanon/Rikkanon_Release_universal.apk)
+- 📱 **ARM64 手机主力版（推荐）**：[`Rikkanon_v1.1.0_Release_arm64-v8a.apk`](https://github.com/xiusu318-bot/Rikkanon/releases/download/v1.1.0/Rikkanon_v1.1.0_Release_arm64-v8a.apk)
+- 📦 **全架构通用版（含模拟器/x86_64）**：[`Rikkanon_v1.1.0_Release_universal.apk`](https://github.com/xiusu318-bot/Rikkanon/releases/download/v1.1.0/Rikkanon_v1.1.0_Release_universal.apk)
+
+> 注：自 `v1.1.0` 起脱离原跟随上游的 `v2.5.6-rikkanon` 改为独立版本号（因此数字比旧版小），可直接覆盖安装旧版。
 
 ---
 
@@ -36,7 +38,8 @@
 ### 1. 🖥️ 工作区持久化交互式 PTY 多终端 (`workspace_terminal`) & 沙箱增强
 - **真正持久化的交互式伪终端池**：在原有一次性命令执行器基础上，复用并扩展 Termux `TerminalSession` + `termux_pty.cpp`。终端按工作区（`workspace.root`）隔离，主对话、子代理、新开对话与人类终端 UI 共享同一终端池。
 - **多终端管理与自关闭**：支持 `new_session=true` + `title` 开启多个命名终端、按数字 `#id` 操控；支持在终端内直接输入 `exit` / `Ctrl+D` 退出顶层 Shell 后自动关闭标签页，或通过 `kill` / `kill_all` 关闭终端。
-- **PRoot 进程树精确感知 (`inspectTerminalProcessTree`)**：通过扫描 `/proc/<pid>/stat` 会话树精准识别顶层交互式 Shell 与前台活跃子进程（如 `python3`、`node`、`ssh`），在回到提示符时立即返回，无需等待固定超时。
+- **PRoot 进程树精确感知 (`inspectTerminalProcessTree`)**：通过 `prootPid -> shellPid` O(1) 快速路径缓存精准识别顶层交互式 Shell 与前台活跃子进程（如 `python3`、`node`、`ssh`），在回到提示符时立即返回，无需等待固定超时或全盘遍历 `/proc`。
+- **升级内置 PRoot 引擎 (`5.1.107.96`)**：根据上游主分支 `3.1.0` 同步升级 `libproot_exec.so` / `libproot_loader.so`，修复 Ubuntu 26.04 等新版 Rootfs 中 `rust-coreutils` 在 `--link2symlink` 模式下报 `Security violation` 的问题。
 - **聊天页顶栏终端实时窥屏小窗 (`WorkspaceTerminalsPeekSheet`)**：在聊天页（含空白新对话）顶栏下方实时展示工作区活跃终端胶囊，点击即可在不离开聊天页的情况下查看 40 行实时终端屏幕、发送命令或 `Ctrl+C`、新建或关闭终端。
 - **工作区工具「启用」与「审批」分离控制**：在工作区详情页可对 5 项工作区工具（`read_file`、`write_file`、`edit_file`、`shell`、`terminal`）分别独立控制是否启用以及调用前是否需要审批；同时严格保持 `<workspace>` 系统提示词 100% 静态以保护多轮 Prompt Cache。
 - **PRoot 沙箱 6 项“类 VPS”防崩补丁 (`RootfsPatcher.kt`)**：
@@ -52,7 +55,13 @@
   - 子代理本质上就是一条独立的普通 `Conversation` 对话，共享同一工作区与终端池。
   - 支持通过复选框绑定 **1 个或多个 Rikka 助手**作为子代理（每个子代理拥有独立的模型、系统提示词、思考强度、MCP 与 Skills），支持一键新建子代理助手。
   - **标签长文本描述注入**：助手的「标签 (`Tags`)」支持多行长文本输入与点击编辑，自动注入 `conversation_send` 工具定义中充当子代理职责说明（不注入易变模型名，换模型不破坏主代理缓存）。
-- **子代理独立工具管理面板 (`SubAgentToolsSheet`)**：点击子代理右侧 `⚙` 即可一站式配置该子代理的工具自动免审批开关、5 项工作区工具独立开关（如打造只读审查子代理）、MCP、本地工具与 Skills。
+- **子代理独立工具管理与双轨审批面板 (`SubAgentToolsSheet`)**：
+  - 点击子代理右侧 `⚙` 即可在上方配置该子代理的单轮工具调用次数限制 (`subAgentMaxSteps`)、5 项工作区工具独立开关（如打造只读审查子代理）、MCP、联网与记忆及 Skills（已精简移除子代理无需使用的本地工具）。
+  - 下方针对每个已开启的工具独立配置 **「用户审批」** 与 **「主代理审批」**（默认免审批直接执行；只开主代理审批时不弹用户审批窗，子代理暂停并通过强插/唤醒通知主代理调用 `conversation_approve` 审批；只开用户审批时等待人类点击期间不打扰主代理；双开时具备幂等防冲突保护）。
+- **子代理全中断态通知（强插 Steer + 闲时唤醒）**：除正常跑完（`completed`）外，当子代理触发待主代理审批（`waiting_approval`）、被用户手动停止（`interrupted_by_user`）或因 API/网络异常中断（`failed`）时，均自动生成折叠通知条通知主代理；Claude / Gemini 请求层自动合并相邻 `user` 消息块以严守交替规范。
+- **子代理并发池、单轮步数限制、局部编号路由 (`sub_1`) 与主对话分支 (Fork) 自动克隆隔离**：
+  - 支持配置同一主对话下的**子代理并发限制 (`subAgentMaxConcurrency`)**（超出自动平滑排队，排队时间不计入超时）与**单轮工具调用步数限制 (`subAgentMaxSteps` / `max_steps`)**；支持 `conversation_read` 批量等待 (`conversation_ids`) 与 HTTP 429/503 指数退避重试。
+  - 主代理统一使用局部代号（`sub_1`、`sub_2`）路由子代理，严格校验 `parentConversationId` 归属边界；对主对话执行分支（Fork）时自动深拷贝独立子代理副本并重新映射 `sub_1`，既 100% 保护历史上下文 Prompt Cache，又确保原对话与分支的子代理完全隔离。
 - **主代理对子代理的 5 级控制权限与独立审批 (`MainAgentPermissionsSheet`)**：
   - **0 级（基础必选）**：单次黑盒派发任务并同步等待最终 `reply` 回复；
   - **1 级（窥屏与查看工具轨迹）**：控制是否暴露子代理消息流与工具执行步骤；
@@ -76,6 +85,11 @@
 - **回归 2.5.6 经典交互与紧凑卡片**：恢复提供商 `+` 弹窗添加与经典详情页、恢复 MCP 底部弹窗配置（`McpServerConfigModal`）、去除聊天页 `+` 面板二级翻页、保留一体式紧凑圆角卡片（`CardGroup`）。
 - **记忆新增「后台自动整理记忆」独立开关（默认关闭）**：在「助手详情 -> 记忆 -> 设置」中默认关闭后台自动整理，方便按需控制后台自动整理时机，仅在对话中按需调用记忆工具或手动点击「立即整理」时运行。
 - **移除官方更新检测**：禁用后台向原项目更新服务器发起的检测请求。
+- **修复长对话上拉回跳底部缺陷**：通过编译期字节码补丁（`ComposeLazyScrollBackFixVisitorFactory`）彻底修复进入长对话后手指上拉突然闪回页面底部的 Compose `LazyList` 回跳 Bug。
+
+### 5. 🗂️ 渠道模型多选批量删除
+- **长按 `⋮` 进入多选**：在提供商详情「模型」页长按模型卡片右侧 `⋮` 即进入多选并勾选该模型（单击 `⋮` 仍为原删除菜单；卡片其余区域长按仍为拖拽排序，`⋮` 不参与拖拽）。
+- **批量删除**：多选时卡片右侧显示复选框，底部工具栏切换为「取消 / 已选 N 个 / 全选 / 删除」，确认后一次性删除所选模型；按返回键退出多选。
 
 ---
 

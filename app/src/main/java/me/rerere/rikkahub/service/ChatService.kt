@@ -14,7 +14,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.completeWith
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -56,6 +58,7 @@ import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.ai.tools.InvalidMcpServerNamesException
 import me.rerere.rikkahub.data.ai.tools.shouldUseExternalWebSearch
+import me.rerere.rikkahub.data.datastore.redactSecretKeyValues
 import me.rerere.rikkahub.data.ai.transformers.Base64ImageToLocalFileTransformer
 import me.rerere.rikkahub.data.ai.transformers.DocumentAsPromptTransformer
 import me.rerere.rikkahub.data.ai.transformers.OcrTransformer
@@ -179,23 +182,45 @@ enum class ToolEditAction {
 }
 
 data class SubConversationStepSummary(
+    val toolCallId: String = "",
     val toolName: String,
     val inputPreview: String,
     val isExecuted: Boolean,
+    val isPendingApproval: Boolean = false,
+)
+
+data class SubConversationPendingToolInfo(
+    val toolCallId: String,
+    val toolName: String,
+    val input: String,
+    val allowUserApproval: Boolean,
+    val allowAgentApproval: Boolean,
 )
 
 data class SubConversationSendResult(
     val conversationId: Uuid,
     val logicalId: String = conversationId.toString(),
     val title: String,
-    val status: String, // "completed" | "running"
+    val status: String, // "completed" | "running" | "waiting_approval" | "waiting_user_approval" | "failed" | "interrupted_by_user"
     val timedOut: Boolean,
     val reply: String?,
     val toolSteps: List<SubConversationStepSummary>,
+    val pendingApprovalTools: List<SubConversationPendingToolInfo> = emptyList(),
     val processingStatus: String?,
     val assistantId: Uuid? = null,
     val assistantName: String? = null,
     val modelName: String? = null,
+)
+
+data class SubConversationApproveResult(
+    val conversationId: Uuid,
+    val logicalId: String,
+    val status: String, // "approved_and_resumed" | "denied_and_resumed" | "already_handled" | "completed" | "waiting_approval" | "waiting_user_approval" | "failed" | "interrupted_by_user"
+    val handledToolCallIds: List<String>,
+    val subAgentStatus: String,
+    val message: String,
+    val reply: String? = null,
+    val pendingApprovalTools: List<SubConversationPendingToolInfo> = emptyList(),
 )
 
 data class SubConversationMessageSnapshot(
@@ -212,6 +237,7 @@ data class SubConversationReadResult(
     val processingStatus: String?,
     val totalMessages: Int,
     val messages: List<SubConversationMessageSnapshot>,
+    val pendingApprovalTools: List<SubConversationPendingToolInfo> = emptyList(),
     val assistantId: Uuid? = null,
     val assistantName: String? = null,
     val modelName: String? = null,
@@ -300,12 +326,15 @@ class ChatService(
     private val subAgentWaitQueues = ConcurrentHashMap<Uuid, ArrayDeque<CompletableDeferred<Unit>>>()
     private val subAgentSlotAcquiredDeferreds = ConcurrentHashMap<Uuid, CompletableDeferred<Unit>>()
 
-    // 后台子代理完成自动通知状态机
+    // 后台子代理完成与中断自动通知状态机
     private val subAgentNotificationLock = Any()
     private val pendingBackgroundSubAgents = ConcurrentHashMap<Uuid, MutableSet<Uuid>>()
     private val unconsumedCompletedSubAgents = ConcurrentHashMap<Uuid, LinkedHashMap<Uuid, CompletedSubAgentReport>>()
     private val activeWaitingSubAgentReaders = ConcurrentHashMap<Uuid, AtomicInteger>()
     private val parentSubAgentNotifyJobs = ConcurrentHashMap<Uuid, Job>()
+    private val subAgentWatchJobs = ConcurrentHashMap<Uuid, Job>()
+    private val subAgentTurnErrors = ConcurrentHashMap<Uuid, String>()
+    private val subAgentStoppedByUser = ConcurrentHashMap.newKeySet<Uuid>()
 
     private data class CompletedSubAgentReport(
         val childId: Uuid,
@@ -313,9 +342,10 @@ class ChatService(
         val title: String,
         val assistantName: String?,
         val modelName: String?,
-        val status: String,
+        val status: String, // "completed" | "waiting_approval" | "failed" | "interrupted_by_user"
         val reply: String,
         val toolSteps: List<SubConversationStepSummary>,
+        val pendingApprovalTools: List<SubConversationPendingToolInfo> = emptyList(),
         val allowInspect: Boolean,
     )
 
@@ -620,10 +650,17 @@ class ChatService(
                 }
 
                 queued.reply?.completeWith(runCatching {
+                    val realTurnError = subAgentTurnErrors[conversationId]
+                    if (realTurnError != null) {
+                        error(realTurnError)
+                    }
                     val messages = session.state.value.currentMessages
-                    check(!session.messageQueue.state.value.paused) { context.getString(R.string.chat_page_voice_generation_failed) }
-                    check(messages.none { message -> message.parts.any { it is UIMessagePart.Tool && it.isPending } }) {
-                        context.getString(R.string.chat_page_voice_tool_approval)
+                    val isSubConv = session.state.value.config?.parentConversationId != null
+                    if (!isSubConv) {
+                        check(!session.messageQueue.state.value.paused) { context.getString(R.string.chat_page_voice_generation_failed) }
+                        check(messages.none { message -> message.parts.any { it is UIMessagePart.Tool && it.isPending } }) {
+                            context.getString(R.string.chat_page_voice_tool_approval)
+                        }
                     }
                     val previousIds = currentConversation.currentMessages.map { it.id }.toSet()
                     messages.filter { it.id !in previousIds && it.role == MessageRole.ASSISTANT }
@@ -904,58 +941,112 @@ class ChatService(
         ) {
             try {
                 afterPreviousGeneration(previousJob) {
-                    val conversation = session.state.value
-                    // Ignore double taps and stale approvals for completed or inactive tools.
-                    if (conversation.currentMessages.none { message ->
+                    val hasPendingTools = session.approvalMutex.withLock {
+                        session.initialize {
+                            loadConversation(conversationId) ?: session.state.value
+                        }
+                        val conversation = session.state.value
+                        // Ignore double taps and stale approvals for completed or inactive tools.
+                        val hasTargetPending = conversation.currentMessages.any { message ->
                             message.getTools().any { it.toolCallId == toolCallId && it.isPending }
-                        }) return@afterPreviousGeneration
-                    val newApprovalState = when {
-                        answer != null -> ToolApprovalState.Answered(answer)
-                        approved -> ToolApprovalState.Approved
-                        else -> ToolApprovalState.Denied(reason)
-                    }
+                        }
+                        if (!hasTargetPending) {
+                            null
+                        } else {
+                            val newApprovalState = when {
+                                answer != null -> ToolApprovalState.Answered(answer)
+                                approved -> ToolApprovalState.Approved
+                                else -> ToolApprovalState.Denied(reason)
+                            }
 
-                    // Update the tool approval state
-                    val isAskKeyAnswered = answer != null && conversation.currentMessages.any { message ->
-                        message.getTools().any { it.toolCallId == toolCallId && it.toolName == "ask_key" }
-                    }
-                    val updatedNodes = conversation.messageNodes.map { node ->
-                        node.copy(
-                            messages = node.messages.map { msg ->
-                                msg.copy(
-                                    parts = msg.parts.map { part ->
-                                        when {
-                                            part is UIMessagePart.Tool && part.toolCallId == toolCallId -> {
-                                                part.copy(approvalState = newApprovalState)
+                            // Update the tool approval state
+                            val isAskKeyAnswered = answer != null && conversation.currentMessages.any { message ->
+                                message.getTools().any { it.toolCallId == toolCallId && it.toolName == "ask_key" }
+                            }
+                            val updatedNodes = conversation.messageNodes.map { node ->
+                                node.copy(
+                                    messages = node.messages.map { msg ->
+                                        msg.copy(
+                                            parts = msg.parts.map { part ->
+                                                when {
+                                                    part is UIMessagePart.Tool && part.toolCallId == toolCallId -> {
+                                                        part.copy(approvalState = newApprovalState)
+                                                    }
+
+                                                    else -> part
+                                                }
                                             }
-
-                                            else -> part
-                                        }
+                                        )
                                     }
                                 )
                             }
-                        )
-                    }
-                    val updatedConversation = conversation.copy(
-                        messageNodes = updatedNodes,
-                        config = if (isAskKeyAnswered) {
-                            conversation.config?.copy(enableSecretKeyAlias = true)
-                        } else {
-                            conversation.config
-                        },
-                    )
-                    saveConversation(conversationId, updatedConversation)
+                            val updatedConversation = conversation.copy(
+                                messageNodes = updatedNodes,
+                                config = if (isAskKeyAnswered) {
+                                    conversation.config?.copy(enableSecretKeyAlias = true)
+                                } else {
+                                    conversation.config
+                                },
+                            )
+                            saveConversation(conversationId, updatedConversation)
 
-                    // Check if there are still pending tools
-                    val hasPendingTools = updatedNodes.any { node ->
-                        node.currentMessage.parts.any { part ->
-                            part is UIMessagePart.Tool && part.isPending
+                            // Check if there are still pending tools
+                            val stillPending = updatedNodes.any { node ->
+                                node.currentMessage.parts.any { part ->
+                                    part is UIMessagePart.Tool && part.isPending
+                                }
+                            }
+
+                            val parentId = updatedConversation.config?.parentConversationId
+                            if (parentId != null) {
+                                synchronized(subAgentNotificationLock) {
+                                    // 清除可能尚未消费的旧 waiting_approval 通知
+                                    val existingReport = unconsumedCompletedSubAgents[parentId]?.get(conversationId)
+                                    if (existingReport?.status == "waiting_approval") {
+                                        unconsumedCompletedSubAgents[parentId]?.remove(conversationId)
+                                    }
+                                    if (!stillPending) {
+                                        pendingBackgroundSubAgents.getOrPut(parentId) { linkedSetOf() }.add(conversationId)
+                                    }
+                                }
+                            }
+                            stillPending
                         }
-                    }
+                    } ?: return@afterPreviousGeneration
+
+                    val parentId = session.state.value.config?.parentConversationId
 
                     // Only continue generation when all pending tools are handled
                     if (!hasPendingTools) {
-                        handleMessageComplete(conversationId)
+                        val completionDeferred = CompletableDeferred<String?>()
+                        if (parentId != null) {
+                            val settings = settingsStore.awaitLoaded()
+                            val parentConv = getOrLoadConversation(parentId)
+                            val parentAssistant = parentConv?.let { settings.getAssistantOf(it) }
+                            val logicalId = parentConv?.resolveLogicalSubAgentId(conversationId) ?: conversationId.toString()
+                            registerBackgroundSubAgentWatch(
+                                parentConversationId = parentId,
+                                targetId = conversationId,
+                                logicalId = logicalId,
+                                replyDeferred = completionDeferred,
+                                allowInspect = parentAssistant?.subAgentAllowInspect ?: true,
+                            )
+                        }
+                        try {
+                            handleMessageComplete(conversationId)
+                            val realTurnError = subAgentTurnErrors[conversationId]
+                            if (realTurnError != null) {
+                                completionDeferred.completeExceptionally(IllegalStateException(realTurnError))
+                            } else {
+                                val latestText = session.state.value.currentMessages
+                                    .lastOrNull { it.role == MessageRole.ASSISTANT }
+                                    ?.toText()
+                                completionDeferred.complete(latestText)
+                            }
+                        } catch (t: Throwable) {
+                            completionDeferred.completeExceptionally(t)
+                            throw t
+                        }
                     }
 
                     _generationDoneFlow.emit(conversationId)
@@ -990,6 +1081,9 @@ class ChatService(
         }
         val useExternalWebSearch = shouldUseExternalWebSearch(assistant, model)
 
+        subAgentTurnErrors.remove(conversationId)
+        subAgentStoppedByUser.remove(conversationId)
+
         runCatching {
 
             // reset suggestions
@@ -1012,7 +1106,8 @@ class ChatService(
 
             val isSubConversation = conversation.config?.autoApproveTools == true ||
                 conversation.config?.parentConversationId != null
-            val autoApproveTools = if (isSubConversation) assistant.subAgentAutoApproveTools else false
+            // 子代理的工具审批已在 ChatToolFactory.createTools 中按「用户审批 / 主代理审批」逐工具设置 needsApproval
+            val autoApproveTools = false
 
             val tools = try {
                 chatToolFactory.createTools(
@@ -1044,13 +1139,14 @@ class ChatService(
             val configuredMaxSteps = if (isSubConversation) {
                 val overrideSteps = conversation.config?.subAgentMaxStepsOverride
                 when {
-                    overrideSteps != null -> if (overrideSteps <= 0) 256 else overrideSteps
+                    overrideSteps != null -> if (overrideSteps <= 0) 0 else overrideSteps
                     assistant.subAgentMaxSteps > 0 -> assistant.subAgentMaxSteps
-                    else -> 256
+                    else -> 0
                 }
             } else {
-                256
+                0
             }
+            val steeredReplyDeferreds = mutableListOf<CompletableDeferred<String?>>()
 
             val runGeneration: suspend () -> Unit = {
                 generationLoop.generateText(
@@ -1091,20 +1187,38 @@ class ChatService(
                             val next = synchronized(session) {
                                 session.messageQueue.takeNext()
                             } ?: break
+                            val processed = preprocessUserInputParts(next.parts, assistant)
+                            steered += UIMessage(
+                                role = MessageRole.USER,
+                                parts = processed,
+                            )
                             if (next.answer) {
-                                val processed = preprocessUserInputParts(next.parts, assistant)
-                                steered += UIMessage(
-                                    role = MessageRole.USER,
-                                    parts = processed,
-                                )
+                                next.reply?.let { steeredReplyDeferreds.add(it) }
+                            } else {
+                                next.reply?.complete("")
                             }
                         }
                         steered
                     },
-                ).onCompletion {
+                ).onCompletion { cause ->
                     // 可能被取消了，或者意外结束，兜底更新
                     val updatedConversation = session.finishGeneration { conversation ->
                         saveConversation(conversationId, conversation)
+                    }
+                    if (steeredReplyDeferreds.isNotEmpty()) {
+                        val latestReply = updatedConversation.currentMessages
+                            .lastOrNull { it.role == MessageRole.ASSISTANT }
+                            ?.toText()
+                            .orEmpty()
+                        val turnErr = subAgentTurnErrors[conversationId]
+                        steeredReplyDeferreds.forEach { deferred ->
+                            when {
+                                cause != null -> deferred.completeExceptionally(cause)
+                                turnErr != null -> deferred.completeExceptionally(IllegalStateException(turnErr))
+                                else -> deferred.complete(latestReply)
+                            }
+                        }
+                        steeredReplyDeferreds.clear()
                     }
 
                     // 生成结束：取消 Live Update 通知，后台时发送完成通知
@@ -1162,7 +1276,11 @@ class ChatService(
         }.onFailure {
             // 兜底取消 Live Update 通知（生成开始前失败时 onCompletion 不会执行）
             appEventBus.tryEmit(AppEvent.ChatGenerationEnded(conversationId, senderName, null))
+            val curSettings = settingsStore.settingsFlow.value
+            val rawErrorMsg = it.message ?: it.javaClass.simpleName
+            val safeErrorMsg = curSettings.redactSecretKeyValues(rawErrorMsg, curSettings.enableSecretKeyAlias)
             if (it is CancellationException) throw it
+            subAgentTurnErrors[conversationId] = safeErrorMsg
             sessionManager.get(conversationId)?.messageQueue?.pause()
 
             // 若是后台子代理请求失败且尚未产生有效助手回复，把错误详情记入子对话，绝不留空白空壳
@@ -1174,7 +1292,7 @@ class ChatService(
                     val errMsg = UIMessage(
                         role = MessageRole.ASSISTANT,
                         parts = listOf(
-                            UIMessagePart.Text("⚠️ 子代理执行失败: ${it.message ?: it.javaClass.simpleName}")
+                            UIMessagePart.Text("⚠️ 子代理执行失败: $safeErrorMsg")
                         ),
                         modelId = model.id,
                     )
@@ -2021,10 +2139,17 @@ class ChatService(
     }
 
     // 停止当前会话生成任务（不清理会话缓存）
-    suspend fun stopGeneration(conversationId: Uuid) {
+    // suppressedByParentAgent = true 表示由主代理主动调用 conversation_stop / delete / interrupt 停止，无需再发中断通知给主代理；
+    // suppressedByParentAgent = false 表示由人类用户在 UI 手动点击停止，若为后台子代理需通知主代理“已被用户中断”。
+    suspend fun stopGeneration(conversationId: Uuid, suppressedByParentAgent: Boolean = false) {
         synchronized(subAgentNotificationLock) {
             parentSubAgentNotifyJobs.remove(conversationId)?.cancel()
-            pendingBackgroundSubAgents.values.forEach { it.remove(conversationId) }
+            if (suppressedByParentAgent) {
+                pendingBackgroundSubAgents.values.forEach { it.remove(conversationId) }
+                subAgentWatchJobs.remove(conversationId)?.cancel()
+            } else {
+                subAgentStoppedByUser.add(conversationId)
+            }
         }
         val session = sessionManager.get(conversationId) ?: return
         val jobs = synchronized(session) {
@@ -2038,17 +2163,50 @@ class ChatService(
 
     // ---- 子对话（Sub-Agent）操控与实时状态 ----
 
+    fun extractPendingApprovalTools(
+        conversation: Conversation,
+        settings: me.rerere.rikkahub.data.datastore.Settings = settingsStore.settingsFlow.value,
+    ): List<SubConversationPendingToolInfo> {
+        val childAssistant = settings.getAssistantOf(conversation)
+        val mcpServerNameToId = settings.mcpServers.associate { it.commonOptions.name to it.id }
+        return conversation.currentMessages
+            .flatMap { it.parts }
+            .filterIsInstance<UIMessagePart.Tool>()
+            .filter { it.isPending }
+            .map { tool ->
+                val allowUser = childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId)
+                val allowAgent = childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                SubConversationPendingToolInfo(
+                    toolCallId = tool.toolCallId,
+                    toolName = tool.toolName,
+                    input = tool.input,
+                    allowUserApproval = allowUser || !allowAgent,
+                    allowAgentApproval = allowAgent,
+                )
+            }
+    }
+
     fun getConversationRuntimeStatus(conversationId: Uuid): Pair<String, String?> {
         val session = sessionManager.get(conversationId) ?: return "idle" to null
         val isGen = session.isGenerating ||
             session.submittingMessage != null ||
             session.messageQueue.state.value.messages.isNotEmpty()
-        val hasPendingApproval = session.state.value.currentMessages.any { msg ->
-            msg.parts.any { it is UIMessagePart.Tool && it.isPending }
-        }
+        val conv = session.state.value
+        val pendingTools = extractPendingApprovalTools(conv)
+        val lastMsg = conv.currentMessages.lastOrNull()
+        val hasFailedError = subAgentTurnErrors.containsKey(conversationId) ||
+            (lastMsg?.role == MessageRole.ASSISTANT && lastMsg.toText().startsWith("⚠️ 子代理执行失败:"))
+        val wasInterruptedByUser = subAgentStoppedByUser.contains(conversationId) ||
+            (lastMsg?.role == MessageRole.ASSISTANT && lastMsg.getTools().any { tool ->
+                tool.output.any { part -> part is UIMessagePart.Text && part.text.contains("\"status\":\"cancelled\"") }
+            })
         val status = when {
             isGen -> "running"
-            hasPendingApproval -> "waiting_approval"
+            pendingTools.isNotEmpty() -> {
+                if (pendingTools.any { it.allowAgentApproval }) "waiting_approval" else "waiting_user_approval"
+            }
+            hasFailedError -> "failed"
+            wasInterruptedByUser -> "interrupted_by_user"
             session.messageQueue.state.value.paused -> "paused"
             else -> "idle"
         }
@@ -2098,7 +2256,13 @@ class ChatService(
             }
         }
 
-        // 解析子代理绑定的目标助手（按传入的 assistant_id 匹配绑定的子代理助手）
+        // 解析子代理绑定的目标助手（按传入的 assistant_id 匹配已勾选绑定的子代理助手）
+        if (targetConversationId == null && targetAssistantId != null) {
+            val allowedIds = parentStoredAssistant.effectiveSubAgentIds
+            require(allowedIds.isEmpty() || targetAssistantId in allowedIds || targetAssistantId == parentStoredAssistant.id) {
+                "Permission denied: assistant $targetAssistantId is not bound as an authorized sub-agent of the current assistant"
+            }
+        }
         val resolvedSubAssistant = (targetAssistantId?.let { settings.getAssistantById(it) })
             ?: (parentStoredAssistant.effectiveSubAgentIds.firstOrNull { id -> settings.assistants.any { it.id == id } }
                 ?.let { settings.getAssistantById(it) })
@@ -2142,7 +2306,7 @@ class ChatService(
                         enableAskKeyTool = false,
                         childConversationIds = emptySet(),
                         parentConversationId = parentConversationId,
-                        autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
+                        autoApproveTools = false,
                         subAgentMaxStepsOverride = maxStepsOverride,
                     )
                     val fallbackTitle = message.lineSequence().firstOrNull()?.trim()?.take(16)?.ifBlank { null }
@@ -2170,7 +2334,7 @@ class ChatService(
                 }
             }
 
-            // 确保子对话配置了最新工具/免审批/步数限制状态，并立即落库防止成为未持久化空壳
+            // 确保子对话配置了最新工具/步数限制状态，并立即落库防止成为未持久化空壳
             val existingChild = targetSession.state.value
             val updatedChildTitle = title?.trim()?.takeIf { it.isNotEmpty() }
                 ?: existingChild.title.takeIf { it.isNotBlank() && !it.startsWith("Sub-", ignoreCase = true) }
@@ -2183,7 +2347,7 @@ class ChatService(
                 mcpServers = resolvedSubAssistant.mcpServers,
                 enabledSkills = subEnabledSkills,
                 enableWebSearch = resolvedSubAssistant.enableWebSearch,
-                autoApproveTools = resolvedSubAssistant.subAgentAutoApproveTools,
+                autoApproveTools = false,
                 subAgentMaxStepsOverride = maxStepsOverride,
             )
             val updatedChild = existingChild.copy(
@@ -2205,9 +2369,11 @@ class ChatService(
 
             // 开启新一轮消息前，清除该子代理上一轮可能残留的未消费后台通知
             markSubAgentResultConsumed(parentConversationId, targetId)
+            subAgentTurnErrors.remove(targetId)
+            subAgentStoppedByUser.remove(targetId)
 
             if (interrupt && targetSession.isGenerating) {
-                stopGeneration(targetId)
+                stopGeneration(targetId, suppressedByParentAgent = true)
             }
 
             val slotAcquiredDeferred = CompletableDeferred<Unit>()
@@ -2258,6 +2424,7 @@ class ChatService(
                     timedOut = false,
                     reply = null,
                     toolSteps = extractRecentToolSteps(targetSession.state.value),
+                    pendingApprovalTools = extractPendingApprovalTools(targetSession.state.value, settings),
                     processingStatus = procStatus,
                     assistantId = childAssistant.id,
                     assistantName = childAssistantName,
@@ -2271,16 +2438,45 @@ class ChatService(
             }
 
             val boundedTimeout = timeoutMs.coerceIn(1_000L, 600_000L)
+            var wasCancelled = false
+            var turnError: String? = null
             val completedReply = withTimeoutOrNull(boundedTimeout) {
-                runCatching { replyDeferred.await() }.getOrElse { err ->
-                    "Error: ${err.message}"
+                try {
+                    val firstPass = replyDeferred.await()
+                    // 若停在「仅用户审批 (waiting_user_approval)」，继续在剩余超时时间内等待用户点击批准并执行完毕
+                    while (true) {
+                        val curPending = extractPendingApprovalTools(targetSession.state.value, settings)
+                        val onlyUserApproval = curPending.isNotEmpty() && curPending.none { it.allowAgentApproval }
+                        val isStillGen = targetSession.isGenerating || targetSession.submittingMessage != null
+                        if (!onlyUserApproval && !isStillGen) break
+                        delay(120)
+                    }
+                    targetSession.state.value.currentMessages
+                        .lastOrNull { it.role == MessageRole.ASSISTANT }
+                        ?.toText() ?: firstPass
+                } catch (e: CancellationException) {
+                    if (subAgentStoppedByUser.contains(targetId)) {
+                        wasCancelled = true
+                        null
+                    } else {
+                        throw e
+                    }
+                } catch (err: Throwable) {
+                    turnError = err.message ?: err.javaClass.simpleName
+                    null
                 }
             }
 
             val latestChild = targetSession.state.value
-            val (status, procStatus) = getConversationRuntimeStatus(targetId)
-            val timedOut = completedReply == null && (targetSession.isGenerating || status == "running")
-            if (timedOut) {
+            val (runtimeStatus, procStatus) = getConversationRuntimeStatus(targetId)
+            val pendingApprovals = extractPendingApprovalTools(latestChild, settings)
+            val realError = subAgentTurnErrors[targetId] ?: turnError
+            val isRunningOrUserApprovalTimeout = completedReply == null &&
+                realError == null &&
+                !wasCancelled &&
+                (targetSession.isGenerating || runtimeStatus == "running" || runtimeStatus == "waiting_user_approval")
+
+            if (isRunningOrUserApprovalTimeout) {
                 registerBackgroundSubAgentWatch(
                     parentConversationId = parentConversationId,
                     targetId = targetId,
@@ -2289,18 +2485,41 @@ class ChatService(
                     allowInspect = parentEffectiveAssistant.subAgentAllowInspect,
                 )
             }
-            val finalReply = completedReply ?: latestChild.currentMessages
+
+            val finalStatus = when {
+                isRunningOrUserApprovalTimeout -> runtimeStatus
+                pendingApprovals.any { it.allowAgentApproval } -> "waiting_approval"
+                pendingApprovals.isNotEmpty() -> "waiting_user_approval"
+                realError != null || runtimeStatus == "failed" -> "failed"
+                wasCancelled || runtimeStatus == "interrupted_by_user" -> "interrupted_by_user"
+                else -> "completed"
+            }
+
+            val latestAssistantText = latestChild.currentMessages
                 .lastOrNull { it.role == MessageRole.ASSISTANT }
                 ?.toText()
+
+            val finalReply = when (finalStatus) {
+                "failed" -> latestAssistantText?.takeIf { it.isNotBlank() } ?: "⚠️ 子代理执行失败: ${realError ?: "未知错误"}"
+                "interrupted_by_user" -> buildString {
+                    appendLine("⚠️ 子代理已被用户手动中断停止。")
+                    if (!latestAssistantText.isNullOrBlank()) {
+                        appendLine("中断前已生成内容：")
+                        append(latestAssistantText)
+                    }
+                }.trim()
+                else -> completedReply?.takeIf { it.isNotBlank() } ?: latestAssistantText
+            }
 
             return SubConversationSendResult(
                 conversationId = targetId,
                 logicalId = logicalId,
                 title = latestChild.title,
-                status = if (timedOut) "running" else "completed",
-                timedOut = timedOut,
+                status = finalStatus,
+                timedOut = isRunningOrUserApprovalTimeout,
                 reply = finalReply,
                 toolSteps = extractRecentToolSteps(latestChild),
+                pendingApprovalTools = pendingApprovals,
                 processingStatus = procStatus,
                 assistantId = childAssistant.id,
                 assistantName = childAssistantName,
@@ -2310,6 +2529,219 @@ class ChatService(
             targetSession.release()
             throw t
         }
+    }
+
+    /**
+     * 供主代理通过 `conversation_approve` 工具批准或拒绝子代理中开启了「主代理审批」的待执行工具。
+     * 具备幂等保护：若人类用户已在 UI 上抢先批准或处理了该工具，直接返回 `already_handled` 状态而不报错。
+     */
+    suspend fun approveSubConversationTool(
+        parentConversationId: Uuid,
+        targetConversationId: Uuid,
+        toolCallId: String? = null,
+        approved: Boolean,
+        reason: String = "",
+        wait: Boolean = false,
+        timeoutMs: Long = 60_000L,
+    ): SubConversationApproveResult {
+        val settings = settingsStore.awaitLoaded()
+        val parentConv = getOrLoadConversation(parentConversationId)?.bindConfig(settings)
+            ?: error("Parent conversation not found: $parentConversationId")
+        val parentAssistant = settings.getAssistantOf(parentConv)
+        val targetConv = getOrLoadConversation(targetConversationId)
+            ?: error("Sub-agent conversation not found: $targetConversationId")
+
+        val isOwnedSubAgent = targetConv.config?.parentConversationId == parentConversationId ||
+            (targetConversationId in parentConv.config?.childConversationIds.orEmpty() && targetConv.config?.parentConversationId != null)
+        require(isOwnedSubAgent) {
+            "Permission denied: conversation $targetConversationId is not a sub-agent of the current conversation"
+        }
+
+        val logicalId = parentConv.resolveLogicalSubAgentId(targetConversationId) ?: targetConversationId.toString()
+        val mcpServerNameToId = settings.mcpServers.associate { it.commonOptions.name to it.id }
+
+        val session = sessionManager.getOrCreate(targetConversationId)
+        session.acquire()
+
+        val (earlyResult, handledIds) = try {
+            session.approvalMutex.withLock {
+                session.initialize {
+                    loadConversation(targetConversationId) ?: targetConv
+                }
+                val currentConv = session.state.value
+                    .takeIf { it.messageNodes.isNotEmpty() || it.config != null }
+                    ?: targetConv
+                val childAssistant = settings.getAssistantOf(currentConv)
+
+                val allToolsInChild = currentConv.currentMessages
+                    .flatMap { it.parts }
+                    .filterIsInstance<UIMessagePart.Tool>()
+
+                val targetTools = if (!toolCallId.isNullOrBlank()) {
+                    allToolsInChild.filter { it.toolCallId == toolCallId }
+                } else {
+                    allToolsInChild.filter { it.isPending }
+                }
+
+                val pendingTools = targetTools.filter { it.isPending }
+                if (pendingTools.isEmpty()) {
+                    val (curStatus, _) = getConversationRuntimeStatus(targetConversationId)
+                    val latestReply = currentConv.currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }?.toText()
+                    SubConversationApproveResult(
+                        conversationId = targetConversationId,
+                        logicalId = logicalId,
+                        status = "already_handled",
+                        handledToolCallIds = targetTools.map { it.toolCallId },
+                        subAgentStatus = curStatus,
+                        message = "The specified tool call(s) were already approved/handled (e.g. by the user), no duplicate approval needed.",
+                        reply = latestReply,
+                        pendingApprovalTools = extractPendingApprovalTools(currentConv, settings),
+                    ) to emptySet<String>()
+                } else {
+                    // 校验待审批工具是否开启了「主代理审批」权限
+                    val unauthorizedTools = pendingTools.filterNot { tool ->
+                        childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                    }
+                    if (unauthorizedTools.isNotEmpty()) {
+                        val names = unauthorizedTools.joinToString(", ") { it.toolName }
+                        error("Permission denied: Tool(s) [$names] on sub-agent '$logicalId' are configured for human user approval only.")
+                    }
+
+                    val ids = pendingTools.map { it.toolCallId }.toSet()
+                    val newApprovalState = if (approved) ToolApprovalState.Approved else ToolApprovalState.Denied(reason)
+
+                    val updatedNodes = currentConv.messageNodes.map { node ->
+                        node.copy(
+                            messages = node.messages.map { msg ->
+                                msg.copy(
+                                    parts = msg.parts.map { part ->
+                                        if (part is UIMessagePart.Tool && part.toolCallId in ids && part.isPending) {
+                                            part.copy(approvalState = newApprovalState)
+                                        } else {
+                                            part
+                                        }
+                                    }
+                                )
+                            }
+                        )
+                    }
+                    val updatedConversation = currentConv.copy(messageNodes = updatedNodes)
+                    saveConversation(targetConversationId, updatedConversation)
+
+                    // 清除此前的 waiting_approval 待消费通知
+                    markSubAgentResultConsumed(parentConversationId, targetConversationId)
+
+                    val stillHasPending = updatedNodes.any { node ->
+                        node.currentMessage.parts.any { it is UIMessagePart.Tool && it.isPending }
+                    }
+
+                    if (stillHasPending) {
+                        val (curStatus, _) = getConversationRuntimeStatus(targetConversationId)
+                        SubConversationApproveResult(
+                            conversationId = targetConversationId,
+                            logicalId = logicalId,
+                            status = if (approved) "approved_partial" else "denied_partial",
+                            handledToolCallIds = ids.toList(),
+                            subAgentStatus = curStatus,
+                            message = "Tool call(s) updated, but other pending tool approvals remain before execution can resume.",
+                            pendingApprovalTools = extractPendingApprovalTools(updatedConversation, settings),
+                        ) to ids
+                    } else {
+                        null to ids
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            session.release()
+            throw t
+        }
+
+        if (earlyResult != null) {
+            session.release()
+            return earlyResult
+        }
+
+        val completionDeferred = CompletableDeferred<String?>()
+        completionDeferred.invokeOnCompletion {
+            session.release()
+            Unit
+        }
+        val previousJob = session.getJob()
+        val job = launchGenerationJob(
+            conversationId = targetConversationId,
+            keepAliveInBackground = true,
+        ) {
+            try {
+                afterPreviousGeneration(previousJob) {
+                    handleMessageComplete(targetConversationId)
+                    val realTurnError = subAgentTurnErrors[targetConversationId]
+                    if (realTurnError != null) {
+                        completionDeferred.completeExceptionally(IllegalStateException(realTurnError))
+                    } else {
+                        val text = session.state.value.currentMessages
+                            .lastOrNull { it.role == MessageRole.ASSISTANT }
+                            ?.toText()
+                        completionDeferred.complete(text)
+                    }
+                    _generationDoneFlow.emit(targetConversationId)
+                }
+            } catch (e: Exception) {
+                completionDeferred.completeExceptionally(e)
+                if (e is CancellationException) throw e
+                session.messageQueue.pause()
+                addError(e, targetConversationId, title = context.getString(R.string.error_title_tool_approval))
+            }
+        }
+        session.setJob(job, cancelPrevious = false)
+
+        if (!wait) {
+            registerBackgroundSubAgentWatch(
+                parentConversationId = parentConversationId,
+                targetId = targetConversationId,
+                logicalId = logicalId,
+                replyDeferred = completionDeferred,
+                allowInspect = parentAssistant.subAgentAllowInspect,
+            )
+            return SubConversationApproveResult(
+                conversationId = targetConversationId,
+                logicalId = logicalId,
+                status = if (approved) "approved_and_resumed" else "denied_and_resumed",
+                handledToolCallIds = handledIds.toList(),
+                subAgentStatus = "running",
+                message = "Sub-agent '$logicalId' resumed execution in the background. You will be notified when it completes or pauses again.",
+            )
+        }
+
+        val boundedTimeout = timeoutMs.coerceIn(1_000L, 600_000L)
+        val completedText = withTimeoutOrNull(boundedTimeout) {
+            runCatching { completionDeferred.await() }.getOrNull()
+        }
+        val latestAfterWait = session.state.value
+        val (afterStatus, _) = getConversationRuntimeStatus(targetConversationId)
+        val timedOut = completedText == null && (session.isGenerating || afterStatus == "running")
+        if (timedOut) {
+            registerBackgroundSubAgentWatch(
+                parentConversationId = parentConversationId,
+                targetId = targetConversationId,
+                logicalId = logicalId,
+                replyDeferred = completionDeferred,
+                allowInspect = parentAssistant.subAgentAllowInspect,
+            )
+        }
+        val finalReply = completedText ?: latestAfterWait.currentMessages
+            .lastOrNull { it.role == MessageRole.ASSISTANT }
+            ?.toText()
+
+        return SubConversationApproveResult(
+            conversationId = targetConversationId,
+            logicalId = logicalId,
+            status = if (timedOut) "running" else afterStatus.let { if (it == "idle") "completed" else it },
+            handledToolCallIds = handledIds.toList(),
+            subAgentStatus = if (timedOut) "running" else afterStatus,
+            message = if (timedOut) "Sub-agent is still running in the background." else "Sub-agent finished current turn.",
+            reply = finalReply,
+            pendingApprovalTools = extractPendingApprovalTools(latestAfterWait, settings),
+        )
     }
 
     /**
@@ -2382,9 +2814,11 @@ class ChatService(
                 text = msg.toText().take(12_000),
                 toolSteps = msg.getTools().map { tool ->
                     SubConversationStepSummary(
+                        toolCallId = tool.toolCallId,
                         toolName = tool.toolName,
                         inputPreview = tool.input.replace("\n", " ").take(120),
                         isExecuted = tool.isExecuted,
+                        isPendingApproval = tool.isPending,
                     )
                 },
             )
@@ -2397,6 +2831,7 @@ class ChatService(
             processingStatus = procStatus,
             totalMessages = dialogue.size,
             messages = snapshots,
+            pendingApprovalTools = extractPendingApprovalTools(conversation, settings),
             assistantId = childAssistant.id,
             assistantName = childAssistant.name.ifBlank { context.getString(R.string.assistant_page_default_assistant) },
             modelName = childModel?.displayName,
@@ -2422,9 +2857,10 @@ class ChatService(
                 ?.key
             if (existing != null) return existing
 
-            val maxIdx = oldConfig.subAgentIdMap.keys
+            val maxIdxInMap = oldConfig.subAgentIdMap.keys
                 .mapNotNull { k -> k.removePrefix("sub_").toIntOrNull() }
-                .maxOrNull() ?: oldConfig.childConversationIds.size
+                .maxOrNull() ?: 0
+            val maxIdx = maxOf(maxIdxInMap, oldConfig.nextSubAgentIndex, oldConfig.childConversationIds.size)
             var candidateIdx = maxIdx + 1
             while ("sub_$candidateIdx" in oldConfig.subAgentIdMap) {
                 candidateIdx++
@@ -2434,6 +2870,7 @@ class ChatService(
                 childConversationIds = oldConfig.childConversationIds + childId,
                 deletedChildConversationIds = oldConfig.deletedChildConversationIds - childId,
                 subAgentIdMap = oldConfig.subAgentIdMap + (logicalId to childId),
+                nextSubAgentIndex = maxOf(oldConfig.nextSubAgentIndex, candidateIdx),
             )
             parentSession.updateConversation(boundParent.copy(config = newConfig))
             return logicalId
@@ -2460,9 +2897,10 @@ class ChatService(
                 ?: preassignedLogicalId
 
             val logicalId = existingLogicalId ?: synchronized(subAgentNotificationLock) {
-                val maxIdx = oldConfig.subAgentIdMap.keys
+                val maxIdxInMap = oldConfig.subAgentIdMap.keys
                     .mapNotNull { k -> k.removePrefix("sub_").toIntOrNull() }
-                    .maxOrNull() ?: oldConfig.childConversationIds.size
+                    .maxOrNull() ?: 0
+                val maxIdx = maxOf(maxIdxInMap, oldConfig.nextSubAgentIndex, oldConfig.childConversationIds.size)
                 var candidateIdx = maxIdx + 1
                 while ("sub_$candidateIdx" in oldConfig.subAgentIdMap) {
                     candidateIdx++
@@ -2470,6 +2908,7 @@ class ChatService(
                 "sub_$candidateIdx"
             }
 
+            val assignedIdx = logicalId.removePrefix("sub_").toIntOrNull() ?: 0
             val newConfig = synchronized(subAgentNotificationLock) {
                 val latestConv = parentSession?.state?.value?.bindConfig(settings) ?: boundParent
                 val latestCfg = latestConv.config ?: oldConfig
@@ -2477,6 +2916,7 @@ class ChatService(
                     childConversationIds = latestCfg.childConversationIds + childId,
                     deletedChildConversationIds = latestCfg.deletedChildConversationIds - childId,
                     subAgentIdMap = latestCfg.subAgentIdMap + (logicalId to childId),
+                    nextSubAgentIndex = maxOf(latestCfg.nextSubAgentIndex, assignedIdx),
                 )
             }
             val updatedParent = (parentSession?.state?.value ?: boundParent).copy(config = newConfig)
@@ -2498,6 +2938,7 @@ class ChatService(
         synchronized(subAgentNotificationLock) {
             pendingBackgroundSubAgents[parentId]?.remove(childId)
             unconsumedCompletedSubAgents[parentId]?.remove(childId)
+            subAgentWatchJobs.remove(childId)?.cancel()
         }
     }
 
@@ -2510,57 +2951,155 @@ class ChatService(
     ) {
         synchronized(subAgentNotificationLock) {
             pendingBackgroundSubAgents.getOrPut(parentConversationId) { linkedSetOf() }.add(targetId)
+            subAgentWatchJobs.remove(targetId)?.cancel()
         }
-        appScope.launch {
-            val completedReply = try {
-                replyDeferred.await()
-            } catch (e: CancellationException) {
-                synchronized(subAgentNotificationLock) {
-                    pendingBackgroundSubAgents[parentConversationId]?.remove(targetId)
+        val watchJob = appScope.launch {
+            var completedReply: String? = null
+            var wasCancelled = false
+            var turnError: String? = null
+
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                if (!replyDeferred.isCompleted) {
+                    try {
+                        completedReply = replyDeferred.await()
+                    } catch (e: CancellationException) {
+                        currentCoroutineContext().ensureActive()
+                        wasCancelled = true
+                    } catch (t: Throwable) {
+                        turnError = t.message ?: t.javaClass.simpleName
+                    }
                 }
-                return@launch
-            } catch (t: Throwable) {
-                "⚠️ 子代理执行异常: ${t.message ?: t.javaClass.simpleName}"
-            }
 
-            val latestChild = getOrLoadConversation(targetId)
-            val settings = settingsStore.awaitLoaded()
-            val childAssistant = latestChild?.let { settings.getAssistantOf(it) }
-            val childModel = latestChild?.let { settings.getChatModelOf(it) }
-            val finalReply = completedReply?.takeIf { it.isNotBlank() }
-                ?: latestChild?.currentMessages?.lastOrNull { it.role == MessageRole.ASSISTANT }?.toText()
-                ?: "(无文本回复)"
-            val currentParent = getOrLoadConversation(parentConversationId)
-            val resolvedLogicalId = currentParent?.resolveLogicalSubAgentId(targetId) ?: logicalId
-
-            val report = CompletedSubAgentReport(
-                childId = targetId,
-                logicalId = resolvedLogicalId,
-                title = latestChild?.title?.ifBlank { null } ?: resolvedLogicalId,
-                assistantName = childAssistant?.name?.ifBlank { null },
-                modelName = childModel?.displayName,
-                status = "completed",
-                reply = finalReply,
-                toolSteps = if (allowInspect && latestChild != null) extractRecentToolSteps(latestChild) else emptyList(),
-                allowInspect = allowInspect,
-            )
-
-            // 原子地从 pendingBackgroundSubAgents 移入 unconsumedCompletedSubAgents；
-            // 若在运行期间已被停止/删除或被主动清除，则不再投递
-            val shouldSchedule = synchronized(subAgentNotificationLock) {
-                val wasPending = pendingBackgroundSubAgents[parentConversationId]?.remove(targetId) == true
-                if (wasPending) {
-                    unconsumedCompletedSubAgents
-                        .getOrPut(parentConversationId) { LinkedHashMap() }[targetId] = report
-                    true
-                } else {
-                    false
+                // 确保底层会话当前活跃的生成 Job 也已结束
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val s = sessionManager.get(targetId)
+                    val activeJob = s?.getJob()
+                    if (activeJob != null && activeJob.isActive) {
+                        try {
+                            activeJob.join()
+                        } catch (_: CancellationException) {
+                            currentCoroutineContext().ensureActive()
+                            wasCancelled = true
+                        }
+                    } else if (s?.isGenerating == true || s?.submittingMessage != null) {
+                        delay(50)
+                    } else {
+                        break
+                    }
                 }
-            }
 
-            if (shouldSchedule) {
-                scheduleParentSubAgentNotification(parentConversationId)
+                // 若在等待期间已被主代理主动取消/消费，直接退出
+                val stillWatched = synchronized(subAgentNotificationLock) {
+                    pendingBackgroundSubAgents[parentConversationId]?.contains(targetId) == true
+                }
+                if (!stillWatched) return@launch
+
+                val latestChild = getOrLoadConversation(targetId) ?: return@launch
+                val settings = settingsStore.awaitLoaded()
+                val pendingApprovalTools = extractPendingApprovalTools(latestChild, settings)
+
+                // 若停在「仅用户审批 (waiting_user_approval)」且没有任何工具开启主代理审批，
+                // 不发通知打扰主代理，挂起等待人类用户在 UI 上完成审批或停止子代理
+                if (pendingApprovalTools.isNotEmpty() && pendingApprovalTools.none { it.allowAgentApproval }) {
+                    while (true) {
+                        delay(150)
+                        val watchedNow = synchronized(subAgentNotificationLock) {
+                            pendingBackgroundSubAgents[parentConversationId]?.contains(targetId) == true
+                        }
+                        if (!watchedNow) return@launch
+                        val curConv = getOrLoadConversation(targetId) ?: return@launch
+                        val curSession = sessionManager.get(targetId)
+                        val curPending = extractPendingApprovalTools(curConv, settingsStore.awaitLoaded())
+                        val onlyUserPending = curPending.isNotEmpty() && curPending.none { it.allowAgentApproval }
+                        val nowGenerating = curSession?.isGenerating == true ||
+                            curSession?.submittingMessage != null ||
+                            curSession?.getJob()?.isActive == true
+                        if (!onlyUserPending || nowGenerating) {
+                            break
+                        }
+                    }
+                    wasCancelled = false
+                    turnError = null
+                    continue
+                }
+
+                val childAssistant = settings.getAssistantOf(latestChild)
+                val childModel = settings.getChatModelOf(latestChild)
+                val latestAssistantMsg = latestChild.currentMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
+                val latestAssistantText = latestAssistantMsg?.toText()?.trim()
+                val recordedError = subAgentTurnErrors.remove(targetId) ?: turnError
+                val stoppedByUserFlag = subAgentStoppedByUser.remove(targetId)
+                val hasCancelledToolOutput = latestAssistantMsg?.getTools()?.any { tool ->
+                    tool.output.any { part -> part is UIMessagePart.Text && part.text.contains("\"status\":\"cancelled\"") }
+                } == true
+
+                val reportStatus = when {
+                    pendingApprovalTools.any { it.allowAgentApproval } -> "waiting_approval"
+                    recordedError != null || (latestAssistantText?.startsWith("⚠️ 子代理执行失败:") == true) -> "failed"
+                    stoppedByUserFlag || wasCancelled || hasCancelledToolOutput -> "interrupted_by_user"
+                    else -> "completed"
+                }
+
+                val finalReply = when (reportStatus) {
+                    "waiting_approval" -> {
+                        latestAssistantText?.takeIf { it.isNotEmpty() }
+                            ?: "(子代理正在等待主代理审批工具调用)"
+                    }
+                    "failed" -> {
+                        latestAssistantText?.takeIf { it.isNotEmpty() }
+                            ?: "⚠️ 子代理执行失败: ${recordedError ?: "未知错误"}"
+                    }
+                    "interrupted_by_user" -> buildString {
+                        appendLine("⚠️ 子代理运行已被人类用户手动中断停止。")
+                        if (!latestAssistantText.isNullOrEmpty()) {
+                            appendLine("中断前已生成内容：")
+                            append(latestAssistantText)
+                        }
+                    }.trim()
+                    else -> {
+                        completedReply?.takeIf { it.isNotBlank() }
+                            ?: latestAssistantText?.takeIf { it.isNotEmpty() }
+                            ?: "(无文本回复)"
+                    }
+                }
+
+                val currentParent = getOrLoadConversation(parentConversationId)
+                val resolvedLogicalId = currentParent?.resolveLogicalSubAgentId(targetId) ?: logicalId
+
+                val report = CompletedSubAgentReport(
+                    childId = targetId,
+                    logicalId = resolvedLogicalId,
+                    title = latestChild.title.ifBlank { null } ?: resolvedLogicalId,
+                    assistantName = childAssistant.name.ifBlank { null },
+                    modelName = childModel?.displayName,
+                    status = reportStatus,
+                    reply = finalReply,
+                    toolSteps = if (allowInspect) extractRecentToolSteps(latestChild) else emptyList(),
+                    pendingApprovalTools = pendingApprovalTools,
+                    allowInspect = allowInspect,
+                )
+
+                val shouldSchedule = synchronized(subAgentNotificationLock) {
+                    val wasPending = pendingBackgroundSubAgents[parentConversationId]?.remove(targetId) == true
+                    if (wasPending) {
+                        unconsumedCompletedSubAgents
+                            .getOrPut(parentConversationId) { LinkedHashMap() }[targetId] = report
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                if (shouldSchedule) {
+                    scheduleParentSubAgentNotification(parentConversationId)
+                }
+                break
             }
+        }
+        synchronized(subAgentNotificationLock) {
+            subAgentWatchJobs[targetId] = watchJob
         }
     }
 
@@ -2579,9 +3118,20 @@ class ChatService(
         }
         if (reports.isEmpty()) return null
 
+        val hasInterruptOrError = reports.any { it.status != "completed" }
+        val header = if (hasInterruptOrError) {
+            SUB_AGENT_INTERRUPT_NOTIFICATION_HEADER
+        } else {
+            SUB_AGENT_NOTIFICATION_HEADER
+        }
+
         return buildString {
-            appendLine(SUB_AGENT_NOTIFICATION_HEADER)
-            appendLine("The following background sub-agent task(s) spawned by this conversation have finished execution:")
+            appendLine(header)
+            if (hasInterruptOrError) {
+                appendLine("The following background sub-agent task(s) spawned by this conversation have completed or paused due to an interruption/approval request:")
+            } else {
+                appendLine("The following background sub-agent task(s) spawned by this conversation have finished execution:")
+            }
             reports.forEach { r ->
                 appendLine()
                 append("### Sub-Agent `").append(r.logicalId).append("`: ").append(r.title)
@@ -2594,11 +3144,19 @@ class ChatService(
                 }
                 appendLine()
                 appendLine("- Status: ${r.status}")
+                if (r.pendingApprovalTools.isNotEmpty()) {
+                    appendLine("- Pending Tool Approval(s) (Call `conversation_approve` with `conversation_id=\"${r.logicalId}\"` and `approved=true/false` to approve or deny):")
+                    r.pendingApprovalTools.forEach { pt ->
+                        appendLine("  - tool_call_id: `${pt.toolCallId}` | tool: `${pt.toolName}` | input: `${pt.input.replace("\n", " ").take(400)}`")
+                    }
+                }
                 if (r.allowInspect && r.toolSteps.isNotEmpty()) {
-                    val toolSummary = r.toolSteps.joinToString(", ") { it.toolName }
+                    val toolSummary = r.toolSteps.joinToString(", ") {
+                        "${it.toolName}${if (it.isPendingApproval) "(pending_approval)" else if (it.isExecuted) "" else "(cancelled)"}"
+                    }
                     appendLine("- Tool Steps (${r.toolSteps.size}): $toolSummary")
                 }
-                appendLine("- Final Reply:")
+                appendLine("- Output / Message:")
                 appendLine(r.reply.trim())
             }
         }.trim()
@@ -2612,8 +3170,11 @@ class ChatService(
                 delay(350)
 
                 while (true) {
-                    val hasUnconsumed = synchronized(subAgentNotificationLock) {
-                        !unconsumedCompletedSubAgents[parentId].isNullOrEmpty()
+                    val (hasUnconsumed, hasUrgentInterrupt) = synchronized(subAgentNotificationLock) {
+                        val map = unconsumedCompletedSubAgents[parentId]
+                        val nonEmpty = !map.isNullOrEmpty()
+                        val urgent = map?.values?.any { it.status != "completed" } == true
+                        nonEmpty to urgent
                     }
                     if (!hasUnconsumed) return@launch
 
@@ -2627,11 +3188,6 @@ class ChatService(
                     val anyOtherSubAgentStillRunning = remainingPendingIds.any { childId ->
                         getConversationRuntimeStatus(childId).first == "running"
                     }
-                    if (!anyOtherSubAgentStillRunning && remainingPendingIds.isNotEmpty()) {
-                        synchronized(subAgentNotificationLock) {
-                            pendingBackgroundSubAgents[parentId]?.removeAll(remainingPendingIds.toSet())
-                        }
-                    }
 
                     val anyActiveReaderWaiting = synchronized(subAgentNotificationLock) {
                         unconsumedCompletedSubAgents[parentId]?.keys?.any { cid ->
@@ -2639,7 +3195,9 @@ class ChatService(
                         } == true
                     }
 
-                    if (!isParentGenerating && !anyOtherSubAgentStillRunning && !anyActiveReaderWaiting) {
+                    // 若存在需要主代理立即介入的中断态（如 waiting_approval / failed / interrupted_by_user），
+                    // 只要主代理当前空闲，无需死等其他后台子代理跑完即可立即唤醒主代理处理
+                    if (!isParentGenerating && (!anyOtherSubAgentStillRunning || hasUrgentInterrupt) && !anyActiveReaderWaiting) {
                         break
                     }
                     delay(250)
@@ -2674,7 +3232,7 @@ class ChatService(
         require(targetConversationId != parentConversationId) {
             "Cannot delete the current parent conversation itself"
         }
-        stopGeneration(targetConversationId)
+        stopGeneration(targetConversationId, suppressedByParentAgent = true)
 
         val targetConv = getOrLoadConversation(targetConversationId)
         val effectiveParentId = parentConversationId ?: targetConv?.config?.parentConversationId
@@ -2720,13 +3278,16 @@ class ChatService(
             ?: return emptyList()
         return lastAssistant.getTools().map { tool ->
             SubConversationStepSummary(
+                toolCallId = tool.toolCallId,
                 toolName = tool.toolName,
                 inputPreview = tool.input.replace("\n", " ").take(120),
                 isExecuted = tool.isExecuted,
+                isPendingApproval = tool.isPending,
             )
         }
     }
 }
 
 const val SUB_AGENT_NOTIFICATION_HEADER = "[System Notification: Background Sub-Agent Completed]"
+const val SUB_AGENT_INTERRUPT_NOTIFICATION_HEADER = "[System Notification: Background Sub-Agent Interrupted]"
 

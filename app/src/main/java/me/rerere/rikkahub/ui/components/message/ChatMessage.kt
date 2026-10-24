@@ -127,6 +127,7 @@ fun ChatMessage(
     loading: Boolean = false,
     model: Model? = null,
     assistant: Assistant? = null,
+    isSubAgentConversation: Boolean = false,
     lastMessage: Boolean = false,
     onFork: () -> Unit,
     onRegenerate: () -> Unit,
@@ -213,6 +214,7 @@ fun ChatMessage(
         ProvideTextStyle(textStyle) {
             MessagePartsBlock(
                 assistant = assistant,
+                isSubAgentConversation = isSubAgentConversation,
                 role = message.role,
                 parts = message.parts,
                 annotations = message.annotations,
@@ -348,6 +350,7 @@ fun ChatMessage(
 @Composable
 private fun MessagePartsBlock(
     assistant: Assistant?,
+    isSubAgentConversation: Boolean = false,
     role: MessageRole,
     model: Model?,
     parts: List<UIMessagePart>,
@@ -424,11 +427,18 @@ private fun MessagePartsBlock(
 
                             is ThinkingStep.ToolStep -> {
                                 key(step.tool.toolCallId.ifBlank { step.hashCode().toString() }) {
+                                    val mcpServerNameToId = remember(settings.mcpServers) {
+                                        settings.mcpServers.associate { it.commonOptions.name to it.id }
+                                    }
+                                    val hideUserApprovalPopup = isSubAgentConversation &&
+                                        assistant != null &&
+                                        !assistant.requiresSubAgentUserApproval(step.tool.toolName, mcpServerNameToId) &&
+                                        assistant.requiresSubAgentAgentApproval(step.tool.toolName, mcpServerNameToId)
                                     ChatMessageToolStep(
                                         tool = step.tool,
                                         loading = loading && !step.tool.isExecuted,
                                         assistant = assistant,
-                                        onToolApproval = onToolApproval,
+                                        onToolApproval = if (hideUserApprovalPopup) null else onToolApproval,
                                         onToolAnswer = onToolAnswer,
                                         onEditToolCall = onEditToolCall,
                                         onRegenerateFromHere = if (onRegeneratePart != null) {
