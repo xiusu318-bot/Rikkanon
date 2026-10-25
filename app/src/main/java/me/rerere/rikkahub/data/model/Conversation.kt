@@ -53,6 +53,10 @@ data class Conversation(
             return messageNodes.map { node -> node.messages[node.selectIndex] }
         }
 
+    /** 等待用户审批的工具调用 */
+    val pendingToolCalls: List<UIMessagePart.Tool>
+        get() = currentMessages.flatMap { message -> message.getTools().filter { it.isPending } }
+
     fun getMessageNodeByMessage(message: UIMessage): MessageNode? {
         return messageNodes.firstOrNull { node -> node.messages.contains(message) }
     }

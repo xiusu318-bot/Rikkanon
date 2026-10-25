@@ -55,19 +55,17 @@ fun ProviderConfigure(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = modifier
     ) {
-        if (!provider.builtIn) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                ProviderSetting.Types.forEachIndexed { index, type ->
-                    SegmentedButton(
-                        shape = SegmentedButtonDefaults.itemShape(
-                            index = index,
-                            count = ProviderSetting.Types.size
-                        ),
-                        label = { Text(type.simpleName ?: "") },
-                        selected = provider::class == type,
-                        onClick = { onEdit(provider.convertTo(type)) }
-                    )
-                }
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            ProviderSetting.Types.forEachIndexed { index, type ->
+                SegmentedButton(
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = ProviderSetting.Types.size
+                    ),
+                    label = { Text(type.simpleName ?: "") },
+                    selected = provider::class == type,
+                    onClick = { onEdit(provider.convertTo(type)) }
+                )
             }
         }
 
@@ -250,7 +248,6 @@ private fun ProviderConfigureOpenAI(
         },
         label = { Text(stringResource(R.string.setting_provider_page_api_path)) },
         modifier = Modifier.fillMaxWidth(),
-        enabled = !provider.builtIn,
     )
 
     Row(

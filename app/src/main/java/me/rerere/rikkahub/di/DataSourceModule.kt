@@ -23,6 +23,7 @@ import me.rerere.rikkahub.data.ai.MemoryConsolidator
 import me.rerere.rikkahub.data.ai.TranslationHandler
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
 import me.rerere.rikkahub.data.remote.RikkaHubAPI
+import me.rerere.rikkahub.data.remote.ModelsDevUpdater
 import me.rerere.rikkahub.data.remote.SponsorAPI
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.remote.RemoteFileStore
@@ -235,6 +236,10 @@ val dataSourceModule = module {
 
     single {
         SponsorAPI.create(get())
+    }
+
+    single {
+        ModelsDevUpdater(context = get(), client = get())
     }
 
     single {

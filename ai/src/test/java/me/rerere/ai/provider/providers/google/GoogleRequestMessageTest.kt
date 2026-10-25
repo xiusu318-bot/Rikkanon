@@ -415,6 +415,45 @@ class GoogleRequestMessageTest {
             response?.get("result")?.jsonPrimitive?.content?.contains("Expected output value") == true)
     }
 
+    @Test
+    fun `functionResponse should not merge with following user text message while consecutive user text messages merge`() {
+        val assistantWithTool = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(
+                UIMessagePart.Reasoning(reasoning = "Thinking..."),
+                createExecutedTool("call_1", "conversation_send", "{}", "Sub-agent output")
+            )
+        )
+        val messages = listOf(
+            UIMessage.user("Initial prompt"),
+            assistantWithTool,
+            UIMessage.user("Steered notice 1"),
+            UIMessage.user("Steered user text 2")
+        )
+
+        val result = invokeBuildContents(messages)
+
+        // Expected:
+        // 0: user [text("Initial prompt")]
+        // 1: model [thought, functionCall]
+        // 2: user [functionResponse]  <-- kept separate from following user text!
+        // 3: user [text("Steered notice 1"), text("Steered user text 2")] <-- consecutive text users merged!
+        assertEquals(4, result.size)
+
+        val toolResponseTurn = result[2].jsonObject
+        assertEquals("user", toolResponseTurn["role"]?.jsonPrimitive?.content)
+        val toolResponseParts = toolResponseTurn["parts"]!!.jsonArray
+        assertEquals(1, toolResponseParts.size)
+        assertTrue(toolResponseParts[0].jsonObject.containsKey("functionResponse"))
+
+        val steeredUserTurn = result[3].jsonObject
+        assertEquals("user", steeredUserTurn["role"]?.jsonPrimitive?.content)
+        val steeredParts = steeredUserTurn["parts"]!!.jsonArray
+        assertEquals(2, steeredParts.size)
+        assertEquals("Steered notice 1", steeredParts[0].jsonObject["text"]?.jsonPrimitive?.content)
+        assertEquals("Steered user text 2", steeredParts[1].jsonObject["text"]?.jsonPrimitive?.content)
+    }
+
     // ==================== Helper Functions ====================
 
     private fun createExecutedTool(

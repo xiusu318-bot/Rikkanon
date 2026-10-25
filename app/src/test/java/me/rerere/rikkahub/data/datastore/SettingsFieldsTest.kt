@@ -69,11 +69,11 @@ class SettingsFieldsTest {
         assertEquals(DEFAULT_AUTO_MODEL_ID, settings.chatModelId)
         assertEquals(DEFAULT_AUTO_MODEL_ID, settings.fastModelId)
         assertEquals(DEFAULT_AUTO_MODEL_ID, settings.translateModeId)
-        assertEquals(DEFAULT_AUTO_MODEL_ID, settings.compressModelId)
         assertEquals(DEFAULT_MODE_INJECTIONS, settings.modeInjections)
         assertEquals(DEFAULT_ASSISTANT_ID, settings.assistantId)
         assertEquals(DEFAULT_SYSTEM_TTS_ID, settings.selectedTTSProviderId)
         assertEquals(null, settings.selectedASRProviderId)
+        assertEquals(null, settings.memoryModelId)
         assertEquals(true, settings.dynamicColor)
         assertEquals(8080, settings.webServerPort)
     }
@@ -122,6 +122,8 @@ private val SAMPLE = Settings(
     chatModelId = id(1),
     fastModelId = id(2),
     fastModelReasoningLevel = ReasoningLevel.LOW,
+    memoryModelId = id(6),
+    memoryModelReasoningLevel = ReasoningLevel.HIGH,
     imageGenerationModelId = id(3),
     enableAutoTitle = false,
     titlePrompt = "title",
@@ -133,7 +135,7 @@ private val SAMPLE = Settings(
     suggestionPrompt = "suggestion",
     ocrModelId = id(5),
     ocrPrompt = "ocr",
-    compressModelId = id(6),
+    compressModelId = id(32),
     compressPrompt = "compress",
     assistantId = id(20),
     providers = listOf(ProviderSetting.OpenAI(id = id(31), name = "Provider")),
@@ -158,6 +160,8 @@ private val SAMPLE = Settings(
     modeInjections = listOf(PromptInjection.ModeInjection(id = id(14), name = "mode")),
     lorebooks = listOf(Lorebook(id = id(12), name = "lorebook")),
     quickMessages = listOf(QuickMessage(id = id(13), title = "hi")),
+    enableSecretKeyAlias = true,
+    secretKeys = listOf(SecretKeyEntry(id = id(33), keyName = "MY_KEY", secretValue = "val")),
     webServerEnabled = true,
     webServerPort = 9090,
     webServerJwtEnabled = true,
@@ -178,6 +182,8 @@ private val STORED_KEYS = setOf(
     "chat_model",
     "fast_model",
     "fast_model_reasoning_level",
+    "memory_model",
+    "memory_model_reasoning_level",
     "translate_model",
     "enable_suggestion",
     "enable_auto_title",
@@ -216,6 +222,8 @@ private val STORED_KEYS = setOf(
     "mode_injections",
     "lorebooks",
     "quick_messages",
+    "enable_secret_key_alias",
+    "secret_keys",
     "backup_reminder_config",
     "sponsor_alert_dismissed_at",
 )

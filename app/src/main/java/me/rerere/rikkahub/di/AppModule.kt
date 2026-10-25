@@ -8,9 +8,11 @@ import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.service.ChatFloatingTracker
 import me.rerere.rikkahub.service.ChatNotificationManager
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.MediaCreationService
+import me.rerere.rikkahub.ui.floating.ChatFloatingWindows
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalSessionManager
 import me.rerere.rikkahub.utils.EmojiData
 import me.rerere.rikkahub.utils.EmojiUtils
@@ -64,17 +66,36 @@ val appModule = module {
     }
 
     single {
-        WorkspaceTerminalSessionManager(get(), get())
+        WorkspaceTerminalSessionManager(get(), get(), get(), get())
     }
 
     // 生成通知与业务解耦：ChatService 只发事件，通知由这里消费；
-    // createdAtStart 保证进程启动即订阅，否则后台生成的事件会因无订阅者而丢失
+    // createdAtStart 确保进程启动即开始订阅，不用由 ChatService 持有引用。
     single(createdAtStart = true) {
         ChatNotificationManager(
             context = get(),
             appScope = get(),
             eventBus = get(),
             settingsStore = get(),
+        )
+    }
+
+    // ChatService 只在后台才用到，延迟创建
+    single {
+        ChatFloatingTracker(
+            appScope = get(),
+            lazyChatService = lazy { get() },
+            settingsStore = get(),
+        )
+    }
+
+    // 同上，进程启动即开始监听前后台切换
+    single(createdAtStart = true) {
+        ChatFloatingWindows(
+            context = get(),
+            appScope = get(),
+            tracker = get(),
+            lazyChatService = lazy { get() },
         )
     }
 

@@ -5,6 +5,8 @@ import java.io.File
 data class WorkspaceBindMount(
     val source: File,
     val target: String,
+    /** AI 写入该目录时免强制审批 */
+    val writable: Boolean = false,
 ) {
     init {
         require(target.startsWith("/")) { "Bind mount target must be absolute: $target" }
@@ -61,64 +63,41 @@ class ProotShellRunner(
         return process.readResult(context.timeoutMillis, context.stdin)
     }
 
+    override fun terminalLaunch(context: WorkspaceTerminalContext): WorkspaceTerminalLaunch {
+        val shell = WorkspaceManager.rootfsShell(context.linuxDir)
+        val args = prootArgs(context.linuxDir, context.filesDir, context.tempDir, WORKSPACE_DIR, context.bindMounts)
+        args += ROOTFS_ENV
+        args += listOf(
+            "USER=root",
+            "SHELL=$shell",
+            shell,
+        )
+
+        val env = mutableListOf(
+            "PROOT_LOADER=${File(nativeLibraryDir, PROOT_LOADER).absolutePath}",
+            "PROOT_TMP_DIR=${context.tempDir.absolutePath}",
+            "TMPDIR=${context.tempDir.absolutePath}",
+        )
+        if (context.shellCompatibilityMode) {
+            env += "PROOT_NO_SECCOMP=1"
+        }
+
+        return WorkspaceTerminalLaunch(
+            executable = File(nativeLibraryDir, PROOT_EXEC).absolutePath,
+            cwd = context.filesDir.absolutePath,
+            args = args,
+            env = env,
+        )
+    }
+
     private fun buildCommand(
         context: WorkspaceShellContext,
         proot: File,
     ): List<String> {
-        val command = mutableListOf(
-            proot.absolutePath,
-            "--root-id",
-            "--link2symlink",
-            "--kill-on-exit",
-            "-r",
-            context.linuxDir.absolutePath,
-            "-w",
-            context.prootCwd(),
-            "-b",
-            "${context.filesDir.absolutePath}:$WORKSPACE_DIR",
-        )
-
-        context.bindMounts.forEach { mount ->
-            if (mount.source.exists()) {
-                command += "-b"
-                command += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
-            }
-        }
-
-        WorkspaceManager.KERNEL_FS_MOUNTS.forEach { path ->
-            if (File(path).exists()) {
-                command += "-b"
-                command += path
-            }
-        }
-
-        // 绑定 POSIX 共享内存 /dev/shm，解决 Python multiprocessing / PostgreSQL / Chromium 报错
-        val shmDir = File(context.tempDir, "shm").apply { mkdirs() }
-        command += "-b"
-        command += "${shmDir.absolutePath}:/dev/shm"
-
-        // 当 Android 宿主机锁死 /proc/stat、/proc/loadavg、/proc/uptime、/proc/vmstat 时挂载可读兜底节点
-        val fakeProcDir = File(context.linuxDir, RootfsPatcher.FAKE_PROC_REL_DIR)
-        RootfsPatcher.UNREADABLE_HOST_PROC_FILES.forEach { name ->
-            val fakeProc = File(fakeProcDir, name)
-            if (fakeProc.isFile) {
-                command += "-b"
-                command += "${fakeProc.absolutePath}:/proc/$name"
-            }
-        }
-
+        val command = mutableListOf(proot.absolutePath)
+        command += prootArgs(context.linuxDir, context.filesDir, context.tempDir, context.prootCwd(), context.bindMounts)
+        command += ROOTFS_ENV
         command += listOf(
-            "/usr/bin/env",
-            "-i",
-            "HOME=/root",
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "TERM=xterm-256color",
-            "LANG=C.UTF-8",
-            "LC_ALL=C.UTF-8",
-            "JAVA_TOOL_OPTIONS=-XX:-UseCompressedOops -XX:-UseCompressedClassPointers",
-            "NODE_OPTIONS=--require /etc/rikkahub-node-preload.js",
-            "ELECTRON_DISABLE_SANDBOX=1",
-            "MOZ_FAKE_NO_SANDBOX=1",
             // 非交互执行约定, 抑制各类 CLI 的交互行为 (确认提示/分页器/颜色转义)
             "CI=true",
             "NO_COLOR=1",
@@ -135,6 +114,58 @@ class ProotShellRunner(
         return command
     }
 
+    /** PRoot 自身的参数: Rootfs、工作目录与挂载表, 命令执行和交互式终端共用 */
+    private fun prootArgs(
+        linuxDir: File,
+        filesDir: File,
+        tempDir: File,
+        cwd: String,
+        bindMounts: List<WorkspaceBindMount>,
+    ): MutableList<String> {
+        val args = mutableListOf(
+            "--root-id",
+            "--link2symlink",
+            "--kill-on-exit",
+            "-r",
+            linuxDir.absolutePath,
+            "-w",
+            cwd,
+            "-b",
+            "${filesDir.absolutePath}:$WORKSPACE_DIR",
+        )
+
+        bindMounts.forEach { mount ->
+            if (mount.source.exists()) {
+                args += "-b"
+                args += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
+            }
+        }
+
+        WorkspaceManager.KERNEL_FS_MOUNTS.forEach { path ->
+            if (File(path).exists()) {
+                args += "-b"
+                args += path
+            }
+        }
+
+        // 绑定 POSIX 共享内存 /dev/shm，解决 Python multiprocessing / PostgreSQL / Chromium 报错
+        val shmDir = File(tempDir, "shm").apply { mkdirs() }
+        args += "-b"
+        args += "${shmDir.absolutePath}:/dev/shm"
+
+        // 当 Android 宿主机锁死 /proc/stat、/proc/loadavg、/proc/uptime、/proc/vmstat 时挂载可读兜底节点
+        val fakeProcDir = File(linuxDir, RootfsPatcher.FAKE_PROC_REL_DIR)
+        RootfsPatcher.UNREADABLE_HOST_PROC_FILES.forEach { name ->
+            val fakeProc = File(fakeProcDir, name)
+            if (fakeProc.isFile) {
+                args += "-b"
+                args += "${fakeProc.absolutePath}:/proc/$name"
+            }
+        }
+
+        return args
+    }
+
     private fun WorkspaceShellContext.prootCwd(): String {
         val normalized = cwd.trim().trim('/')
         return if (normalized.isBlank()) {
@@ -148,5 +179,20 @@ class ProotShellRunner(
         private const val PROOT_EXEC = "libproot_exec.so"
         private const val PROOT_LOADER = "libproot_loader.so"
         private val WORKSPACE_DIR = WorkspaceManager.ROOTFS_WORKSPACE_DIR
+
+        /** 清空宿主机环境变量后 Rootfs 内的基础环境（含类 VPS 防崩变量） */
+        private val ROOTFS_ENV = listOf(
+            "/usr/bin/env",
+            "-i",
+            "HOME=${WorkspaceManager.ROOTFS_HOME_DIR}",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "TERM=xterm-256color",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+            "JAVA_TOOL_OPTIONS=-XX:-UseCompressedOops -XX:-UseCompressedClassPointers",
+            "NODE_OPTIONS=--require /etc/rikkahub-node-preload.js",
+            "ELECTRON_DISABLE_SANDBOX=1",
+            "MOZ_FAKE_NO_SANDBOX=1",
+        )
     }
 }

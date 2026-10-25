@@ -95,6 +95,12 @@ class ConversationSession(
     // 处理状态（如 OCR 识别中）
     val processingStatus = MutableStateFlow<String?>(null)
 
+    // 最近一轮正在写的助手消息，这一轮还没有输出时为空
+    val replyMessageId = MutableStateFlow<Uuid?>(null)
+
+    // 最近一次生成任务开始的时间，用来认出这一轮报的错
+    val generationStartedAt = MutableStateFlow<Long?>(null)
+
     // 生成任务（内聚在 session 中）
     private val _generationJob = MutableStateFlow<Job?>(null)
     private val activeJobs = mutableSetOf<Job>()
@@ -118,6 +124,7 @@ class ConversationSession(
     @Synchronized
     fun setJob(job: Job?, cancelPrevious: Boolean = true) {
         val previous = _generationJob.value
+        if (job != null) generationStartedAt.value = System.currentTimeMillis()
         _generationJob.value = job
         if (cancelPrevious) previous?.cancel()
         if (job != null) activeJobs.add(job)

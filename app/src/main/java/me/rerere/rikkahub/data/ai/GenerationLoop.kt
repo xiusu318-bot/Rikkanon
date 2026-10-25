@@ -138,7 +138,7 @@ class GenerationLoop(
                 it.canResumeExecution
             } ?: emptyList()
 
-            val toolsToProcess: List<UIMessagePart.Tool>
+            var toolsToProcess: List<UIMessagePart.Tool>
 
             // Skip generation if we have approved/denied tool calls to handle
             if (pendingTools.isEmpty()) {
@@ -276,6 +276,26 @@ class GenerationLoop(
                 toolsToProcess = messages.last().getTools().filter { it.canResumeExecution }
             }
 
+            // 只给真正运行的工具计时；开始时先写一次，界面才能在执行中实时显示耗时
+            val startNow = Clock.System.now()
+            val startedTools = toolsToProcess.map { tool ->
+                val runs = tool.approvalState == ToolApprovalState.Auto || tool.approvalState == ToolApprovalState.Approved
+                if (runs) tool.copy(startedAt = startNow, finishedAt = null) else tool
+            }
+            if (startedTools != toolsToProcess) {
+                toolsToProcess = startedTools
+                val lastMessage = messages.last()
+                val startedParts = lastMessage.parts.map { part ->
+                    if (part is UIMessagePart.Tool) {
+                        startedTools.find { it.toolCallId == part.toolCallId } ?: part
+                    } else {
+                        part
+                    }
+                }
+                messages = messages.dropLast(1) + lastMessage.copy(parts = startedParts)
+                emit(GenerationChunk.Messages(messages))
+            }
+
             // Handle tools concurrently (supports parallel sub-agents & parallel workspace tools)
             // Use CoroutineStart.UNDISPATCHED so concurrent tool calls (e.g. multiple conversation_send)
             // enter their initial synchronous registration/reservation block strictly in list order.
@@ -334,9 +354,10 @@ class GenerationLoop(
                                     } else {
                                         rawResult
                                     }
-                                    val hasShellAccess = tools.any { it.name == "workspace_shell" || it.name == "workspace_terminal" }
+                                    val hasShellAccess = tools.any { it.name == "workspace_write_file" || it.name == "workspace_edit_file" }
                                     tool.copy(
-                                        output = maybeTruncateToolOutput(tool, result, hasShellAccess)
+                                        output = maybeTruncateToolOutput(tool, result, hasShellAccess),
+                                        finishedAt = Clock.System.now(),
                                     )
                                 }.getOrElse {
                                     if (it is CancellationException) throw it
@@ -355,7 +376,8 @@ class GenerationLoop(
                                                     }
                                                 )
                                             )
-                                        )
+                                        ),
+                                        finishedAt = Clock.System.now(),
                                     )
                                 }
                             }

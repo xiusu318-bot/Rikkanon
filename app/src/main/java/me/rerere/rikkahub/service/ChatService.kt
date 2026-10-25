@@ -102,6 +102,7 @@ import me.rerere.rikkahub.web.BadRequestException
 import me.rerere.rikkahub.web.NotFoundException
 import me.rerere.rikkahub.utils.applyPlaceholders
 import java.util.Locale
+import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatService"
@@ -423,7 +424,8 @@ class ChatService(
     fun cleanup() = runCatching { sessionManager.cleanup() }
 
     private fun onSessionGenerationFinished(session: ConversationSession, cause: Throwable?) {
-        if (cause != null) session.messageQueue.pause()
+        // 取消只来自停止（已自行暂停）或删除，这里再暂停会盖掉停止后用户发送时恢复的队列
+        if (cause != null && cause !is CancellationException) session.messageQueue.pause()
         if (session.state.value.currentMessages.any { message ->
                 message.parts.any { it is UIMessagePart.Tool && it.isPending }
             }) {
@@ -449,6 +451,12 @@ class ChatService(
 
     fun getProcessingStatusFlow(conversationId: Uuid): StateFlow<String?> =
         sessionManager.getProcessingStatusFlow(conversationId)
+
+    fun getReplyMessageIdFlow(conversationId: Uuid): StateFlow<Uuid?> =
+        sessionManager.getReplyMessageIdFlow(conversationId)
+
+    fun getGenerationStartedAtFlow(conversationId: Uuid): StateFlow<Long?> =
+        sessionManager.getGenerationStartedAtFlow(conversationId)
 
     fun getConversationJobs(): Flow<Map<Uuid, Job?>> = sessionManager.getConversationJobs()
 
@@ -619,6 +627,7 @@ class ChatService(
 
     private fun sendQueuedMessage(session: ConversationSession, queued: QueuedMessage): Job {
         val conversationId = session.id
+        session.replyMessageId.value = null
         val content = queued.parts
         val answer = queued.answer
         val job = launchGenerationJob(
@@ -1236,6 +1245,8 @@ class ChatService(
                             val updatedConversation = getConversationFlow(conversationId).value
                                 .updateCurrentMessages(chunk.messages)
                             updateConversation(conversationId, updatedConversation)
+                            sessionManager.getOrCreate(conversationId).replyMessageId.value =
+                                chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }?.id
 
                             // 通知等边缘副作用由 ChatNotificationManager 消费；
                             // tryEmit 不挂起，事件丢失只影响单次通知更新，不能反压生成链
@@ -1380,7 +1391,9 @@ class ChatService(
                 UIMessagePart.Text(
                     """{"status":"cancelled","error":"Generation cancelled by user before tool execution completed."}"""
                 )
-            )
+            ),
+            // 执行到一半被停止的工具，耗时算到取消为止
+            finishedAt = tool.finishedAt ?: tool.startedAt?.let { Clock.System.now() },
         )
     }
 

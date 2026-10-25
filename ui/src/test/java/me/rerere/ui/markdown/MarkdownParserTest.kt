@@ -94,6 +94,19 @@ class MarkdownParserTest {
     }
 
     @Test
+    fun `code fences close with CRLF line endings`() {
+        val source = "````\n文字 A\n\n````\n文字 B\n```\n\n文字 C\n```".replace("\n", "\r\n")
+        assertEquals(
+            listOf(
+                CodeBlock(code = "文字 A", language = null, closed = true),
+                Paragraph(listOf(Text("文字 B"))),
+                CodeBlock(code = "\n文字 C", language = null, closed = true),
+            ),
+            parseMarkdown(source).blocks,
+        )
+    }
+
+    @Test
     fun `lists keep start number nesting and task state`() {
         val list = single<ListBlock>(
             """
@@ -227,6 +240,24 @@ class MarkdownParserTest {
         assertEquals(listOf(Code("""\(a\)""")), single<Paragraph>("""`\(a\)`""").content)
         // 未闭合的代码围栏里也不能替换
         assertEquals("""\[a\]""", single<CodeBlock>("```\n\\[a\\]").code)
+        // \\[4pt] 是带行距的换行，不是块级公式的开头
+        assertEquals(
+            listOf(Math("""a\\[4pt]b""", display = true), Text(" and "), Math("c", display = true)),
+            single<Paragraph>("""${'$'}${'$'}a\\[4pt]b${'$'}${'$'} and \[c\]""").content,
+        )
+    }
+
+    @Test
+    fun `math keeps less than signs`() {
+        val cases = """\begin{cases}1/2, & 0<x<1\\ \infty, & 1\le x<2\end{cases}"""
+        assertEquals(
+            listOf(Math(cases, display = true)),
+            single<Paragraph>("${'$'}${'$'}\n$cases\n${'$'}${'$'}").content,
+        )
+        assertEquals(
+            listOf(Text("if "), Math("a<b"), Text(" and "), Math("x<y>z"), Text(" or "), Math("a&b")),
+            single<Paragraph>("""if ${'$'}a<b$ and ${'$'}x<y>z$ or ${'$'}a&b$""").content,
+        )
     }
 
     @Test

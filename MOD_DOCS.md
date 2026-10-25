@@ -7,12 +7,12 @@
 ## 一、 整体目录与构建产物速览
 
 - **已签名安装包（当前版本 v1.1.0）**：
-  - **Release 正式版（无开发模式水印，推荐日常主力使用）**：
-    - ARM64 手机版：`Rikkanon_v1.1.0_Release_arm64-v8a.apk`（69MB）
-    - 全架构通用版：`Rikkanon_v1.1.0_Release_universal.apk`（81MB）
+  - **Release 正式版（无开发模式水印，开启 R8 优化，推荐日常主力使用）**：
+    - ARM64 手机版：`Rikkanon_v1.1.0_Release_arm64-v8a.apk`（**21MB**，由原 69MB 瘦身 70%）
+    - 全架构通用版：`Rikkanon_v1.1.0_Release_universal.apk`（**25MB**，由原 81MB 瘦身 69%）
   - **Debug 调试版**：
-    - ARM64 手机版：`Rikkanon_v1.1.0_Debug_arm64-v8a.apk`（84MB）
-    - 全架构通用版：`Rikkanon_v1.1.0_Debug_universal.apk`（97MB）
+    - ARM64 手机版：`Rikkanon_v1.1.0_Debug_arm64-v8a.apk`（59MB）
+    - 全架构通用版：`Rikkanon_v1.1.0_Debug_universal.apk`（63MB）
 - **共存包名与签名配置**：
   - `applicationId`：`me.rerere.rikkahub.rikkanon`（与正式版 `me.rerere.rikkahub` 隔离，互不覆盖）
   - 桌面名称 & 关于页标题：`Rikkanon`（`versionName = "1.1.0"`）
@@ -25,7 +25,7 @@
 ### 模块 1：工作区持久化交互式 PTY 终端（`workspace_terminal`）
 
 **核心思想**：
-在原有一次性非交互命令执行器 `ProotShellRunner` 基础上，复用并扩展 App 的 Termux `TerminalSession` + `termux_pty.cpp` 伪终端池。终端**只按工作区（`workspace.root`）隔离，不按对话或助手隔离**，主对话、绑定了不同模型的子代理对话、新开对话以及人类用户的终端 UI 共享同一个终端池，支持同时开启多个终端标签页、按唯一数字 `id`（`tab.id`）操控，并支持通过命令 `exit` / `Ctrl+D` 或工具参数关闭终端本身。
+在原有一次性非交互命令执行器 `ProotShellRunner` 基础上，复用并扩展 App 的 Termux `TerminalSession` + `termux_pty.cpp` 伪终端池。终端**按工作区（`workspace.root`）共享，不按对话或助手隔离**，主对话、绑定了不同模型的子代理对话、新开对话以及人类用户的终端 UI 共用同一个终端池，支持同时开启多个终端标签页、按唯一数字 `id`（`tab.id`）操控，并支持通过命令 `exit` / `Ctrl+D` 或工具参数关闭终端本身。
 
 #### 涉及文件与函数：
 1. **`workspace/src/main/cpp/termux_pty.cpp`**
@@ -35,7 +35,7 @@
    - `WorkspaceTerminalSessionClient`：新增 `lastOutputAtMs: AtomicLong` 与 `outputEvents: MutableSharedFlow<Long>`，在 `onTextChanged` 和 `onSessionFinished` 时记录最后输出时间，供 AI 工具判断输出是否已稳定（Settle Detection）。
    - `inspectTerminalProcessTree(prootPid: Int): TerminalProcessTreeState`：
      - 维护 `cachedShellPids`（`prootPid -> shellPid`）缓存，常规轮询直接走 **O(1) 快速路径**（仅读取 `/proc/<prootPid>/stat`、`/proc/<shellPid>/stat` 及有前台任务时的 `/proc/<fgPgid>/stat` 共 2~3 个文件），避免遍历整个 `/proc` 目录；首次发现或边缘慢路径带 250ms 节流缓存。
-     - 当顶层 Shell 存活且无活跃前台子进程（或 `tpgid == shellPgrp`）时，精确判定 `isAtPrompt = true`（`prompt_ready`），无需等待固定超时即可立即返回。
+     - 当顶层 Shell 存活且无活跃前台子进程（或 `tpgid == shellPgrp`）时，精确判定 `isAtPrompt = true`（`prompt_ready`），无需等待固定超时即可及时返回。
      - 当 `prootPid` 或顶层 Shell 进程已退出（如在终端内执行了 `exit`、`logout` 或发送了 `\u0004` `Ctrl+D`）时，立即判定 `processExited = true`。
 3. **`app/src/main/java/me/rerere/rikkahub/ui/pages/extensions/workspace/WorkspaceTerminalSessionManager.kt`**
    - `createTabNow(...)`：在创建出 `TerminalSession` 后，若用户尚未点开过终端 UI 页面（`termSession.emulator == null`），立即调用 `termSession.updateSize(120, 40)` 初始化虚拟屏幕缓冲并启动后台读写线程；通过 `try ... finally` 确保 `isCreating` 状态永不卡死，支持连续开启任意多个终端标签页。
@@ -249,14 +249,14 @@
 9. **UI 文案精简中文化与移除官方更新检测（`AssistantSubAgentPage.kt` / `AssistantDetailPage.kt` / `FilesPicker.kt` / `UpdateChecker.kt` / `ChatDrawer.kt` / `SettingPreferencesNotificationPage.kt`）**：
    - 将页面标题与入口统一改为 **「子代理设置」**，聊天页底部 `+` 面板改为 **「子代理」**，移除 `(Sub-Agent)`、`PTY` 等多余英文及内部工具名/参数名（如 `conversation_send`、`conversation_read`、`tool_steps` 等），采用简明中文直接描述功能。
    - 彻底禁用 `UpdateChecker` 对 `https://updates.rikka-ai.com/` 的后台更新检测请求，移除侧边栏 `UpdateCard` 卡片与通知设置页中的「显示更新提醒」选项。
-10. **会话配置实时跟随助手设定 & 回退 2.5.6 经典交互与紧凑卡片样式（`ConversationConfig.kt` / `ChatService.kt` / `SettingProviderPage.kt` / `SettingMcpPage.kt` / `FilesPicker.kt` / `CardGroup.kt`）**：
-   - **会话配置实时跟随助手设定**：所有对话（无论主对话还是子代理对话）均 **100% 实时跟随其所属助手（`conversation.assistantId`）的最新模型、思考强度、搜索开关、MCP、Skills 与工具权限**；当某个渠道失效时，修改对应助手的模型即可使已有主对话和子代理对话当场原地切换至新渠道继续运行。
-   - **提供商与 MCP 页面回退 2.5.6**：恢复点 `+` 一键弹窗添加提供商、经典提供商详情页以及 MCP 底部弹窗配置。
+10. **会话配置实时跟随助手 & 保留 2.5.6 经典交互与紧凑卡片样式（`ConversationConfig.kt` / `ChatService.kt` / `SettingProviderPage.kt` / `SettingMcpPage.kt` / `FilesPicker.kt` / `CardGroup.kt`）**：
+   - **会话配置实时跟随助手设定**：所有对话（无论主对话还是子代理对话）实时跟随其所属助手（`conversation.assistantId`）的最新模型、思考强度、搜索开关、MCP、Skills 与工具权限；切换对应助手的模型后，已有主对话和子代理对话可直接按新配置继续运行。
+   - **提供商与 MCP 页面保留 2.5.6 交互**：保留点 `+` 弹窗添加提供商、经典提供商详情页以及 MCP 底部弹窗配置。
    - **聊天页 `+` 面板与全局 `CardGroup` 紧凑化**：保留单层 `+` 面板与一体式紧凑圆角卡片样式。
 11. **记忆设置新增「后台自动整理记忆」独立开关（`AssistantMemoryPage.kt` / `Assistant.kt` / `MemoryConsolidator.kt` / `MemoryPrompts.kt` / `GenerationLoop.kt` / `ChatService.kt`）**：
    - 在「助手详情 -> 记忆 -> 设置」的「全局记忆」下方新增 **「后台自动整理记忆 (`enableAutoMemoryConsolidation`)」** 开关（需开启「记忆」总开关后可操作，**默认关闭 `false`**）。
    - 关闭时：不自动触发对话暂停、满 6 轮、离开对话或切后台时的后台归纳请求（方便按需控制后台 Token 消耗），并动态调整 `<memory_system>` 提示词让主对话模型在对话中按需直接调用记忆工具记录重要事实，同时保留手动点击「立即整理」按钮的能力。
-   - 开启时：恢复后台自动归纳整理机制。
+   - 开启时：保持原有的后台自动归纳整理机制。
 12. **正式定名 `Rikkanon` 与 Release 正式版构建（`app/build.gradle.kts` / `SettingAboutPage.kt` / `strings.xml`）**：
    - 应用名与关于页标题统一为 **`Rikkanon`**，独立共存包名定为 **`me.rerere.rikkahub.rikkanon`**，同时产出无开发模式水印的 Release 正式版与 Debug 版安装包。
 
@@ -295,13 +295,13 @@
      - 当后台子代理执行完毕且未被主动消费时：若主代理正在运行工具循环，通过 `pollQueuedUserMessages`（Steer 通道）在下一步立即注入完成报告；若主代理已停下等待，待当前所有运行中的后台子代理全部完成后合并发送一条完成通知自动唤醒主代理（UI 渲染为紧凑可折叠的 `ChatMessageSubAgentNotification` 卡片）。
 
 ### 2026-10-22 迭代更新
-1. **子代理工具管理面板重构：移除本地工具 + 逐工具双轨审批（`AssistantSubAgentPage.kt` / `Assistant.kt` / `ChatToolFactory.kt`）**：
-   - **移除子代理本地工具**：在 `SubAgentToolsSheet` 与 `ChatToolFactory.createTools`（`isSubConversation == true`）中彻底移除子代理无需使用的本地工具（JavaScript、时间、剪贴板、TTS、屏幕时间、日历、图表等）。
+1. **子代理工具管理面板重构：精简本地工具 + 逐工具双轨审批（`AssistantSubAgentPage.kt` / `Assistant.kt` / `ChatToolFactory.kt`）**：
+   - **精简子代理本地工具**：在 `SubAgentToolsSheet` 与 `ChatToolFactory.createTools`（`isSubConversation == true`）中移除子代理无需使用的本地工具（JavaScript、时间、剪贴板、TTS、屏幕时间、日历、图表等）。
    - **将统一免审批开关细化为上方开启工具 + 下方逐工具配置「用户审批」与「主代理审批」**：
      - `Assistant` 新增 `subAgentUserApprovalTools: Set<String>` 与 `subAgentAgentApprovalTools: Set<String>`。
      - 上方开启任意工具（工作区 5 项工具、MCP 服务、联网搜索、长期记忆、技能）后，下方「工具调用审批」列表自动展示对应项，每一项独立提供 **`[用户]`** 与 **`[主代理]`** 两个审批开关（默认均不勾选即免审批直接执行）。
-     - **只开「主代理审批」**：人类在 UI（含子代理完整页、聊天页顶栏胶囊与窥屏小窗）完全看不到审批弹窗打扰，子代理触发工具时进入 `waiting_approval` 并立即通过强插/唤醒通知主代理审批。
-     - **只开「用户审批」**：仅人类可在 UI（含顶栏窥屏小窗 `SubAgentPeekSheet` 内置的快捷批准/拒绝卡片或子代理完整对话页）点击审批，等待人类审批期间不发送中断通知打扰主代理，待人类审批后子代理继续跑完再通知主代理。
+     - **只开「主代理审批」**：人类在 UI（含子代理完整页、聊天页顶栏胶囊与窥屏小窗）无需弹窗确认，子代理触发工具时进入 `waiting_approval` 并立即通过强插/唤醒通知主代理审批。
+     - **只开「用户审批」**：由人类在 UI（含顶栏窥屏小窗 `SubAgentPeekSheet` 内置的快捷批准/拒绝卡片或子代理完整对话页）点击审批，等待人类审批期间不发送中断通知打扰主代理，待人类审批后子代理继续跑完再通知主代理。
      - **「用户审批」+「主代理审批」双开**：双方均可审批，内置幂等防冲突保护。
 2. **新增主代理审批工具 `conversation_approve`（幂等防冲突）与全中断态通知机制（`ConversationTools.kt` / `ChatService.kt` / `ChatMessageContextCheckpoint.kt` / `BuiltinToolUIs.kt`）**：
    - **新增 `conversation_approve` 工具**：允许主代理对处于 `waiting_approval` 的子代理工具执行批准或拒绝并自动恢复子代理运行；若双开模式下人类用户已在 UI 抢先点击批准，主代理调用时返回 `status = "already_handled"` 幂等成功结果而不报错。
@@ -310,8 +310,10 @@
      - **`interrupted_by_user`（被人类用户手动停止中断）**：区分主代理主动调用 `conversation_stop` 与人类用户在 UI 点击「停止」；人类手动停止时不再静默丢弃监听，而是携带停止前已产出的半截回复与工具轨迹通知主代理。
      - **`failed`（API / 网络异常中断）**：修复 `sendQueuedMessage` 覆盖真实异常的问题，透传真实报错原因与报错前步骤并以 `status = "failed"` 通知主代理。
    - **折叠通知条 UI 状态自适应**：`ChatMessageSubAgentNotification` 根据通知状态自动切换标题与配色（`子代理请求工具审批` / `子代理后台任务已中断/异常` / `子代理后台任务已完成`）。
-3. **Claude 与 Gemini Provider 相邻 `user` 消息自动合并（`ClaudeProvider.kt` / `GoogleProvider.kt`）**：
-   - 在 UI 与数据库层保持每条 `UIMessage(role = MessageRole.USER)`（含强插的子代理折叠通知条）为独立节点；在构造发往 Claude / Gemini API 的请求数组时，自动合并相邻同角色（如 `tool_result` / `functionResponse` 后紧跟 Steer 注入的子代理通知或连续两条用户消息）的内容块，严守 API 角色交替规范。
+3. **Claude 与 Gemini Provider 相邻 `user` 消息合并策略区分（`ClaudeProvider.kt` / `GoogleProvider.kt`）**：
+   - 在 UI 与数据库层保持每条 `UIMessage(role = MessageRole.USER)`（含强插的子代理折叠通知条）为独立节点；
+   - **Claude (`ClaudeProvider.kt`)**：在构造发往 Anthropic API 的请求数组时，自动合并所有相邻同角色（含 `tool_result` 后紧跟 Steer 注入的子代理通知或用户消息）的内容块，严守 Anthropic 角色交替规范；
+   - **Gemini (`GoogleProvider.kt`)**：仅合并相邻的纯文本/媒体普通 `user` 消息，**严禁将包含 `functionResponse` 的工具返回块与普通 `user` 文本/媒体块合并进同一个 `Content`**（确保工具返回信封与普通用户消息回合严格分离）。
 
 ### 2026-10-23 迭代更新（全链路静态审计加固与零开销性能优化）
 1. **修复子代理待审批期间空闲回收后审批覆盖空会话 & 双轨审批并发锁保护（`ChatService.kt` / `ConversationSession.kt`）**：
@@ -343,7 +345,8 @@
      3. **防线 C（瞬移生命周期清理）**：在 `snapToItemIndexInternal$foundation` / `snapToItemInternal$foundation` 因位置变化调用 `itemAnimator.reset()` 时，同步调用 `_lazyLayoutScrollDeltaBetweenPasses.stop$foundation()` 清理瞬移前残留的两阶段滚动差值动画。
 
 ### 2026-10-25 迭代更新（v1.1.0）
-1. **渠道模型多选批量删除（`SettingProviderDetailPage.kt` / `ItemActionMenu.kt` / `ReorderableDrag.kt`）**：
+1. **更新渠道编辑能力 & 渠道模型多选批量删除（`SettingProviderDetailPage.kt` / `SettingProviderPage.kt` / `ProviderConfigure.kt` / `ItemActionMenu.kt` / `ReorderableDrag.kt`）**：
+   - **渠道编辑能力更新**：优化提供商渠道配置与列表编辑管理能力。
    - **进入方式**：在提供商详情「模型」页，**长按模型卡片右侧 `⋮`** 进入多选并默认勾选该模型（`combinedClickable` 自带长按震动）；单击 `⋮` 仍弹出原「删除」菜单。
    - **`⋮` 排除在拖拽范围外，卡片其余区域仍可长按拖拽**：`ModelCard` 外层包一层 `Box`，`OutlinedCard` 作为下层承载长按拖拽手势（`cardModifier = longPressReorderHandle(...)`），`⋮` / 复选框作为兄弟节点叠放在上层（`Alignment.CenterEnd` + `padding(end = 16.dp)`，卡片 `Row` 末尾用 48dp `Spacer` 占位）。Compose 重叠兄弟节点默认不共享指针事件（`sharePointerInputWithSiblings() = false`），因此按在 `⋮` 上时下层卡片收不到事件，不会同时触发拖拽；拖拽缩放 `draggingScale` 加在外层 `Box` 上，`⋮` 随卡片一起缩放。
    - **多选态**：`⋮` 位置替换为 `Checkbox`；点卡片或复选框切换勾选，选中卡片显示 2dp `primary` 边框；拖拽关闭（`longPressReorderHandle(enabled = !selectionMode)`）；底部 `HorizontalFloatingToolbar` 内容由 `AddModelButton`（拉取模型 + 添加新模型）整体切换为 `✕ | 已选 N 个 | 全选/取消全选 | 🗑 删除`；系统返回键退出多选（`BackHandler`）。
@@ -354,6 +357,28 @@
 2. **版本号改为 `1.1.0`（`app/build.gradle.kts`）**：
    - 版本号由原跟随上游的 `2.5.6-rikkanon` 改为独立版本号 `1.1.0`（因此数字比旧版小，可直接覆盖安装旧版）。
    - 安装包文件名改为带版本号的 `Rikkanon_v1.1.0_Release_*.apk` / `Rikkanon_v1.1.0_Debug_*.apk`。
+3. **同步引入上游 RikkaHub (`3.1.1`) 优秀更新并完成与二开模块桥接适配（感谢上游原作者 [re-ovo](https://github.com/re-ovo)）**：
+   - **上游 SSH 远程工作区 + `:terminal` 模块底层升级（上游 commit `2b633370`）**：
+     - 同步引入上游新增的 **「SSH 远程工作区」**（基于 JSch，支持密码/私钥认证、主机指纹首次确认、Android Keystore 加密存储凭证、5 分钟空闲自动断连与按需重连）以及重构后的 `:terminal` 源码模块（`TerminalTransport` -> 本地 `LocalPtyTransport` / 远程 `SshTerminalTransport`，本地终端关闭标签页时自动按 `/proc` 3 轮扫描 `SIGKILL` 清理会话内孤儿进程，修复启动期间粘贴超过 4KB 主线程阻塞）。
+     - **本项目二开桥接适配**：在 `LocalPtyTransport` / `TerminalSession` 中暴露 `getPid()`、`getPtyFd()`、`isTransportStarted()`，使本项目二开的 `workspace_terminal` 持久化多终端、O(1) 进程树检测以及聊天页顶栏「工作区终端实时窥屏小窗 (`WorkspaceTerminalsPeekSheet`)」同时兼容本地 PRoot 沙箱与上游远程 SSH 工作区；本地工作区继续保留 6 项运行环境兼容补丁；数据库 `AppDatabase` 配置 `version = 30 -> 31` `AutoMigration`。
+   - **上游后台生成悬浮窗（上游 commit `f048bed6` + `5dd7b764` + `2b4694ba`）**：
+     - 同步引入上游在「设置 -> 通知设置」新增的「后台生成时显示悬浮窗」功能，开启并授权后切后台可实时查看回复/思考进度、审批工具调用、停止生成或发送消息。
+     - **本项目二开桥接适配**：替换千早爱音动画悬浮球图标、打通 Steer 免暂停插话，并在 `ChatFloatingTracker` 中自动过滤掉 `parentConversationId != null` 的后台子代理会话，避免子代理后台运行时抢占主对话悬浮窗。
+   - **上游 APK 体积大幅瘦身方案（Release ARM64 从 69MB 降至 21MB，缩减 70%）**：
+     - 同步引入上游的全套体积缩减方案：纯 Kotlin PDF 文本提取器替换 `libmupdf_java.so`（`815e9c20`）；`CameraX + zxing`（`QRCodeScannerDialog`）替换 Google ML Kit 扫码并适配 2.5.6 提供商页（`d8ba9cf6`）；Compose `ImageCropDialog` 替换 `uCrop`（`2a0a831e`）；全文搜索移除 14MB `jieba` 词典改用无结巴 `libsimple.so` + 单字 `NEAR` 查询，并保留本项目子代理 FTS 跳过与过滤逻辑（`80845dd9` + `2b522f99` + `90e48420`）；`web-ui` 静态资源换用 `highlight.js` + `woff2` 及自实现 HS256 JWT（`dbccc68c`）；清理未使用 banner 图、排除 BouncyCastle Picnic 表、精简窗口主题与 JLatexMath R8 keep 规则并开启 Release R8 代码缩减（`97cbb599` + `26454cc4` + `f267e847`）。
+     - **音效加载与设置字段加固**：在 `SoundEffectPlayer.kt` 增加 `runCatching` 防护，并在 `SettingsFields.kt` 补全 `COMPRESS_MODEL`、`COMPRESS_PROMPT`、`ENABLE_SECRET_KEY_ALIAS`、`SECRET_KEYS` 持久化映射。
+   - **上游工具调用耗时显示（上游 commit `8bb488e3`）**：
+     - 同步引入上游在 `UIMessagePart.Tool` 记录 `startedAt` / `finishedAt` 的机制，并接入本项目的 `GenerationLoop.kt` 同轮并发工具执行流与 `ChatMessageTools.kt`，执行中实时计时，完成后展示总耗时。
+   - **上游模型能力识别升级与多项实用增强 / Bug 修复**：
+     - 同步引入上游的模型匹配跳过 `8b`/`a3b`/`32k` 等参数量后缀及内置 `models.dev` 模型能力目录（`9dcb4fa4` + `41ce12f6`）；
+     - 同步引入上游新增的「记忆整理模型」及独立推理强度设置（`72d41917`）；
+     - 同步引入上游的聊天 Markdown 图片直接解析渲染 `/workspace` 等工作区文件（`45e9f8db`）；
+     - 同步引入上游的压缩上下文对话框「保留最近消息数」步进器（`71dd98f8`）、思考内容正文字号跟随聊天字体缩放（`43d9e30e`）、输入框图片左右滑动预览与画板涂鸦（`bc4a6f47` + `183a7da7` + `96a9bed4`）、Tavily 搜索支持关闭生成答案及搜索 query 描述优化（`fcb4bfe4` + `893e83f8`）；
+     - 同步引入上游针对 LaTeX 公式内 `<` 截断与 `\\[4pt]` 行距（`eb530b0f` + `c91d2146`）、超 8192px 长代码块下半部点击/滚动无响应（`9b458a67`）、收藏模型拖动边缘滚动抖动（`395a0ee0`）、同一帧连按返回键闪退（`4af51062`）、停止生成后发消息卡在队列（`281c9525`）、TTS 朗读 HTML 标签处理（`db498228`）以及目录名与 `name` 不一致的技能删除（`2aafd708`）等多项修复。
+4. **修复 Google Gemini 工具返回 `functionResponse` 与 Steer 用户文本混装合并问题（`GoogleProvider.kt` / `GoogleRequestMessageTest.kt`）**：
+   - **现象与根因**：在工具执行期间通过 Steer 中途插话或注入子代理通知时，`GoogleProvider.buildContents` 此前与 `ClaudeProvider` 一样无条件合并了相邻的 `"role": "user"` 节点，导致同一个 `user` `Content` 的 `parts` 中同时混装了 `functionResponse` 与普通 `text`。而在 Gemini `generateContent` 协议中，含 `functionResponse` 的 `user` 节点属于工具返回信封（Tool-Response Envelope），不能与普通用户 `text` 混装在同一回合节点中。
+   - **修复方案**：在 `GoogleProvider.buildContents` 中检查 `prevParts` 与 `curParts` 是否包含 `functionResponse`（`prevHasFunctionResponse == curHasFunctionResponse`），严格保持含 `functionResponse` 的工具返回 `user` 块与普通 `text`/媒体 `user` 块独立成条，仅合并连续的纯普通用户消息。
+   - **全协议核查**：OpenAI Chat Completions（`role: "tool"` vs `role: "user"`）、OpenAI Responses（`type: "function_call_output"` vs `role: "user"`）、Google Interactions（`type: "function_result"` vs `type: "user_input"`）天然隔离无合并；仅 Anthropic Claude（`ClaudeProvider.kt`）保留 `[tool_result, text]` 同 `user` 节点合并以满足其严格的 `user/assistant` 角色交替规范。
 
 ---
 

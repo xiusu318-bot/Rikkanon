@@ -111,6 +111,8 @@ class SettingsStore internal constructor(
         val SELECT_MODEL = stringPreferencesKey("chat_model")
         val FAST_MODEL = stringPreferencesKey("fast_model")
         val FAST_MODEL_REASONING_LEVEL = stringPreferencesKey("fast_model_reasoning_level")
+        val MEMORY_MODEL = stringPreferencesKey("memory_model")
+        val MEMORY_MODEL_REASONING_LEVEL = stringPreferencesKey("memory_model_reasoning_level")
         val TRANSLATE_MODEL = stringPreferencesKey("translate_model")
         val ENABLE_SUGGESTION = booleanPreferencesKey("enable_suggestion")
         val IMAGE_GENERATION_MODEL = stringPreferencesKey("image_generation_model")
@@ -171,6 +173,8 @@ class SettingsStore internal constructor(
         val MODE_INJECTIONS = stringPreferencesKey("mode_injections")
         val LOREBOOKS = stringPreferencesKey("lorebooks")
         val QUICK_MESSAGES = stringPreferencesKey("quick_messages")
+        val ENABLE_SECRET_KEY_ALIAS = booleanPreferencesKey("enable_secret_key_alias")
+        val SECRET_KEYS = stringPreferencesKey("secret_keys")
 
         // 备份提醒
         val BACKUP_REMINDER_CONFIG = stringPreferencesKey("backup_reminder_config")

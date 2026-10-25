@@ -7,8 +7,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ContainedLoadingIndicator
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
@@ -26,10 +29,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
+import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Add01
+import me.rerere.hugeicons.stroke.Remove01
 import me.rerere.rikkahub.R
-import me.rerere.ui.components.OutlinedNumberInput
 
 @Composable
 fun CompressContextDialog(
@@ -103,13 +109,34 @@ fun CompressContextDialog(
                         }
                     }
 
-                    // Keep recent messages input
-                    OutlinedNumberInput(
-                        value = keepRecentMessages,
-                        onValueChange = { keepRecentMessages = it },
-                        label = stringResource(R.string.chat_page_compress_keep_recent),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    // Keep recent messages stepper
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = stringResource(R.string.chat_page_compress_keep_recent),
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            FilledTonalIconButton(
+                                onClick = { keepRecentMessages-- },
+                                enabled = keepRecentMessages > 0,
+                            ) {
+                                Icon(HugeIcons.Remove01, contentDescription = "Decrease")
+                            }
+                            Text(
+                                text = keepRecentMessages.toString(),
+                                style = MaterialTheme.typography.titleMediumEmphasized,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.widthIn(min = 40.dp),
+                            )
+                            FilledTonalIconButton(onClick = { keepRecentMessages++ }) {
+                                Icon(HugeIcons.Add01, contentDescription = "Increase")
+                            }
+                        }
+                    }
 
                     // Additional context input
                     OutlinedTextField(

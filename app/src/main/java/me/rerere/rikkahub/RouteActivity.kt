@@ -102,6 +102,7 @@ import me.rerere.rikkahub.ui.pages.extensions.skills.SkillsPage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspacePage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceDetailPage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceFileEditorPage
+import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceSshEditorPage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalPage
 import me.rerere.workspace.WorkspaceStorageArea
 import me.rerere.rikkahub.ui.pages.favorite.FavoritePage
@@ -147,6 +148,14 @@ import kotlin.uuid.Uuid
 private const val TAG = "RouteActivity"
 private const val ACTION_TRANSLATE = "me.rerere.rikkahub.action.TRANSLATE"
 private const val ACTION_MEDIA_CREATION = "me.rerere.rikkahub.action.MEDIA_CREATION"
+private const val EXTRA_CONVERSATION_ID = "conversationId"
+
+/** 打开指定会话的聊天页 */
+fun conversationIntent(context: android.content.Context, conversationId: String): Intent =
+    Intent(context, RouteActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        putExtra(EXTRA_CONVERSATION_ID, conversationId)
+    }
 
 class RouteActivity : ComponentActivity() {
     private val okHttpClient by inject<OkHttpClient>()
@@ -324,7 +333,8 @@ class RouteActivity : ComponentActivity() {
                             rememberViewModelStoreNavEntryDecorator(),
                         ),
                         modifier = Modifier.fillMaxSize(),
-                        onBack = { backStack.removeLastOrNull() },
+                        // 同一帧内连续两次返回时 NavDisplay 的返回状态还没更新，会多回调一次，不加判断会把栈弹空
+                        onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
                         transitionSpec = {
                             if (backStack.size == 1) fadeIn() togetherWith fadeOut()
                             else {
@@ -559,6 +569,10 @@ class RouteActivity : ComponentActivity() {
 
                             entry<Screen.WorkspaceTerminal> { key ->
                                 WorkspaceTerminalPage(key.id)
+                            }
+
+                            entry<Screen.WorkspaceSshEditor> { key ->
+                                WorkspaceSshEditorPage(key.id)
                             }
 
                             entry<Screen.WorkspaceFileEditor> { key ->
@@ -796,6 +810,10 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data class WorkspaceTerminal(val id: String) : Screen
+
+    /** [id] 为 null 时新建 */
+    @Serializable
+    data class WorkspaceSshEditor(val id: String? = null) : Screen
 
     @Serializable
     data class WorkspaceFileEditor(val id: String, val area: String, val path: String) : Screen

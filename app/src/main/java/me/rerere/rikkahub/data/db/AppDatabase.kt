@@ -52,7 +52,7 @@ import me.rerere.rikkahub.utils.JsonInstant
         MediaCreationRecordEntity::class,
         TranslationHistoryEntity::class,
     ],
-    version = 30,
+    version = 31,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -77,6 +77,7 @@ import me.rerere.rikkahub.utils.JsonInstant
         AutoMigration(from = 26, to = 27),
         AutoMigration(from = 28, to = 29, spec = Migration_28_29::class),
         AutoMigration(from = 29, to = 30),
+        AutoMigration(from = 30, to = 31),
     ]
 )
 @TypeConverters(TokenUsageConverter::class)

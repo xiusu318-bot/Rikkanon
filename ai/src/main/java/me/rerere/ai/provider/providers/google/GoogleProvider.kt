@@ -684,7 +684,8 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     }
                 }
         }
-        // 合并相邻同角色（如 functionResponse 后紧跟 Steer 注入的子代理通知或连续两条 user 消息）
+        // 合并相邻同角色（如 Steer 注入的子代理通知后紧跟用户文本消息，或连续两条纯文本 user 消息），
+        // 但严禁将包含 functionResponse 的工具返回块与普通 user 文本/媒体块混装进同一个 Content。
         val merged = mutableListOf<JsonObject>()
         for (element in rawArray) {
             val obj = element.jsonObject
@@ -694,12 +695,16 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             if (role != null && role == prevRole) {
                 val prevParts = prev["parts"]?.jsonArray.orEmpty()
                 val curParts = obj["parts"]?.jsonArray.orEmpty()
-                merged[merged.lastIndex] = JsonObject(
-                    prev + ("parts" to JsonArray(prevParts + curParts))
-                )
-            } else {
-                merged.add(obj)
+                val prevHasFunctionResponse = prevParts.any { it.jsonObject.containsKey("functionResponse") }
+                val curHasFunctionResponse = curParts.any { it.jsonObject.containsKey("functionResponse") }
+                if (prevHasFunctionResponse == curHasFunctionResponse) {
+                    merged[merged.lastIndex] = JsonObject(
+                        prev + ("parts" to JsonArray(prevParts + curParts))
+                    )
+                    continue
+                }
             }
+            merged.add(obj)
         }
         return JsonArray(merged)
     }

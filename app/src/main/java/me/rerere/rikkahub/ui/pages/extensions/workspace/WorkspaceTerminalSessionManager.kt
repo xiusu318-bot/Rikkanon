@@ -3,6 +3,7 @@ package me.rerere.rikkahub.ui.pages.extensions.workspace
 import android.content.Context
 import android.util.Log
 import com.termux.terminal.TerminalSession
+import com.termux.terminal.TerminalTransport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.AppScope
+import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
+import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.workspace.WorkspaceManager
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -65,6 +69,8 @@ data class WorkspaceTerminalInteractResult(
 class WorkspaceTerminalSessionManager internal constructor(
     context: Context,
     private val appScope: AppScope,
+    private val workspaceManager: WorkspaceManager,
+    private val workspaceRepository: WorkspaceRepository,
 ) {
     private val appContext = context.applicationContext
     private val workspaceStates = MutableStateFlow<Map<String, WorkspaceTerminalTabsState>>(emptyMap())
@@ -80,12 +86,27 @@ class WorkspaceTerminalSessionManager internal constructor(
             .map { states -> states[root] ?: WorkspaceTerminalTabsState() }
             .distinctUntilChanged()
 
-    internal fun ensureSession(root: String, shellCompatibilityMode: Boolean) {
-        launchCreateTab(root = root, onlyIfEmpty = true, shellCompatibilityMode = shellCompatibilityMode)
+    internal fun ensureSession(workspace: WorkspaceEntity) {
+        launchCreateTab(workspace = workspace, onlyIfEmpty = true)
+    }
+
+    internal fun createTab(workspace: WorkspaceEntity) {
+        launchCreateTab(workspace = workspace, onlyIfEmpty = false)
     }
 
     internal fun createTab(root: String, shellCompatibilityMode: Boolean) {
-        launchCreateTab(root = root, onlyIfEmpty = false, shellCompatibilityMode = shellCompatibilityMode)
+        appScope.launch {
+            val workspace = workspaceRepository.getByRoot(root)
+                ?: WorkspaceEntity(
+                    id = root,
+                    name = root,
+                    root = root,
+                    createdAt = 0L,
+                    updatedAt = 0L,
+                    shellCompatibilityMode = shellCompatibilityMode,
+                )
+            launchCreateTab(workspace = workspace, onlyIfEmpty = false)
+        }
     }
 
     internal fun selectTab(root: String, tabId: Long) {
@@ -122,6 +143,51 @@ class WorkspaceTerminalSessionManager internal constructor(
         }
     }
 
+    private fun inspectTabState(tab: WorkspaceTerminalTab, previewLines: List<String>? = null): TerminalProcessTreeState {
+        if (tab.finished || !tab.session.isRunning) {
+            return TerminalProcessTreeState(
+                prootPid = 0,
+                shellPid = 0,
+                foregroundPgid = null,
+                foregroundCommand = null,
+                isAtPrompt = false,
+                processExited = true,
+            )
+        }
+        // Transport is still starting on background thread (e.g. fork or SSH handshake in progress)
+        if (!tab.session.isTransportStarted) {
+            return TerminalProcessTreeState(
+                prootPid = 0,
+                shellPid = 0,
+                foregroundPgid = null,
+                foregroundCommand = null,
+                isAtPrompt = false,
+                processExited = false,
+            )
+        }
+        val pid = runCatching { tab.session.pid }.getOrDefault(-1)
+        if (pid > 0) {
+            return inspectTerminalProcessTree(pid)
+        }
+        // Remote SSH transport (pid == -1): infer prompt readiness from screen tail & output idle state
+        val lines = previewLines ?: readTranscript(tab.session)
+            .lineSequence()
+            .map { it.trimEnd() }
+            .filter { it.isNotBlank() }
+            .toList()
+        val lastLine = lines.lastOrNull()?.trim().orEmpty()
+        val idleMs = System.currentTimeMillis() - tab.client.lastOutputAtMs.get()
+        val looksLikePrompt = lastLine.endsWith("$") || lastLine.endsWith("#") || lastLine.endsWith("%") || lastLine.endsWith(">")
+        return TerminalProcessTreeState(
+            prootPid = -1,
+            shellPid = -1,
+            foregroundPgid = null,
+            foregroundCommand = null,
+            isAtPrompt = looksLikePrompt && idleMs >= 150L,
+            processExited = false,
+        )
+    }
+
     /**
      * Returns a snapshot of all live terminal tabs currently open in [root].
      * Automatically cleans up any background tabs whose shell process has already exited.
@@ -131,19 +197,17 @@ class WorkspaceTerminalSessionManager internal constructor(
         val deadTabIds = mutableListOf<Long>()
         val result = buildList {
             state.tabs.forEach { tab ->
-                val prootPid = runCatching { tab.session.pid }.getOrDefault(0)
-                val tree = inspectTerminalProcessTree(prootPid)
+                val nonBlankLines = readTranscript(tab.session)
+                    .lineSequence()
+                    .map { it.trimEnd() }
+                    .filter { it.isNotBlank() }
+                    .toList()
+                val tree = inspectTabState(tab, nonBlankLines)
                 val exited = tab.finished || tree.processExited
                 if (exited && tab.client.terminalView == null) {
                     deadTabIds += tab.id
                 } else {
-                    val previewLines = readTranscript(tab.session)
-                        .lineSequence()
-                        .map { it.trimEnd() }
-                        .filter { it.isNotBlank() }
-                        .toList()
-                        .takeLast(6)
-                        .joinToString("\n")
+                    val previewLines = nonBlankLines.takeLast(6).joinToString("\n")
                     add(
                         WorkspaceTerminalTabInfo(
                             id = tab.id,
@@ -167,17 +231,10 @@ class WorkspaceTerminalSessionManager internal constructor(
     }
 
     /**
-     * Interacts with a persistent PTY terminal session in [root] by unique [tabId].
-     *
-     * - If [createNew] is true, opens a new PTY terminal tab (supports multiple concurrent terminals).
-     * - If [killAll] is true, closes and terminates all terminal tabs in this workspace.
-     * - If [kill] is true, closes and terminates the target terminal tab.
-     * - If the command sent via [input] causes the shell itself to exit (e.g. `exit`, `logout`, `\u0004`),
-     *   the terminal tab automatically closes itself and is removed from the workspace pool.
+     * Interacts with a persistent PTY terminal session in [workspace] by unique [tabId].
      */
     suspend fun interact(
-        root: String,
-        shellCompatibilityMode: Boolean,
+        workspace: WorkspaceEntity,
         tabId: Long? = null,
         title: String? = null,
         input: String? = null,
@@ -187,6 +244,7 @@ class WorkspaceTerminalSessionManager internal constructor(
         kill: Boolean = false,
         killAll: Boolean = false,
     ): WorkspaceTerminalInteractResult {
+        val root = workspace.root
         if (killAll) {
             val existingTabs = currentState(root).tabs
             withContext(Dispatchers.Main.immediate) {
@@ -236,8 +294,7 @@ class WorkspaceTerminalSessionManager internal constructor(
         }
 
         val targetTab = resolveOrCreateTargetTab(
-            root = root,
-            shellCompatibilityMode = shellCompatibilityMode,
+            workspace = workspace,
             tabId = tabId,
             createNew = createNew,
             initialTitle = title,
@@ -287,8 +344,7 @@ class WorkspaceTerminalSessionManager internal constructor(
                 break
             }
 
-            val prootPid = runCatching { latestTab.session.pid }.getOrDefault(0)
-            val tree = inspectTerminalProcessTree(prootPid)
+            val tree = inspectTabState(latestTab)
             if (tree.processExited) {
                 detectedExit = true
                 break
@@ -324,9 +380,9 @@ class WorkspaceTerminalSessionManager internal constructor(
         tabCursors[finalTab.id] = afterTranscript.length
         tabTailAnchors[finalTab.id] = extractTailAnchor(afterTranscript, afterTranscript.length)
         val snapshot = afterTranscript.lineSequence().toList().takeLast(DEFAULT_TERMINAL_ROWS).joinToString("\n").trimEnd()
-        val prootPid = runCatching { finalTab.session.pid }.getOrDefault(0)
-        val finalTree = inspectTerminalProcessTree(prootPid)
-        val hasExited = detectedExit || finalTab.finished || finalTree.processExited || (isExitCommand && finalTree.isAtPrompt && finalTree.shellPid == prootPid)
+        val finalTree = inspectTabState(finalTab)
+        val hasExited = detectedExit || finalTab.finished || finalTree.processExited ||
+            (isExitCommand && finalTree.isAtPrompt && finalTree.prootPid > 0 && finalTree.shellPid == finalTree.prootPid)
 
         // 当终端内顶层 Shell 执行了 exit / Ctrl+D 退出时，自动关闭并移除该终端标签页
         if (hasExited) {
@@ -360,24 +416,22 @@ class WorkspaceTerminalSessionManager internal constructor(
     }
 
     private suspend fun resolveOrCreateTargetTab(
-        root: String,
-        shellCompatibilityMode: Boolean,
+        workspace: WorkspaceEntity,
         tabId: Long?,
         createNew: Boolean,
         initialTitle: String? = null,
     ): WorkspaceTerminalTab = creationMutex.withLock {
+        val root = workspace.root
         if (!createNew) {
             val state = currentState(root)
             if (tabId != null) {
                 val matched = state.tabs.firstOrNull { it.id == tabId }
                 if (matched != null) {
-                    val prootPid = runCatching { matched.session.pid }.getOrDefault(0)
-                    val exited = matched.finished || inspectTerminalProcessTree(prootPid).processExited
+                    val exited = matched.finished || inspectTabState(matched).processExited
                     if (!exited) {
                         selectTab(root, matched.id)
                         return@withLock matched
                     } else {
-                        // Target tab was already dead; clean it up before creating/resolving
                         withContext(Dispatchers.Main.immediate) {
                             closeTab(root, matched.id)
                         }
@@ -387,14 +441,12 @@ class WorkspaceTerminalSessionManager internal constructor(
                 }
             } else {
                 val aliveSelected = state.tabs.firstOrNull { tab ->
-                    tab.id == state.selectedTabId && !tab.finished &&
-                        !inspectTerminalProcessTree(runCatching { tab.session.pid }.getOrDefault(0)).processExited
+                    tab.id == state.selectedTabId && !tab.finished && !inspectTabState(tab).processExited
                 }
                 if (aliveSelected != null) return@withLock aliveSelected
 
                 val aliveLast = state.tabs.lastOrNull { tab ->
-                    !tab.finished &&
-                        !inspectTerminalProcessTree(runCatching { tab.session.pid }.getOrDefault(0)).processExited
+                    !tab.finished && !inspectTabState(tab).processExited
                 }
                 if (aliveLast != null) {
                     selectTab(root, aliveLast.id)
@@ -404,17 +456,21 @@ class WorkspaceTerminalSessionManager internal constructor(
         }
 
         val created = createTabNow(
-            root = root,
+            workspace = workspace,
             onlyIfEmpty = false,
-            shellCompatibilityMode = shellCompatibilityMode,
             initialTitle = initialTitle,
-        ) ?: error("Failed to create terminal session for workspace $root (Rootfs may not be installed)")
+        ) ?: error("Failed to create terminal session for workspace $root")
 
-        // Wait briefly for initial shell prompt to render on newly created tab
+        // Wait for background TermSessionRunner to start transport (local fork or SSH handshake) and render initial prompt
         val start = System.currentTimeMillis()
-        while (System.currentTimeMillis() - start < 600L) {
+        val maxStartupWait = if (workspace.isSsh()) 10_000L else 1_000L
+        while (System.currentTimeMillis() - start < maxStartupWait) {
             delay(50)
-            if (created.client.lastOutputAtMs.get() > start && System.currentTimeMillis() - created.client.lastOutputAtMs.get() >= 100L) {
+            if (created.finished || !created.session.isRunning) break
+            if (created.session.isTransportStarted &&
+                created.client.lastOutputAtMs.get() > start &&
+                System.currentTimeMillis() - created.client.lastOutputAtMs.get() >= 100L
+            ) {
                 break
             }
         }
@@ -456,14 +512,12 @@ class WorkspaceTerminalSessionManager internal constructor(
         if (cursorOffset <= 0 || savedAnchor.isEmpty()) {
             return if (cursorOffset in 0..after.length) after.substring(cursorOffset).trimEnd() else after.trimEnd()
         }
-        // O(1) fast path: scrollback did not evict lines, so savedAnchor still sits right before cursorOffset
         if (cursorOffset <= after.length &&
             cursorOffset >= savedAnchor.length &&
             after.regionMatches(cursorOffset - savedAnchor.length, savedAnchor, 0, savedAnchor.length)
         ) {
             return after.substring(cursorOffset).trimEnd()
         }
-        // Slow path (only when 2000-line scrollback buffer evicted oldest lines): locate tail anchor in after
         val directIdx = after.lastIndexOf(savedAnchor)
         if (directIdx >= 0) {
             return after.substring(directIdx + savedAnchor.length).trimStart('\r', '\n').trimEnd()
@@ -510,19 +564,21 @@ class WorkspaceTerminalSessionManager internal constructor(
             ?: return@withContext
         state.tabs.forEach { tab ->
             tabCursors.remove(tab.id)
+            tabTailAnchors.remove(tab.id)
             tab.client.terminalView = null
             tab.session.finishIfRunning()
         }
     }
 
-    private fun launchCreateTab(root: String, onlyIfEmpty: Boolean, shellCompatibilityMode: Boolean) {
+    private fun launchCreateTab(workspace: WorkspaceEntity, onlyIfEmpty: Boolean) {
+        val root = workspace.root
         if (root in creationJobs) return
 
         lateinit var job: Job
         job = appScope.launch(start = CoroutineStart.LAZY) {
             try {
                 creationMutex.withLock {
-                    createTabNow(root = root, onlyIfEmpty = onlyIfEmpty, shellCompatibilityMode = shellCompatibilityMode)
+                    createTabNow(workspace = workspace, onlyIfEmpty = onlyIfEmpty)
                 }
             } finally {
                 creationJobs.remove(root, job)
@@ -533,11 +589,11 @@ class WorkspaceTerminalSessionManager internal constructor(
     }
 
     private suspend fun createTabNow(
-        root: String,
+        workspace: WorkspaceEntity,
         onlyIfEmpty: Boolean,
-        shellCompatibilityMode: Boolean,
         initialTitle: String? = null,
     ): WorkspaceTerminalTab? = withContext(Dispatchers.Main.immediate) {
+        val root = workspace.root
         val initialState = currentState(root)
         if (onlyIfEmpty && initialState.tabs.isNotEmpty()) {
             return@withContext initialState.tabs.lastOrNull()
@@ -545,15 +601,18 @@ class WorkspaceTerminalSessionManager internal constructor(
         updateState(root) { it.copy(isCreating = true) }
 
         try {
-            val prepared = if (initialState.readiness == WorkspaceTerminalReadiness.Ready) {
+            // 不在本机 Rootfs 里运行的终端 (如远程 SSH) 无需准备, 连接在会话启动时建立
+            val prepared = if (!workspace.capabilities().rootfs ||
+                initialState.readiness == WorkspaceTerminalReadiness.Ready
+            ) {
                 true
             } else {
                 try {
                     withContext(Dispatchers.IO) {
-                        if (!workspaceRootfsReady(appContext, root)) {
+                        if (!workspaceManager.hasRootfs(root)) {
                             false
                         } else {
-                            prepareWorkspaceTerminalSession(appContext, root)
+                            workspaceManager.prepareTerminal(root, appContext.activeDnsServers())
                             true
                         }
                     }
@@ -584,10 +643,9 @@ class WorkspaceTerminalSessionManager internal constructor(
             )
             val session = runCatching {
                 createWorkspaceTerminalSession(
-                    context = appContext,
+                    transport = terminalTransport(workspace),
                     root = root,
                     client = client,
-                    shellCompatibilityMode = shellCompatibilityMode,
                 ).also { termSession ->
                     // Ensure PTY reader/writer threads and screen buffer start immediately even before a TerminalView attaches
                     if (termSession.emulator == null) {
@@ -621,6 +679,17 @@ class WorkspaceTerminalSessionManager internal constructor(
             updateState(root) { it.copy(isCreating = false) }
         }
     }
+
+    private fun terminalTransport(workspace: WorkspaceEntity): TerminalTransport =
+        if (workspace.isSsh()) {
+            val settings = workspace.sshSettings() ?: error("SSH workspace config is missing: ${workspace.id}")
+            SshTerminalTransport(address = "${settings.username}@${settings.host}:${settings.port}") { columns, rows ->
+                workspaceRepository.openSshShell(workspace, columns, rows)
+            }
+        } else {
+            workspaceManager.terminalLaunch(workspace.root, workspace.shellCompatibilityMode)?.toTransport()
+                ?: error("Interactive terminal is not supported")
+        }
 
     private fun updateCustomTitle(root: String, tabId: Long, customTitle: String?) {
         val normalized = customTitle?.trim()?.takeIf { it.isNotEmpty() } ?: return
