@@ -46,6 +46,7 @@ fun <T> ConnectedChoiceButtons(
     // 未选中按钮的底色，要和所在容器的底色拉开
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
     minHeight: Dp = 48.dp,
+    growSelected: Boolean = true,
     content: @Composable (option: T, selected: Boolean) -> Unit,
 ) {
     ConnectedButtons(
@@ -53,7 +54,7 @@ fun <T> ConnectedChoiceButtons(
         isSelected = { it == selected },
         onClick = { option, isSelected -> if (!isSelected) onSelect(option) },
         role = Role.RadioButton,
-        growSelected = true,
+        growSelected = growSelected,
         modifier = modifier.selectableGroup(),
         containerColor = containerColor,
         minHeight = minHeight,
@@ -104,10 +105,15 @@ private fun <T> ConnectedButtons(
     ) {
         options.fastForEachIndexed { index, option ->
             val selected = isSelected(option)
-            val weight by animateFloatAsState(
-                targetValue = if (selected && growSelected) 1.3f else 1f,
-                animationSpec = MaterialTheme.motionScheme.fastSpatialSpec(),
-            )
+            val weight = if (growSelected) {
+                val animated by animateFloatAsState(
+                    targetValue = if (selected) 1.3f else 1f,
+                    animationSpec = MaterialTheme.motionScheme.fastSpatialSpec(),
+                )
+                animated
+            } else {
+                1f
+            }
             ToggleButton(
                 checked = selected,
                 onCheckedChange = { onClick(option, selected) },

@@ -37,7 +37,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -61,10 +60,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -112,7 +109,6 @@ import me.rerere.rikkahub.ui.theme.ChatFontProvider
 import me.rerere.rikkahub.utils.plus
 import me.rerere.ui.components.ListSelectableItem
 import me.rerere.ui.components.Tooltip
-import kotlin.math.roundToInt
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatList"
@@ -238,9 +234,7 @@ private fun ChatListNormal(
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
-    val loadingState by rememberUpdatedState(loading)
     var isRecentScroll by remember { mutableStateOf(false) }
-    val conversationUpdated by rememberUpdatedState(conversation)
     val density = LocalDensity.current
     val activity = LocalContext.current as? me.rerere.rikkahub.RouteActivity
 
@@ -261,15 +255,6 @@ private fun ChatListNormal(
         onDispose {
             activity?.volumeKeyListeners?.remove(listener)
         }
-    }
-
-    fun List<LazyListItemInfo>.isAtBottom(): Boolean {
-        val lastItem = lastOrNull() ?: return false
-        val inputBarHeight = with(density) { innerPadding.calculateBottomPadding().toPx() }
-        val lastPos = lastItem.offset + lastItem.size
-        val inputPos = (state.layoutInfo.viewportEndOffset - inputBarHeight.roundToInt())
-        // println("lastPos = $lastPos, inputPos = $inputPos  | ${lastPos <= inputPos - 8}")
-        return lastPos <= inputPos - 8
     }
 
     // 聊天选择
@@ -311,21 +296,6 @@ private fun ChatListNormal(
         modifier = Modifier
             .fillMaxSize(),
     ) {
-        // 自动滚动到底部
-        if (settings.displaySetting.enableAutoScroll) {
-            LaunchedEffect(state) {
-                snapshotFlow { state.layoutInfo.visibleItemsInfo }.collect { visibleItemsInfo ->
-                    // println("is bottom = ${visibleItemsInfo.isAtBottom()}, scroll = ${state.isScrollInProgress}, can_scroll = ${state.canScrollForward}, loading = $loading")
-                    if (!state.isScrollInProgress && loadingState) {
-                        if (visibleItemsInfo.isAtBottom()) {
-                            state.scrollToItem(conversationUpdated.messageNodes.lastIndex + 10)
-                            // Log.i(TAG, "ChatList: scroll to ${conversationUpdated.messageNodes.lastIndex}")
-                        }
-                    }
-                }
-            }
-        }
-
         // 判断最近是否滚动
         LaunchedEffect(state.isScrollInProgress) {
             if (state.isScrollInProgress) {
@@ -426,6 +396,7 @@ private fun ChatListNormal(
                             onToolApproval = onToolApproval,
                             onToolAnswer = onToolAnswer,
                             lastMessage = index == lastMessageIndex,
+                            regexDepth = lastMessageIndex - index,
                         )
                     }
                 }

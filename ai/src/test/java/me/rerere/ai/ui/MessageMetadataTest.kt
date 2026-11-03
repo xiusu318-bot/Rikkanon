@@ -3,9 +3,11 @@ package me.rerere.ai.ui
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import me.rerere.ai.core.MessageRole
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -141,5 +143,51 @@ class MessageMetadataTest {
             metadata = DiffMetadata(diff = diff).toMetadata(),
         )
         assertEquals(diff, part.metadataAs<DiffMetadata>()?.diff)
+    }
+
+    // ===== JSON 模式块 raw_json_element =====
+
+    @Test
+    fun `rawJsonElementOrNull matches full decoding for all kinds of part metadata`() {
+        val raw = buildJsonObject { put("role", "user"); put("content", "hi") }
+        val metadataCases: List<JsonObject?> = listOf(
+            null,
+            JsonObject(emptyMap()),
+            buildJsonObject { put("signature", "sig-abc") },
+            buildJsonObject { put("thoughtSignature", "ts") },
+            RawJsonMessageMetadata(rawJson = raw).toMetadata(),
+            JsonObject(mapOf("raw_json_element" to raw, "signature" to JsonPrimitive("s"))),
+            JsonObject(mapOf("raw_json_element" to JsonNull)),
+            JsonObject(mapOf("raw_json_element" to JsonPrimitive(1))),
+        )
+        for (meta in metadataCases) {
+            for (otherMeta in metadataCases) {
+                val message = UIMessage(
+                    role = MessageRole.USER,
+                    parts = listOf(
+                        UIMessagePart.Reasoning(reasoning = "r", metadata = otherMeta),
+                        UIMessagePart.Text(text = "", metadata = meta),
+                    ),
+                )
+                // 优化前的写法：对每个 part 都完整反序列化
+                val expected = message.parts.firstNotNullOfOrNull { it.metadataAs<RawJsonMessageMetadata>()?.rawJson }
+                assertEquals("meta=$meta other=$otherMeta", expected, message.rawJsonElementOrNull())
+            }
+        }
+    }
+
+    @Test
+    fun `json mode message is valid to upload while empty plain message is not`() {
+        val raw = buildJsonObject { put("role", "user") }
+        val jsonMessage = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(UIMessagePart.Text(text = "", metadata = RawJsonMessageMetadata(rawJson = raw).toMetadata())),
+        )
+        val emptyMessage = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(UIMessagePart.Text(text = "", metadata = buildJsonObject { put("signature", "s") })),
+        )
+        assertEquals(true, jsonMessage.isValidToUpload())
+        assertFalse(emptyMessage.isValidToUpload())
     }
 }

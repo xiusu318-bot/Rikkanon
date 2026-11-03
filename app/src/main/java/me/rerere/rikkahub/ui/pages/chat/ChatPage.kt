@@ -14,9 +14,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -26,7 +28,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -47,8 +51,10 @@ import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import me.rerere.ai.core.MessageRole
 import me.rerere.rikkahub.data.model.allChildConversationIds
+import me.rerere.rikkahub.data.model.resolveLogicalSubAgentId
 import me.rerere.rikkahub.ui.theme.extendColors
 import me.rerere.ui.components.DotLoading
 import androidx.compose.runtime.Composable
@@ -340,34 +346,27 @@ private fun ChatPageContent(
         AssistantBackground(setting = setting, modifier = Modifier.hazeSource(hazeState))
         Scaffold(
             topBar = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    TopBar(
-                        settings = setting,
-                        assistant = assistant,
-                        chatModel = currentChatModel,
-                        conversation = conversation,
-                        bigScreen = bigScreen,
-                        drawerState = drawerState,
-                        previewMode = previewMode,
-                        onNewChat = {
-                            navigateToChatPage(navController)
-                        },
-                        onClickMenu = {
-                            previewMode = !previewMode
-                        },
-                        onUpdateTitle = {
-                            vm.updateTitle(it)
-                        }
-                    )
-                    SubAgentFollowerBar(
-                        conversation = conversation,
-                        assistant = assistant,
-                        settings = setting,
-                        workspaceRepository = workspaceRepository,
-                        vm = vm,
-                        navController = navController,
-                    )
-                }
+                TopBar(
+                    settings = setting,
+                    assistant = assistant,
+                    chatModel = currentChatModel,
+                    conversation = conversation,
+                    workspaceRepository = workspaceRepository,
+                    vm = vm,
+                    navController = navController,
+                    bigScreen = bigScreen,
+                    drawerState = drawerState,
+                    previewMode = previewMode,
+                    onNewChat = {
+                        navigateToChatPage(navController)
+                    },
+                    onClickMenu = {
+                        previewMode = !previewMode
+                    },
+                    onUpdateTitle = {
+                        vm.updateTitle(it)
+                    }
+                )
             },
             bottomBar = {
                 val messageQueue by vm.messageQueue.collectAsStateWithLifecycle()
@@ -609,6 +608,9 @@ private fun TopBar(
     assistant: Assistant,
     chatModel: Model?,
     conversation: Conversation,
+    workspaceRepository: WorkspaceRepository,
+    vm: ChatVM,
+    navController: Navigator,
     drawerState: DrawerState,
     bigScreen: Boolean,
     previewMode: Boolean,
@@ -670,6 +672,15 @@ private fun TopBar(
             }
         },
         actions = {
+            TopBarFollowerActions(
+                conversation = conversation,
+                assistant = assistant,
+                settings = settings,
+                workspaceRepository = workspaceRepository,
+                vm = vm,
+                navController = navController,
+            )
+
             IconButton(
                 onClick = {
                     onClickMenu()
@@ -725,15 +736,26 @@ private fun TopBar(
     }
 }
 
+private data class SubAgentItemStatus(
+    val childId: Uuid,
+    val logicalId: String?,
+    val title: String,
+    val assistantName: String,
+    val modelName: String?,
+    val isRunning: Boolean,
+    val pendingUserApprovalCount: Int,
+)
+
 /**
- * 聊天页顶栏下方的「工作区终端 & 子代理跟随栏」：
- * - 当当前对话绑定的工作区有活跃交互式 PTY 终端时，展示跟随工作区的「🖥 终端 (N)」快捷胶囊，点击一键直达终端页；
- * - 当当前对话是子代理时，展示返回主对话的快捷胶囊；
- * - 当当前对话拥有子代理（通过 `conversation_send` 创建或 Fork 继承）时，实时展示所有跟随的子代理状态胶囊，
- *   点击胶囊可弹出实时窥屏与交互小窗，或一键跳转到子代理全屏对话页。
+ * 聊天页顶栏右侧（`TopAppBar.actions`）的紧凑收起态入口与点击展开面板：
+ * - 彻底移除顶栏下方的悬浮横条，避免长标题撑满屏幕或遮挡聊天区顶部渐隐文字；
+ * - 当处于子代理对话页时，展示紧凑的 `⬅ 主对话` 胶囊按钮；
+ * - 当绑定的工作区有活跃 PTY 终端时，展示极简 `[🟢 🖥 N]` 胶囊，点击展开终端列表面板或实时窥屏小窗；
+ * - 当当前对话拥有子代理时，展示极简 `[🟢 🤖 N]` / `[⏳ 🤖 N]` / `[⚠️ 🤖 N]` 胶囊，
+ *   点击展开圆角卡片列表面板（完整展示长标题、模型信息与快捷停止/全屏/删除操作），点击任意子代理条目再进入实时窥屏小窗（`SubAgentPeekSheet`）。
  */
 @Composable
-private fun SubAgentFollowerBar(
+private fun TopBarFollowerActions(
     conversation: Conversation,
     assistant: Assistant,
     settings: Settings,
@@ -744,6 +766,8 @@ private fun SubAgentFollowerBar(
     val parentId = conversation.config?.parentConversationId
     val childIds = remember(conversation) { conversation.allChildConversationIds.toList() }
     val conversationJobs by vm.conversationJobs.collectAsStateWithLifecycle(initialValue = emptyMap())
+    var showSubAgentPanel by remember(conversation.id) { mutableStateOf(false) }
+    var showTerminalPanel by remember(conversation.id) { mutableStateOf(false) }
     var peekingChildId by remember(conversation.id) { mutableStateOf<Uuid?>(null) }
     var peekingTerminalTabId by remember(conversation.id) { mutableStateOf<Long?>(null) }
 
@@ -760,34 +784,105 @@ private fun SubAgentFollowerBar(
         }.orEmpty()
     }
 
+    val mcpServerNameToId = remember(settings.mcpServers) {
+        settings.mcpServers.associate { it.commonOptions.name to it.id }
+    }
+
+    val subAgentItems = childIds.map { childId ->
+        val childFlow = remember(childId) { vm.getSubConversationFlow(childId) }
+        val childConv by childFlow.collectAsStateWithLifecycle()
+        val isRunning = childId in conversationJobs
+        val childAssistant = remember(settings, childConv.assistantId, childConv.config) {
+            settings.getAssistantOf(childConv)
+        }
+        val childModel = remember(settings, childConv.assistantId, childConv.config) {
+            settings.getChatModelOf(childConv)
+        }
+        val pendingUserApprovalCount = remember(childConv.messageNodes, childAssistant, mcpServerNameToId) {
+            childConv.currentMessages
+                .flatMap { it.parts }
+                .filterIsInstance<UIMessagePart.Tool>()
+                .count { tool ->
+                    tool.isPending && (
+                        childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId) ||
+                            !childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                        )
+                }
+        }
+        val rawTitle = childConv.title.trim()
+        val baseTitle = when {
+            rawTitle.isBlank() || rawTitle.startsWith("Sub-", ignoreCase = true) ->
+                "子代理-${childId.toString().take(4)}"
+            else -> rawTitle
+        }
+        val logicalId = remember(conversation.config, childId) {
+            conversation.resolveLogicalSubAgentId(childId).takeIf { it.startsWith("sub_") }
+        }
+        SubAgentItemStatus(
+            childId = childId,
+            logicalId = logicalId,
+            title = baseTitle,
+            assistantName = childAssistant.name.ifBlank { "默认助手" },
+            modelName = childModel?.displayName,
+            isRunning = isRunning,
+            pendingUserApprovalCount = pendingUserApprovalCount,
+        )
+    }
+
+    LaunchedEffect(childIds.size) {
+        if (childIds.isEmpty()) {
+            showSubAgentPanel = false
+        }
+    }
+    LaunchedEffect(activeWorkspaceTabs.size) {
+        if (activeWorkspaceTabs.isEmpty()) {
+            showTerminalPanel = false
+        }
+    }
+
     if (parentId == null && childIds.isEmpty() && activeWorkspaceTabs.isEmpty()) return
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.padding(end = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (parentId != null) {
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .clickable { navigateToChatPage(navController, chatId = parentId) },
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "⬅ 主对话",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+
         if (boundWorkspace != null && activeWorkspaceTabs.isNotEmpty()) {
-            Text(
-                text = "工作区终端 (${activeWorkspaceTabs.size}):",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            activeWorkspaceTabs.forEach { tab ->
+            Box {
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.9f),
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable { peekingTerminalTabId = tab.id },
+                        .clickable { showTerminalPanel = true },
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
                         Box(
                             modifier = Modifier
@@ -795,143 +890,387 @@ private fun SubAgentFollowerBar(
                                 .clip(CircleShape)
                                 .background(MaterialTheme.extendColors.green6)
                         )
-                        val tabTitle = (tab.customTitle ?: tab.title)?.takeIf { it.isNotBlank() }
-                        val label = if (tabTitle != null) {
-                            "🖥 #${tab.id} $tabTitle"
-                        } else {
-                            "🖥 终端 #${tab.id}"
-                        }
                         Text(
-                            text = label,
+                            text = "🖥 ${activeWorkspaceTabs.size}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = showTerminalPanel,
+                    onDismissRequest = { showTerminalPanel = false },
+                    shape = RoundedCornerShape(16.dp),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier
+                        .widthIn(min = 280.dp, max = 330.dp)
+                        .heightIn(max = 420.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 14.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = "🖥 工作区终端 (${activeWorkspaceTabs.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        terminalSessionManager.createTab(
+                                            boundWorkspace.root,
+                                            boundWorkspace.shellCompatibilityMode,
+                                        )
+                                    },
+                            ) {
+                                Text(
+                                    text = "+ 新建",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        showTerminalPanel = false
+                                        navController.navigate(Screen.WorkspaceTerminal(boundWorkspace.id))
+                                    },
+                            ) {
+                                Text(
+                                    text = "全屏 ↗",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+                    activeWorkspaceTabs.forEach { tab ->
+                        val tabTitle = (tab.customTitle ?: tab.title)?.takeIf { it.isNotBlank() } ?: "终端 #${tab.number}"
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    showTerminalPanel = false
+                                    peekingTerminalTabId = tab.id
+                                },
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.extendColors.green6)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "#${tab.id} $tabTitle",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = "点击实时窥屏与发送指令",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.75f),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            terminalSessionManager.closeTab(boundWorkspace.root, tab.id)
+                                        },
+                                ) {
+                                    Text(
+                                        text = "关闭",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        if (parentId != null) {
-            val parentFlow = remember(parentId) { vm.getSubConversationFlow(parentId) }
-            val parentConv by parentFlow.collectAsStateWithLifecycle()
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.9f),
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable { navigateToChatPage(navController, chatId = parentId) },
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = "⬅ 返回主对话: ${parentConv.title.ifBlank { "主对话" }}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-
-        if (childIds.isNotEmpty()) {
-            Text(
-                text = "子代理 (${childIds.size}):",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            childIds.forEach { childId ->
-                val childFlow = remember(childId) { vm.getSubConversationFlow(childId) }
-                val childConv by childFlow.collectAsStateWithLifecycle()
-                val isRunning = childId in conversationJobs
-                val childAssistant = remember(settings, childConv.assistantId, childConv.config) {
-                    settings.getAssistantOf(childConv)
-                }
-                val childModel = remember(settings, childConv.assistantId, childConv.config) {
-                    settings.getChatModelOf(childConv)
-                }
-                val mcpServerNameToId = remember(settings.mcpServers) {
-                    settings.mcpServers.associate { it.commonOptions.name to it.id }
-                }
-                val pendingUserApprovalCount = remember(childConv.messageNodes, childAssistant, mcpServerNameToId) {
-                    childConv.currentMessages
-                        .flatMap { it.parts }
-                        .filterIsInstance<UIMessagePart.Tool>()
-                        .count { tool ->
-                            tool.isPending && (
-                                childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId) ||
-                                    !childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
-                                )
-                        }
-                }
-                val hasCustomSubAssistant = childConv.assistantId != conversation.assistantId
+        if (subAgentItems.isNotEmpty()) {
+            val runningCount = subAgentItems.count { it.isRunning }
+            val pendingApprovalSubAgents = subAgentItems.count { it.pendingUserApprovalCount > 0 }
+            Box {
                 Surface(
                     shape = RoundedCornerShape(50),
                     color = when {
-                        pendingUserApprovalCount > 0 -> MaterialTheme.colorScheme.errorContainer
-                        isRunning -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f)
-                        else -> MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f)
+                        pendingApprovalSubAgents > 0 -> MaterialTheme.colorScheme.errorContainer
+                        runningCount > 0 -> MaterialTheme.colorScheme.primaryContainer
+                        else -> MaterialTheme.colorScheme.surfaceContainerHigh
                     },
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable { peekingChildId = childId },
+                        .clickable { showSubAgentPanel = true },
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
-                        if (isRunning) {
-                            DotLoading(size = 8.dp)
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (pendingUserApprovalCount > 0) {
-                                            MaterialTheme.colorScheme.error
-                                        } else {
-                                            MaterialTheme.extendColors.green6
-                                        }
-                                    )
-                            )
-                        }
-                        val rawTitle = childConv.title.trim()
-                        val baseTitle = when {
-                            rawTitle.isBlank() || rawTitle.startsWith("Sub-", ignoreCase = true) ->
-                                "子代理-${childId.toString().take(4)}"
-                            else -> rawTitle
-                        }
-                        val badgeText = buildString {
-                            if (hasCustomSubAssistant) {
-                                val aName = childAssistant.name.ifBlank { "子代理" }
-                                append("$baseTitle · $aName")
-                            } else if (childModel != null) {
-                                append("$baseTitle (${childModel.displayName})")
-                            } else {
-                                append(baseTitle)
+                        when {
+                            pendingApprovalSubAgents > 0 -> {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.error)
+                                )
                             }
-                            if (pendingUserApprovalCount > 0) {
-                                append(" · ⚠️待审批")
+                            runningCount > 0 -> {
+                                DotLoading(size = 8.dp)
+                            }
+                            else -> {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.extendColors.green6)
+                                )
                             }
                         }
                         Text(
-                            text = badgeText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (pendingUserApprovalCount > 0) {
-                                MaterialTheme.colorScheme.onErrorContainer
+                            text = if (pendingApprovalSubAgents > 0) {
+                                "⚠️ ${subAgentItems.size}"
                             } else {
-                                MaterialTheme.colorScheme.onSurface
+                                "🤖 ${subAgentItems.size}"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                pendingApprovalSubAgents > 0 -> MaterialTheme.colorScheme.onErrorContainer
+                                runningCount > 0 -> MaterialTheme.colorScheme.onPrimaryContainer
+                                else -> MaterialTheme.colorScheme.onSurface
                             },
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = showSubAgentPanel,
+                    onDismissRequest = { showSubAgentPanel = false },
+                    shape = RoundedCornerShape(16.dp),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier
+                        .widthIn(min = 290.dp, max = 336.dp)
+                        .heightIn(max = 440.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = "🤖 子代理 (${subAgentItems.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        val summaryText = when {
+                            pendingApprovalSubAgents > 0 -> "⚠️ $pendingApprovalSubAgents 个待审批"
+                            runningCount > 0 -> "$runningCount 个运行中"
+                            else -> "点击卡片窥屏"
+                        }
+                        Text(
+                            text = summaryText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                pendingApprovalSubAgents > 0 -> MaterialTheme.colorScheme.error
+                                runningCount > 0 -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+                    subAgentItems.forEach { item ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = when {
+                                item.pendingUserApprovalCount > 0 ->
+                                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f)
+                                item.isRunning ->
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                                else ->
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    showSubAgentPanel = false
+                                    peekingChildId = item.childId
+                                },
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    if (item.isRunning) {
+                                        DotLoading(size = 8.dp)
+                                    } else {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (item.pendingUserApprovalCount > 0) {
+                                                        MaterialTheme.colorScheme.error
+                                                    } else {
+                                                        MaterialTheme.extendColors.green6
+                                                    }
+                                                )
+                                        )
+                                    }
+                                    if (item.logicalId != null) {
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = MaterialTheme.colorScheme.secondaryContainer,
+                                        ) {
+                                            Text(
+                                                text = item.logicalId,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = item.title,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                        color = if (item.pendingUserApprovalCount > 0) {
+                                            MaterialTheme.colorScheme.onErrorContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    val subMeta = buildString {
+                                        append(item.assistantName)
+                                        if (!item.modelName.isNullOrBlank()) {
+                                            append(" · ${item.modelName}")
+                                        }
+                                        if (item.pendingUserApprovalCount > 0) {
+                                            append(" · ⚠️待审批(${item.pendingUserApprovalCount})")
+                                        }
+                                    }
+                                    Text(
+                                        text = subMeta,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(end = 6.dp),
+                                    )
+
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        if (item.isRunning) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = MaterialTheme.colorScheme.errorContainer,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .clickable { vm.stopSubAgent(item.childId) },
+                                            ) {
+                                                Text(
+                                                    text = "停止",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                )
+                                            }
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = MaterialTheme.colorScheme.secondaryContainer,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable {
+                                                    showSubAgentPanel = false
+                                                    navigateToChatPage(navController, chatId = item.childId)
+                                                },
+                                        ) {
+                                            Text(
+                                                text = "↗ 全屏",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable { vm.deleteSubAgent(item.childId) },
+                                        ) {
+                                            Text(
+                                                text = "删除",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -944,6 +1283,12 @@ private fun SubAgentFollowerBar(
             settings = settings,
             vm = vm,
             onDismiss = { peekingChildId = null },
+            onBackToList = if (subAgentItems.size > 1) {
+                {
+                    peekingChildId = null
+                    showSubAgentPanel = true
+                }
+            } else null,
             onOpenFullPage = {
                 peekingChildId = null
                 navigateToChatPage(navController, chatId = targetChildId)
@@ -1201,6 +1546,7 @@ private fun SubAgentPeekSheet(
     settings: Settings,
     vm: ChatVM,
     onDismiss: () -> Unit,
+    onBackToList: (() -> Unit)? = null,
     onOpenFullPage: () -> Unit,
 ) {
     val childFlow = remember(childId) { vm.getSubConversationFlow(childId) }
@@ -1256,7 +1602,7 @@ private fun SubAgentPeekSheet(
                         text = childConv.title.trim().takeIf { it.isNotEmpty() && !it.startsWith("Sub-", ignoreCase = true) }
                             ?: "子代理-${childId.toString().take(4)}",
                         style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
@@ -1282,6 +1628,11 @@ private fun SubAgentPeekSheet(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    if (onBackToList != null) {
+                        TextButton(onClick = onBackToList) {
+                            Text("⬅ 列表")
+                        }
+                    }
                     if (isRunning) {
                         TextButton(onClick = { vm.stopSubAgent(childId) }) {
                             Text("停止", color = MaterialTheme.colorScheme.error)

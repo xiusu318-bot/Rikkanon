@@ -91,6 +91,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
+import me.rerere.rikkahub.data.model.AssistantRegexPhase
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.service.ToolEditAction
@@ -140,6 +141,8 @@ fun ChatMessage(
     assistant: Assistant? = null,
     isSubAgentConversation: Boolean = false,
     lastMessage: Boolean = false,
+    // 正则深度（对齐酒馆：0 = 最后一条消息）；null 表示不做深度限制
+    regexDepth: Int? = null,
     onFork: () -> Unit,
     onRegenerate: () -> Unit,
     onEdit: () -> Unit,
@@ -228,6 +231,7 @@ fun ChatMessage(
         ) {
             MessagePartsBlock(
                 assistant = assistant,
+                regexDepth = regexDepth,
                 isSubAgentConversation = isSubAgentConversation,
                 role = message.role,
                 parts = message.parts,
@@ -364,6 +368,7 @@ fun ChatMessage(
 @Composable
 private fun MessagePartsBlock(
     assistant: Assistant?,
+    regexDepth: Int? = null,
     isSubAgentConversation: Boolean = false,
     role: MessageRole,
     model: Model?,
@@ -434,6 +439,7 @@ private fun MessagePartsBlock(
                                         reasoning = step.reasoning,
                                         model = model,
                                         assistant = assistant,
+                                        regexDepth = regexDepth,
                                         collapsedAdaptiveWidth = isReasoningOnlyBlock,
                                     )
                                 }
@@ -483,6 +489,21 @@ private fun MessagePartsBlock(
             is MessagePartBlock.ContentBlock -> key(block.index) {
                 when (val part = block.part) {
                     is UIMessagePart.Text -> {
+                        val scope = if (role == MessageRole.USER) {
+                            AssistantAffectScope.USER
+                        } else {
+                            AssistantAffectScope.ASSISTANT
+                        }
+                        val displayContent = remember(part.text, assistant?.regexes, scope, regexDepth) {
+                            part.text.replaceRegexes(
+                                assistant = assistant,
+                                scope = scope,
+                                phase = AssistantRegexPhase.VISUAL,
+                                depth = regexDepth,
+                                // 正在流式生成的消息每个 chunk 都是新的中间文本，不写入全局结果缓存
+                                useCache = !loading,
+                            )
+                        }
                         val textContent = @Composable {
                             if (role == MessageRole.USER) {
                                 Surface(
@@ -493,11 +514,7 @@ private fun MessagePartsBlock(
                                 ) {
                                     Column(modifier = Modifier.padding(8.dp)) {
                                         MarkdownBlock(
-                                            content = part.text.replaceRegexes(
-                                                assistant = assistant,
-                                                scope = AssistantAffectScope.USER,
-                                                visual = true,
-                                            ),
+                                            content = displayContent,
                                             onClickCitation = handleClickCitation
                                         )
                                     }
@@ -511,22 +528,14 @@ private fun MessagePartsBlock(
                                     ) {
                                         Column(modifier = Modifier.padding(8.dp)) {
                                             MarkdownBlock(
-                                                content = part.text.replaceRegexes(
-                                                    assistant = assistant,
-                                                    scope = AssistantAffectScope.ASSISTANT,
-                                                    visual = true,
-                                                ),
+                                                content = displayContent,
                                                 onClickCitation = handleClickCitation,
                                             )
                                         }
                                     }
                                 } else {
                                     MarkdownBlock(
-                                        content = part.text.replaceRegexes(
-                                            assistant = assistant,
-                                            scope = AssistantAffectScope.ASSISTANT,
-                                            visual = true,
-                                        ),
+                                        content = displayContent,
                                         onClickCitation = handleClickCitation,
                                         modifier = Modifier
                                             .animateContentSize()

@@ -164,8 +164,10 @@ internal val SETTINGS_FIELDS: List<SettingsField<*, *>> = with(SettingsStore) {
         plain(WEB_SERVER_ACCESS_PASSWORD, Settings::webServerAccessPassword) { copy(webServerAccessPassword = it) },
         plain(WEB_SERVER_LOCALHOST_ONLY, Settings::webServerLocalhostOnly) { copy(webServerLocalhostOnly = it) },
 
-        // 提示词注入
+        // 提示词注入与高级提示词预设
         json(MODE_INJECTIONS, Settings::modeInjections) { copy(modeInjections = it) },
+        plain(ENABLE_ADVANCED_PROMPT, Settings::enableAdvancedPrompt) { copy(enableAdvancedPrompt = it) },
+        json(PROMPT_PRESETS, Settings::promptPresets) { copy(promptPresets = it) },
         json(LOREBOOKS, Settings::lorebooks) { copy(lorebooks = it) },
         json(QUICK_MESSAGES, Settings::quickMessages) { copy(quickMessages = it) },
         plain(ENABLE_SECRET_KEY_ALIAS, Settings::enableSecretKeyAlias) { copy(enableSecretKeyAlias = it) },

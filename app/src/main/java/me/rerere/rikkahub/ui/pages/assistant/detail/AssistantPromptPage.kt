@@ -62,6 +62,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.util.fastForEach
 import androidx.compose.ui.util.fastForEachIndexed
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -340,9 +342,11 @@ private fun AssistantPromptContent(
                     }
                     preview.onSuccess {
                         ChatFontProvider(displaySetting = settings.displaySetting) {
-                            it.fastForEach { message ->
+                            it.fastForEachIndexed { previewIndex, message ->
                                 ChatMessage(
                                     node = message.toMessageNode(),
+                                    assistant = assistant,
+                                    regexDepth = it.lastIndex - previewIndex,
                                     onFork = {},
                                     onRegenerate = {},
                                     onEdit = {},
@@ -358,111 +362,29 @@ private fun AssistantPromptContent(
             }
         }
 
-        SectionHeader(
-            title = stringResource(R.string.assistant_page_preset_messages),
-            description = stringResource(R.string.assistant_page_preset_messages_desc),
-            action = {
-                SectionAddButton(
-                    onClick = {
-                        val lastRole = assistant.presetMessages.lastOrNull()?.role ?: MessageRole.ASSISTANT
-                        val nextRole = when (lastRole) {
-                            MessageRole.USER -> MessageRole.ASSISTANT
-                            MessageRole.ASSISTANT -> MessageRole.USER
-                            else -> MessageRole.USER
-                        }
-                        onUpdate(
-                            assistant.copy(
-                                presetMessages = assistant.presetMessages + UIMessage(
-                                    role = nextRole,
-                                    parts = listOf(UIMessagePart.Text(""))
-                                )
-                            )
-                        )
-                    }
-                )
-            },
-        )
-        CardGroup {
-            assistant.presetMessages.fastForEachIndexed { index, presetMessage ->
-                formItem {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Select(
-                            options = listOf(MessageRole.USER, MessageRole.ASSISTANT),
-                            selectedOption = presetMessage.role,
-                            onOptionSelected = { role ->
-                                onUpdate(
-                                    assistant.copy(
-                                        presetMessages = assistant.presetMessages.mapIndexed { i, msg ->
-                                            if (i == index) {
-                                                msg.copy(role = role)
-                                            } else {
-                                                msg
-                                            }
-                                        }
-                                    )
-                                )
-                            },
-                            modifier = Modifier.width(180.dp)
-                        )
-                        Spacer(modifier = Modifier.weight(1f))
-                        IconButton(
-                            onClick = {
-                                onUpdate(
-                                    assistant.copy(
-                                        presetMessages = assistant.presetMessages.filterIndexed { i, _ ->
-                                            i != index
-                                        }
-                                    )
-                                )
-                            }
-                        ) {
-                            Icon(HugeIcons.Cancel01, stringResource(R.string.delete))
-                        }
-                    }
-                    OutlinedTextField(
-                        value = presetMessage.toText(),
-                        onValueChange = { text ->
-                            onUpdate(
-                                assistant.copy(
-                                    presetMessages = assistant.presetMessages.mapIndexed { i, msg ->
-                                        if (i == index) {
-                                            msg.copy(parts = listOf(UIMessagePart.Text(text)))
-                                        } else {
-                                            msg
-                                        }
-                                    }
-                                )
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 6
-                    )
-                }
-            }
-        }
-
+        var expandedIds by remember { mutableStateOf(emptySet<Uuid>()) }
         SectionHeader(
             title = stringResource(R.string.assistant_page_regex_title),
             description = stringResource(R.string.assistant_page_regex_desc),
             action = {
                 SectionAddButton(
                     onClick = {
+                        val newRegex = AssistantRegex(
+                            id = Uuid.random(),
+                            affectingScope = setOf(AssistantAffectScope.ASSISTANT),
+                            visualOnly = true,
+                            requestOnly = true,
+                        )
+                        expandedIds = expandedIds + newRegex.id
                         onUpdate(
                             assistant.copy(
-                                regexes = assistant.regexes + AssistantRegex(
-                                    id = Uuid.random()
-                                )
+                                regexes = assistant.regexes + newRegex
                             )
                         )
                     }
                 )
             },
         )
-        var expandedIds by remember { mutableStateOf(emptySet<Uuid>()) }
         ReorderableColumn(
             list = assistant.regexes,
             onSettle = { fromIndex, toIndex ->
@@ -607,7 +529,7 @@ private fun AssistantRegexCard(
                                 assistant.copy(
                                     regexes = assistant.regexes.mapIndexed { i, reg ->
                                         if (i == index) {
-                                            reg.copy(findRegex = findRegex.trim())
+                                            reg.copy(findRegex = findRegex)
                                         } else {
                                             reg
                                         }
@@ -617,7 +539,7 @@ private fun AssistantRegexCard(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text(stringResource(R.string.assistant_page_regex_find_regex)) },
-                        placeholder = { Text("e.g., \\b\\w+@\\w+\\.\\w+\\b") },
+                        placeholder = { Text("e.g., /<status>[\\s\\S]*?<\\/status>/gi") },
                     )
 
                     OutlinedTextField(
@@ -637,7 +559,7 @@ private fun AssistantRegexCard(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text(stringResource(R.string.assistant_page_regex_replace_string)) },
-                        placeholder = { Text("e.g., [EMAIL]") }
+                        placeholder = { Text("e.g., $1 或留空删除") }
                     )
 
                     Text(
@@ -672,7 +594,13 @@ private fun AssistantRegexCard(
                                     )
                                 },
                                 label = {
-                                    Text(scope.name.lowercase().replaceFirstChar { it.uppercase() })
+                                    Text(
+                                        when (scope) {
+                                            AssistantAffectScope.USER -> "用户"
+                                            AssistantAffectScope.ASSISTANT -> "助手"
+                                            AssistantAffectScope.LOREBOOK -> "世界书"
+                                        }
+                                    )
                                 },
                                 leadingIcon = if (selected) {
                                     {
@@ -687,12 +615,78 @@ private fun AssistantRegexCard(
                         }
                     }
 
+                    // 深度范围（对齐酒馆：0 = 最后一条消息，往上依次 +1；留空 = 无限）
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RegexDepthField(
+                            label = "最小深度",
+                            value = regex.minDepth,
+                            onValueChange = { minDepth ->
+                                onUpdate(
+                                    assistant.copy(
+                                        regexes = assistant.regexes.mapIndexed { i, reg ->
+                                            if (i == index) reg.copy(minDepth = minDepth) else reg
+                                        }
+                                    )
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        RegexDepthField(
+                            label = "最大深度",
+                            value = regex.maxDepth,
+                            onValueChange = { maxDepth ->
+                                onUpdate(
+                                    assistant.copy(
+                                        regexes = assistant.regexes.mapIndexed { i, reg ->
+                                            if (i == index) reg.copy(maxDepth = maxDepth) else reg
+                                        }
+                                    )
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Text(
+                        text = "深度：0 = 最后一条消息，往上依次 +1，留空为无限。世界书按条目的 @D 深度计算，非 @D 条目不受深度限制。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = stringResource(R.string.assistant_page_regex_visual_only),
+                            text = "仅修改发出",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = regex.requestOnly,
+                            onCheckedChange = { requestOnly ->
+                                onUpdate(
+                                    assistant.copy(
+                                        regexes = assistant.regexes.mapIndexed { i, reg ->
+                                            if (i == index) {
+                                                reg.copy(requestOnly = requestOnly)
+                                            } else {
+                                                reg
+                                            }
+                                        }
+                                    )
+                                )
+                            }
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "仅修改显示",
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f)
                         )
@@ -713,6 +707,28 @@ private fun AssistantRegexCard(
                             }
                         )
                     }
+
+                    val modeHint = when {
+                        regex.requestOnly && regex.visualOnly ->
+                            "保留原消息数据，同时修改人类显示与发出的请求体"
+                        regex.requestOnly && !regex.visualOnly ->
+                            "保留原消息数据，仅在发出请求体时替换（人类显示原文）"
+                        !regex.requestOnly && regex.visualOnly ->
+                            "保留原消息数据，仅在面向人类显示时替换（发出原文）"
+                        else ->
+                            "两个都不勾选：直接修改消息正文并写入数据库"
+                    }.let { hint ->
+                        if (AssistantAffectScope.LOREBOOK in regex.affectingScope) {
+                            "$hint（世界书不显示、不落库：勾选「仅修改发出」或两个都不勾时，在组装请求时替换条目正文）"
+                        } else {
+                            hint
+                        }
+                    }
+                    Text(
+                        text = modeHint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -731,4 +747,25 @@ private fun AssistantRegexCard(
     ) {
         Text(stringResource(R.string.common_delete_confirm_message, regex.name))
     }
+}
+
+@Composable
+private fun RegexDepthField(
+    label: String,
+    value: Int?,
+    onValueChange: (Int?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = value?.toString().orEmpty(),
+        onValueChange = { text ->
+            val digits = text.filter { it.isDigit() }.take(5)
+            onValueChange(digits.toIntOrNull())
+        },
+        modifier = modifier,
+        label = { Text(label) },
+        placeholder = { Text("无限") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+    )
 }

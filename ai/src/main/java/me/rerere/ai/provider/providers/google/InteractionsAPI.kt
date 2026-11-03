@@ -45,6 +45,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
@@ -272,7 +273,13 @@ internal class InteractionsAPI(
         messages
             .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
             .forEach { message ->
-                if (message.role == MessageRole.ASSISTANT) {
+                val rawJson = message.rawJsonElementOrNull()
+                if (rawJson != null) {
+                    when (rawJson) {
+                        is JsonArray -> rawJson.forEach { add(it) }
+                        else -> add(rawJson)
+                    }
+                } else if (message.role == MessageRole.ASSISTANT) {
                     addModelSteps(message)
                 } else {
                     addUserStep(message)

@@ -29,10 +29,13 @@ internal fun Settings.withBuiltInDefaults(): Settings {
     if (ttsProviders.none { provider -> provider.id == systemTts.id }) {
         ttsProviders.add(0, systemTts.copyProvider())
     }
+    val promptPresets = this.promptPresets.ifEmpty { DEFAULT_PROMPT_PRESETS }
+        .map { it.ensureRequiredMarkers() }
     return copy(
         providers = providers,
         assistants = assistants,
         ttsProviders = ttsProviders,
+        promptPresets = promptPresets,
     )
 }
 
@@ -40,7 +43,8 @@ internal fun Settings.withBuiltInDefaults(): Settings {
 internal fun Settings.withoutInvalidReferences(): Settings {
     val settings = this
     val validMcpServerIds = settings.mcpServers.map { it.id }.toSet()
-    val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet()
+    val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet() +
+        settings.promptPresets.map { it.id }.toSet()
     val validLorebookIds = settings.lorebooks.map { it.id }.toSet()
     val validQuickMessageIds = settings.quickMessages.map { it.id }.toSet()
     val validModelIds by lazy { settings.providers.flatMap { it.models }.mapTo(HashSet()) { it.id } }
@@ -67,7 +71,7 @@ internal fun Settings.withoutInvalidReferences(): Settings {
                 mcpServers = assistant.mcpServers.filter { serverId ->
                     serverId in validMcpServerIds
                 }.toSet(),
-                // 过滤掉不存在的模式注入 ID
+                // 过滤掉不存在的模式注入 / 提示词预设 ID
                 modeInjectionIds = assistant.modeInjectionIds.filter { id ->
                     id in validModeInjectionIds
                 }.toSet(),
@@ -88,6 +92,7 @@ internal fun Settings.withoutInvalidReferences(): Settings {
             ?: asrProviders.firstOrNull()?.id,
         favoriteModels = settings.favoriteModels.filter { it in validModelIds },
         modeInjections = settings.modeInjections.distinctBy { it.id },
+        promptPresets = settings.promptPresets.distinctBy { it.id }.map { it.ensureRequiredMarkers() },
         lorebooks = settings.lorebooks.distinctBy { it.id },
         quickMessages = settings.quickMessages.distinctBy { it.id },
     )

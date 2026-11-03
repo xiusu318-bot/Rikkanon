@@ -42,7 +42,36 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.skills.SkillMetadata
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.QuickMessage
+
+@Composable
+fun PromptPresetsContent(
+    promptPresets: List<PromptPreset>,
+    selectedIds: Set<Uuid>,
+    onToggle: (Uuid, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+    colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    onManage: (() -> Unit)? = null,
+) {
+    ExtensionList(
+        items = promptPresets,
+        modifier = modifier,
+        contentPadding = contentPadding,
+        onManage = onManage,
+    ) { preset, shapes ->
+        val enabledBlocksCount = preset.blocks.count { it.enabled }
+        ExtensionListItem(
+            title = preset.name.ifBlank { stringResource(R.string.extension_content_unnamed) },
+            description = preset.description.ifBlank { "启用块: $enabledBlocksCount / ${preset.blocks.size}" },
+            checked = selectedIds.contains(preset.id),
+            onCheckedChange = { checked -> onToggle(preset.id, checked) },
+            shapes = shapes,
+            colors = colors,
+        )
+    }
+}
 
 @Composable
 fun ModeInjectionsContent(

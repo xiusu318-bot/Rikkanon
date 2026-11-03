@@ -53,6 +53,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
@@ -673,26 +674,42 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     }
 
     private fun buildContents(messages: List<UIMessage>): JsonArray {
-        val rawArray = buildJsonArray {
-            messages
-                .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
-                .forEach { message ->
-                    if (message.role == MessageRole.ASSISTANT) {
-                        addModelMessage(message)
-                    } else {
-                        addUserMessage(message)
+        val taggedItems = mutableListOf<Pair<JsonObject, Boolean>>()
+        messages
+            .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
+            .forEach { message ->
+                val rawJson = message.rawJsonElementOrNull()
+                if (rawJson != null) {
+                    when (rawJson) {
+                        is JsonArray -> rawJson.forEach { el ->
+                            if (el is JsonObject) taggedItems.add(el to true)
+                        }
+                        is JsonObject -> taggedItems.add(rawJson to true)
+                        else -> Unit
+                    }
+                } else {
+                    val produced = buildJsonArray {
+                        if (message.role == MessageRole.ASSISTANT) {
+                            addModelMessage(message)
+                        } else {
+                            addUserMessage(message)
+                        }
+                    }
+                    produced.forEach { el ->
+                        taggedItems.add(el.jsonObject to message.isSynthetic)
                     }
                 }
-        }
-        // 合并相邻同角色（如 Steer 注入的子代理通知后紧跟用户文本消息，或连续两条纯文本 user 消息），
-        // 但严禁将包含 functionResponse 的工具返回块与普通 user 文本/媒体块混装进同一个 Content。
-        val merged = mutableListOf<JsonObject>()
-        for (element in rawArray) {
-            val obj = element.jsonObject
+            }
+        // 仅合并聊天历史记录内部（!isSynthetic）相邻的同角色消息，
+        // 预设模块（isSynthetic = true 或 JSON 模式块）由用户显式编排，保持独立元素不合并。
+        val merged = mutableListOf<Pair<JsonObject, Boolean>>()
+        for ((obj, isSynthetic) in taggedItems) {
             val role = obj["role"]?.jsonPrimitive?.contentOrNull
-            val prev = merged.lastOrNull()
+            val prevPair = merged.lastOrNull()
+            val prev = prevPair?.first
+            val prevSynthetic = prevPair?.second ?: false
             val prevRole = prev?.get("role")?.jsonPrimitive?.contentOrNull
-            if (role != null && role == prevRole) {
+            if (!isSynthetic && !prevSynthetic && role != null && role == prevRole && prev != null) {
                 val prevParts = prev["parts"]?.jsonArray.orEmpty()
                 val curParts = obj["parts"]?.jsonArray.orEmpty()
                 val prevHasFunctionResponse = prevParts.any { it.jsonObject.containsKey("functionResponse") }
@@ -700,13 +717,13 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 if (prevHasFunctionResponse == curHasFunctionResponse) {
                     merged[merged.lastIndex] = JsonObject(
                         prev + ("parts" to JsonArray(prevParts + curParts))
-                    )
+                    ) to false
                     continue
                 }
             }
-            merged.add(obj)
+            merged.add(obj to isSynthetic)
         }
-        return JsonArray(merged)
+        return JsonArray(merged.map { it.first })
     }
 
     private fun JsonArrayBuilder.addModelMessage(message: UIMessage) {

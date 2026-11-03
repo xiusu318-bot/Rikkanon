@@ -45,6 +45,7 @@ import me.rerere.hugeicons.stroke.Idea01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
+import me.rerere.rikkahub.data.model.AssistantRegexPhase
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.ui.ChainOfThoughtScope
@@ -124,6 +125,7 @@ private fun rememberReasoningState(reasoning: UIMessagePart.Reasoning): Pair<Rea
 private fun ReasoningContent(
     reasoning: UIMessagePart.Reasoning,
     assistant: Assistant?,
+    regexDepth: Int?,
     expandState: ReasoningCardState,
     scrollState: ScrollState,
     fadeHeight: Float,
@@ -172,12 +174,18 @@ private fun ReasoningContent(
             }
     ) {
         val reasoningContent = @Composable {
-            MarkdownBlock(
-                content = reasoning.reasoning.replaceRegexes(
+            val displayReasoning = remember(reasoning.reasoning, assistant?.regexes, regexDepth) {
+                reasoning.reasoning.replaceRegexes(
                     assistant = assistant,
                     scope = AssistantAffectScope.ASSISTANT,
-                    visual = true,
-                ),
+                    phase = AssistantRegexPhase.VISUAL,
+                    depth = regexDepth,
+                    // 思考过程仍在流式输出时不写入全局结果缓存
+                    useCache = !loading,
+                )
+            }
+            MarkdownBlock(
+                content = displayReasoning,
                 style = reasoningTextStyle,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -199,6 +207,7 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
     reasoning: UIMessagePart.Reasoning,
     model: Model?,
     assistant: Assistant?,
+    regexDepth: Int? = null,
     fadeHeight: Float = 64f,
     collapsedAdaptiveWidth: Boolean = false,
 ) {
@@ -249,6 +258,7 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
             ReasoningContent(
                 reasoning = reasoning,
                 assistant = assistant,
+                regexDepth = regexDepth,
                 expandState = state.expandState,
                 scrollState = state.scrollState,
                 fadeHeight = fadeHeight,

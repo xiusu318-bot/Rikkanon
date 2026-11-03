@@ -448,31 +448,45 @@ class GenerationLoop(
         conversationId: Uuid? = null,
         workspaceCwd: String? = null,
     ) {
-        val internalMessages = buildList {
-            val system = buildString {
-                val effectiveSystemPrompt =
-                    if (assistant.allowConversationSystemPrompt && !conversationSystemPrompt.isNullOrBlank()) {
-                        conversationSystemPrompt
-                    } else {
-                        assistant.systemPrompt
-                    }
-                if (effectiveSystemPrompt.isNotBlank()) {
-                    append(effectiveSystemPrompt)
-                }
-
-                // 记忆
-                if (assistant.enableMemory) {
-                    appendLine()
-                    append(buildMemoryPrompt(memories, autoConsolidate = assistant.enableAutoMemoryConsolidation))
-                }
-                // 工具prompt
-                tools.forEach { tool ->
-                    appendLine()
-                    append(tool.systemPrompt(model, messages))
-                }
+        val effectiveSystemPrompt =
+            if (assistant.allowConversationSystemPrompt && !conversationSystemPrompt.isNullOrBlank()) {
+                conversationSystemPrompt
+            } else {
+                assistant.systemPrompt
             }
-            if (system.isNotBlank()) {
-                add(UIMessage.system(prompt = system).copy(isSynthetic = true))
+        val memoryPromptText = if (assistant.enableMemory) {
+            buildMemoryPrompt(memories, autoConsolidate = assistant.enableAutoMemoryConsolidation).trim()
+        } else {
+            ""
+        }
+        val toolPromptText = tools.mapNotNull { tool ->
+            tool.systemPrompt(model, messages).trim().takeIf { it.isNotEmpty() }
+        }.joinToString("\n\n")
+
+        val internalMessages = buildList {
+            if (settings.enableAdvancedPrompt) {
+                // 高级提示词模式下：Char Description 仅代表助手自身的系统提示词；
+                // 记忆与工作区/工具附加提示词分别交由独立的内置 📌 模块（记忆 / 工作区提示词）按预设位置注入
+                if (effectiveSystemPrompt.isNotBlank()) {
+                    add(UIMessage.system(prompt = effectiveSystemPrompt).copy(isSynthetic = true))
+                }
+            } else {
+                val system = buildString {
+                    if (effectiveSystemPrompt.isNotBlank()) {
+                        append(effectiveSystemPrompt)
+                    }
+                    if (memoryPromptText.isNotEmpty()) {
+                        appendLine()
+                        append(memoryPromptText)
+                    }
+                    if (toolPromptText.isNotEmpty()) {
+                        appendLine()
+                        append(toolPromptText)
+                    }
+                }
+                if (system.isNotBlank()) {
+                    add(UIMessage.system(prompt = system).copy(isSynthetic = true))
+                }
             }
             addAll(messages.limitContext(assistant.contextMessageLimit))
         }.transforms(
@@ -483,6 +497,8 @@ class GenerationLoop(
             settings = settings,
             processingStatus = processingStatus,
             workspaceCwd = workspaceCwd,
+            memoryPrompt = memoryPromptText,
+            toolSystemPrompt = toolPromptText,
         )
 
         var messages: List<UIMessage> = messages

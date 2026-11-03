@@ -21,6 +21,7 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.s3.S3Config
@@ -81,6 +82,8 @@ data class Settings(
     val asrProviders: List<ASRProviderSetting> = emptyList(),
     val selectedASRProviderId: Uuid? = null,
     val modeInjections: List<PromptInjection.ModeInjection> = DEFAULT_MODE_INJECTIONS,
+    val enableAdvancedPrompt: Boolean = true,
+    val promptPresets: List<PromptPreset> = DEFAULT_PROMPT_PRESETS,
     val lorebooks: List<Lorebook> = emptyList(),
     val quickMessages: List<QuickMessage> = emptyList(),
     val enableSecretKeyAlias: Boolean = false,
@@ -170,7 +173,7 @@ data class DisplaySetting(
     val pasteLongTextAsFile: Boolean = false,
     val pasteLongTextThreshold: Int = 1000,
     val sendOnEnter: Boolean = false,
-    val enableAutoScroll: Boolean = true,
+    val enableAutoScroll: Boolean = false,
     val enableLatexRendering: Boolean = true,
     val enableQuoteHighlight: Boolean = false,
     val enableBlurEffect: Boolean = false,

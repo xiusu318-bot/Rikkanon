@@ -56,6 +56,7 @@ import me.rerere.ai.ui.StreamChunkHandler
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.handleTextGenerationResult
 import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
@@ -553,74 +554,104 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         messages: List<UIMessage>,
         promptCaching: Boolean,
         promptCacheTtl: ClaudePromptCacheTtl
-    ) = buildJsonArray {
+    ): JsonArray {
+        val taggedItems = mutableListOf<Pair<JsonObject, Boolean>>()
         messages
             .filter { it.isValidToUpload() && it.role != MessageRole.SYSTEM }
             .forEach { message ->
-                if (message.role == MessageRole.ASSISTANT) {
-                    addAssistantMessage(message)
+                val rawJson = message.rawJsonElementOrNull()
+                if (rawJson != null) {
+                    when (rawJson) {
+                        is JsonArray -> rawJson.forEach { el ->
+                            if (el is JsonObject) taggedItems.add(el to true)
+                        }
+                        is JsonObject -> taggedItems.add(rawJson to true)
+                        else -> Unit
+                    }
                 } else {
-                    addUserMessage(message)
+                    val produced = buildJsonArray {
+                        if (message.role == MessageRole.ASSISTANT) {
+                            addAssistantMessage(message)
+                        } else {
+                            addUserMessage(message)
+                        }
+                    }
+                    produced.forEach { el ->
+                        taggedItems.add(el.jsonObject to message.isSynthetic)
+                    }
                 }
             }
-    }.let { rawArray ->
-        // 合并相邻的同角色（尤其是连续 "user"，如 tool_result 后紧跟 Steer 注入的子代理通知或连续两条用户消息），
-        // 满足 Anthropic API 严格的 user/assistant 交替要求，同时保持 tool_result 块排在最前
-        val merged = mutableListOf<JsonObject>()
-        for (element in rawArray) {
-            val obj = element.jsonObject
+
+        // 仅合并聊天历史记录内部（!isSynthetic）相邻的同角色消息，满足 Anthropic API 的交替要求；
+        // 预设模块（isSynthetic = true 或 JSON 模式块）由用户显式编排，保持独立元素不合并。
+        val merged = mutableListOf<Pair<JsonObject, Boolean>>()
+        for ((obj, isSynthetic) in taggedItems) {
             val role = obj["role"]?.jsonPrimitive?.contentOrNull
-            val prev = merged.lastOrNull()
+            val prevPair = merged.lastOrNull()
+            val prev = prevPair?.first
+            val prevSynthetic = prevPair?.second ?: false
             val prevRole = prev?.get("role")?.jsonPrimitive?.contentOrNull
-            if (role != null && role == prevRole) {
+            if (!isSynthetic && !prevSynthetic && role != null && role == prevRole && prev != null) {
                 val prevContent = prev["content"]?.jsonArray.orEmpty()
                 val curContent = obj["content"]?.jsonArray.orEmpty()
                 merged[merged.lastIndex] = JsonObject(
                     prev + ("content" to JsonArray(prevContent + curContent))
-                )
+                ) to false
             } else {
-                merged.add(obj)
+                merged.add(obj to isSynthetic)
             }
         }
-        JsonArray(merged)
-    }.let { messagesArray ->
-        if (!promptCaching) return@let messagesArray
-        insertMessagesCacheControl(messagesArray, promptCacheTtl)
+        val messagesArray = JsonArray(merged.map { it.first })
+        if (!promptCaching) return messagesArray
+        return insertMessagesCacheControl(
+            messages = messagesArray,
+            promptCacheTtl = promptCacheTtl,
+            syntheticFlags = merged.map { it.second },
+        )
     }
 
     /**
-     * 在倒数第二条非 tool_result 的 user message 的最后一个 content block 上插入 cache_control
+     * 在聊天历史记录（排除预设合成块 isSynthetic）倒数第二条非 tool_result 的 user message 的最后一个 content block 上插入 cache_control
      */
     private fun insertMessagesCacheControl(
         messages: JsonArray,
-        promptCacheTtl: ClaudePromptCacheTtl
+        promptCacheTtl: ClaudePromptCacheTtl,
+        syntheticFlags: List<Boolean> = emptyList(),
     ): JsonArray {
-        // 找出所有非 tool_result 的 user message 的索引
-        val realUserIndices = messages.mapIndexedNotNull { index, msg ->
-            val obj = msg.jsonObject
-            if (obj["role"]?.jsonPrimitive?.contentOrNull == "user") {
-                val content = obj["content"]?.jsonArray
-                val isToolResult = content?.any {
-                    it.jsonObject["type"]?.jsonPrimitive?.contentOrNull == "tool_result"
-                } == true
-                if (!isToolResult) index else null
-            } else null
+        fun findUserIndices(onlyChatHistory: Boolean): List<Int> {
+            return messages.mapIndexedNotNull { index, msg ->
+                if (onlyChatHistory && syntheticFlags.getOrNull(index) == true) {
+                    return@mapIndexedNotNull null
+                }
+                val obj = msg as? JsonObject ?: return@mapIndexedNotNull null
+                if ((obj["role"] as? JsonPrimitive)?.contentOrNull == "user") {
+                    val content = obj["content"] as? JsonArray
+                    val isToolResult = content?.any {
+                        ((it as? JsonObject)?.get("type") as? JsonPrimitive)?.contentOrNull == "tool_result"
+                    } == true
+                    if (!isToolResult) index else null
+                } else null
+            }
         }
 
-        // 取倒数第二条
-        val targetIndex = if (realUserIndices.size >= 2) {
-            realUserIndices[realUserIndices.size - 2]
-        } else return messages
+        // 优先只数真实的聊天历史消息（!isSynthetic），防止底部或 @D 的预设 user 块把缓存断点带偏导致每轮缓存失效
+        val chatHistoryUserIndices = findUserIndices(onlyChatHistory = true)
+        val targetIndex = if (chatHistoryUserIndices.size >= 2) {
+            chatHistoryUserIndices[chatHistoryUserIndices.size - 2]
+        } else {
+            val allUserIndices = findUserIndices(onlyChatHistory = false)
+            if (allUserIndices.size >= 2) allUserIndices[allUserIndices.size - 2] else return messages
+        }
 
         // 在目标 message 的最后一个 content block 上添加 cache_control
         return JsonArray(messages.mapIndexed { index, msg ->
             if (index == targetIndex) {
-                val obj = msg.jsonObject
-                val content = obj["content"]?.jsonArray ?: return@mapIndexed msg
+                val obj = msg as? JsonObject ?: return@mapIndexed msg
+                val content = obj["content"] as? JsonArray ?: return@mapIndexed msg
                 val newContent = JsonArray(content.mapIndexed { contentIndex, block ->
-                    if (contentIndex == content.lastIndex) {
+                    if (contentIndex == content.lastIndex && block is JsonObject) {
                         JsonObject(
-                            block.jsonObject + mapOf("cache_control" to cacheControlEphemeral(promptCacheTtl))
+                            block + mapOf("cache_control" to cacheControlEphemeral(promptCacheTtl))
                         )
                     } else block
                 })

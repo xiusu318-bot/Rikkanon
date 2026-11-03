@@ -169,8 +169,10 @@ class SettingsStore internal constructor(
         val WEB_SERVER_ACCESS_PASSWORD = stringPreferencesKey("web_server_access_password")
         val WEB_SERVER_LOCALHOST_ONLY = booleanPreferencesKey("web_server_localhost_only")
 
-        // 提示词注入
+        // 提示词注入与高级提示词预设
         val MODE_INJECTIONS = stringPreferencesKey("mode_injections")
+        val ENABLE_ADVANCED_PROMPT = booleanPreferencesKey("enable_advanced_prompt")
+        val PROMPT_PRESETS = stringPreferencesKey("prompt_presets")
         val LOREBOOKS = stringPreferencesKey("lorebooks")
         val QUICK_MESSAGES = stringPreferencesKey("quick_messages")
         val ENABLE_SECRET_KEY_ALIAS = booleanPreferencesKey("enable_secret_key_alias")

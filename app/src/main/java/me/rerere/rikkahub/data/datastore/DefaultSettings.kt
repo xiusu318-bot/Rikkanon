@@ -4,6 +4,8 @@ import me.rerere.rikkahub.data.ai.prompts.LEARNING_MODE_PROMPT
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.InjectionPosition
 import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.model.PromptPreset
+import me.rerere.rikkahub.data.model.defaultPromptBlocks
 import me.rerere.tts.provider.TTSProviderSetting
 import kotlin.uuid.Uuid
 
@@ -58,5 +60,17 @@ val DEFAULT_MODE_INJECTIONS = listOf(
         content = LEARNING_MODE_PROMPT,
         position = InjectionPosition.AFTER_SYSTEM_PROMPT,
         name = "Learning Mode"
+    )
+)
+
+val DEFAULT_PROMPT_PRESET_ID = Uuid.parse("10000000-0000-0000-0000-000000000000")
+
+val DEFAULT_PROMPT_PRESETS = listOf(
+    PromptPreset(
+        id = DEFAULT_PROMPT_PRESET_ID,
+        name = "默认预设",
+        description = "标准提示词组装轨道（Main Prompt / 世界书前置 / 助手系统提示词 / 记忆 / 工作区提示词 / 世界书后置 / 对话历史 / 后置指令）",
+        enabled = false,
+        blocks = defaultPromptBlocks(),
     )
 )

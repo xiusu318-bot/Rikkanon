@@ -24,7 +24,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.ui.components.ai.ExtensionEmptyState
 import me.rerere.rikkahub.ui.components.ai.LorebooksContent
-import me.rerere.rikkahub.ui.components.ai.ModeInjectionsContent
+import me.rerere.rikkahub.ui.components.ai.PromptPresetsContent
 import me.rerere.rikkahub.ui.components.ai.QuickMessagesContent
 import me.rerere.rikkahub.ui.components.ai.SkillsContent
 import me.rerere.rikkahub.ui.components.nav.BackButton
@@ -106,22 +106,25 @@ fun AssistantExtensionsPage(id: String) {
                     }
 
                     1 -> {
-                        if (settings.modeInjections.isEmpty()) {
+                        if (settings.promptPresets.isEmpty()) {
                             ExtensionEmptyState(
-                                message = stringResource(R.string.assistant_extensions_page_empty_mode_injections),
+                                message = "暂无提示词预设",
                                 buttonText = stringResource(R.string.assistant_extensions_page_goto_prompts),
                                 onAction = { navController.navigate(Screen.Prompts) },
                                 icon = ExtensionTab.MODE_INJECTIONS.icon,
                             )
                         } else {
-                            ModeInjectionsContent(
+                            PromptPresetsContent(
                                 contentPadding = listPadding,
                                 colors = listColors,
-                                modeInjections = settings.modeInjections,
+                                promptPresets = settings.promptPresets,
                                 selectedIds = assistant.modeInjectionIds,
-                                onToggle = { injId, checked ->
-                                    val newIds = if (checked) assistant.modeInjectionIds + injId
-                                    else assistant.modeInjectionIds - injId
+                                onToggle = { presetId, checked ->
+                                    val newIds = if (checked) {
+                                        (assistant.modeInjectionIds - settings.promptPresets.map { it.id }.toSet()) + presetId
+                                    } else {
+                                        assistant.modeInjectionIds - presetId
+                                    }
                                     vm.update(assistant.copy(modeInjectionIds = newIds))
                                 },
                                 onManage = { navController.navigate(Screen.Prompts) },

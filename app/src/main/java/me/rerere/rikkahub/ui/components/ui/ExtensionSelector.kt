@@ -28,7 +28,7 @@ import me.rerere.rikkahub.data.skills.SkillMetadata
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.ui.components.ai.ExtensionEmptyState
 import me.rerere.rikkahub.ui.components.ai.LorebooksContent
-import me.rerere.rikkahub.ui.components.ai.ModeInjectionsContent
+import me.rerere.rikkahub.ui.components.ai.PromptPresetsContent
 import me.rerere.rikkahub.ui.components.ai.QuickMessagesContent
 import me.rerere.rikkahub.ui.components.ai.SkillsContent
 import org.koin.compose.koinInject
@@ -111,13 +111,14 @@ fun ExtensionSelector(
                 }
 
                 ExtensionTab.MODE_INJECTIONS -> {
-                    if (settings.modeInjections.isNotEmpty()) {
-                        ModeInjectionsContent(
-                            modeInjections = settings.modeInjections,
+                    if (settings.promptPresets.isNotEmpty()) {
+                        PromptPresetsContent(
+                            promptPresets = settings.promptPresets,
                             selectedIds = assistant.modeInjectionIds,
                             onToggle = { id, checked ->
                                 val newIds = if (checked) {
-                                    assistant.modeInjectionIds + id
+                                    // 预设单选切换（或勾选绑定）
+                                    (assistant.modeInjectionIds - settings.promptPresets.map { it.id }.toSet()) + id
                                 } else {
                                     assistant.modeInjectionIds - id
                                 }
@@ -127,7 +128,7 @@ fun ExtensionSelector(
                         )
                     } else {
                         ExtensionEmptyState(
-                            message = stringResource(R.string.extension_selector_mode_injections_empty),
+                            message = "暂无提示词预设",
                             buttonText = stringResource(R.string.extension_selector_go_to_extensions),
                             onAction = onNavigateToPrompts,
                             icon = tab.icon,

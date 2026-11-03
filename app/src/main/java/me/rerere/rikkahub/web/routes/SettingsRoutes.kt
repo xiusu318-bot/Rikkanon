@@ -96,7 +96,8 @@ fun Route.settingsRoutes(
                 throw NotFoundException("Assistant not found")
             }
 
-            val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet()
+            val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet() +
+                settings.promptPresets.map { it.id }.toSet()
             val requestedModeInjectionIds =
                 request.modeInjectionIds.map { it.toUuid("modeInjectionIds") }.toSet()
             if (!validModeInjectionIds.containsAll(requestedModeInjectionIds)) {

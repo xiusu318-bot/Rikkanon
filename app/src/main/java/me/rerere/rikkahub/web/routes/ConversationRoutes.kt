@@ -485,7 +485,8 @@ private fun validateConversationInjectionIds(
     modeInjectionIds: List<String>,
     lorebookIds: List<String>,
 ): ConversationInjectionIds {
-    val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet()
+    val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet() +
+        settings.promptPresets.map { it.id }.toSet()
     val requestedModeInjectionIds = modeInjectionIds.map { it.toUuid("modeInjectionIds") }.toSet()
     if (!validModeInjectionIds.containsAll(requestedModeInjectionIds)) {
         throw BadRequestException("modeInjectionIds contains unknown injection id")

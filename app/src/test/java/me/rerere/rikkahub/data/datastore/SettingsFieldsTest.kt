@@ -12,6 +12,7 @@ import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.s3.S3Config
@@ -158,6 +159,8 @@ private val SAMPLE = Settings(
     asrProviders = listOf(ASRProviderSetting.OpenAIRealtime(id = id(11))),
     selectedASRProviderId = id(11),
     modeInjections = listOf(PromptInjection.ModeInjection(id = id(14), name = "mode")),
+    enableAdvancedPrompt = false,
+    promptPresets = listOf(PromptPreset(id = id(34), name = "preset")),
     lorebooks = listOf(Lorebook(id = id(12), name = "lorebook")),
     quickMessages = listOf(QuickMessage(id = id(13), title = "hi")),
     enableSecretKeyAlias = true,
@@ -220,6 +223,8 @@ private val STORED_KEYS = setOf(
     "web_server_access_password",
     "web_server_localhost_only",
     "mode_injections",
+    "enable_advanced_prompt",
+    "prompt_presets",
     "lorebooks",
     "quick_messages",
     "enable_secret_key_alias",

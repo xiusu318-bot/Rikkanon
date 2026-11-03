@@ -1,1158 +1,486 @@
 package me.rerere.rikkahub.data.ai.transformers
 
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.rawJsonElementOrNull
+import me.rerere.rikkahub.data.export.LorebookSerializer
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.InjectionPosition
-import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.Lorebook
+import me.rerere.rikkahub.data.model.LorebookGreenLightMode
+import me.rerere.rikkahub.data.model.PromptBlock
+import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.model.PromptMarkerType
+import me.rerere.rikkahub.data.model.PromptPreset
+import me.rerere.rikkahub.data.model.SelectiveLogic
+import me.rerere.rikkahub.data.model.extractContextForMatching
+import me.rerere.rikkahub.data.model.getTriggeredInjections
+import me.rerere.rikkahub.data.model.isTriggered
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.uuid.Uuid
 
 class PromptInjectionTransformerTest {
 
-    // region Helper functions
-    private fun createAssistant(
-        modeInjectionIds: Set<Uuid> = emptySet(),
-        lorebookIds: Set<Uuid> = emptySet(),
-    ) = Assistant(
-        modeInjectionIds = modeInjectionIds,
-        lorebookIds = lorebookIds,
-    )
-
-    private fun createModeInjection(
-        id: Uuid = Uuid.random(),
-        name: String = "Test Injection",
-        enabled: Boolean = true,
-        priority: Int = 0,
-        position: InjectionPosition = InjectionPosition.AFTER_SYSTEM_PROMPT,
-        content: String = "Injected content",
-        injectDepth: Int = 4,
-        role: MessageRole = MessageRole.USER
-    ) = PromptInjection.ModeInjection(
-        id = id,
-        name = name,
-        enabled = enabled,
-        priority = priority,
-        position = position,
-        content = content,
-        injectDepth = injectDepth,
-        role = role
-    )
-
-    private fun createRegexInjection(
-        id: Uuid = Uuid.random(),
-        name: String = "Test Regex",
-        enabled: Boolean = true,
-        priority: Int = 0,
-        position: InjectionPosition = InjectionPosition.AFTER_SYSTEM_PROMPT,
-        content: String = "Regex injected content",
-        injectDepth: Int = 4,
-        role: MessageRole = MessageRole.USER,
-        keywords: List<String> = listOf("trigger"),
-        useRegex: Boolean = false,
-        caseSensitive: Boolean = false,
-        scanDepth: Int = 5,
-        constantActive: Boolean = false
-    ) = PromptInjection.RegexInjection(
-        id = id,
-        name = name,
-        enabled = enabled,
-        priority = priority,
-        position = position,
-        content = content,
-        injectDepth = injectDepth,
-        role = role,
-        keywords = keywords,
-        useRegex = useRegex,
-        caseSensitive = caseSensitive,
-        scanDepth = scanDepth,
-        constantActive = constantActive
-    )
-
-    private fun createLorebook(
-        id: Uuid = Uuid.random(),
-        name: String = "Test Lorebook",
-        enabled: Boolean = true,
-        entries: List<PromptInjection.RegexInjection> = emptyList()
-    ) = Lorebook(
-        id = id,
-        name = name,
-        enabled = enabled,
-        entries = entries
-    )
-
-    private fun getMessageText(message: UIMessage): String {
-        return message.parts
-            .filterIsInstance<UIMessagePart.Text>()
-            .joinToString("") { it.text }
-    }
-
-    private fun createAssistantWithUnexecutedTool(toolCallId: String, toolName: String): UIMessage {
-        return UIMessage(
-            role = MessageRole.ASSISTANT,
-            parts = listOf(
-                UIMessagePart.Tool(
-                    toolCallId = toolCallId,
-                    toolName = toolName,
-                    input = "{}",
-                    output = emptyList()
-                )
-            )
-        )
-    }
-
-    private fun createAssistantWithExecutedTool(toolCallId: String, toolName: String): UIMessage {
-        return UIMessage(
-            role = MessageRole.ASSISTANT,
-            parts = listOf(
-                UIMessagePart.Tool(
-                    toolCallId = toolCallId,
-                    toolName = toolName,
-                    input = "{}",
-                    output = listOf(UIMessagePart.Text("result"))
-                )
-            )
-        )
-    }
-    // endregion
-
-    // region No injection tests
-    @Test
-    fun `no injections should return original messages`() {
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi there!")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(),
-            modeInjections = emptyList(),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(messages, result)
-    }
+    // ==================== isTriggered 测试 ====================
 
     @Test
-    fun `disabled mode injection should not be applied`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
+    fun `disabled injection should never trigger`() {
+        val injection = PromptInjection.RegexInjection(
             enabled = false,
-            content = "Should not appear"
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(messages, result)
-    }
-
-    @Test
-    fun `unlinked mode injection should not be applied`() {
-        val injection = createModeInjection(content = "Should not appear")
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(), // No linked injections
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(messages, result)
-    }
-    // endregion
-
-    // region AFTER_SYSTEM_PROMPT tests
-    @Test
-    fun `mode injection with AFTER_SYSTEM_PROMPT should append to system message`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.AFTER_SYSTEM_PROMPT,
-            content = "Appended content"
-        )
-
-        val messages = listOf(
-            UIMessage.system("Original system prompt"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(2, result.size)
-        assertTrue(result[0].isSynthetic)
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.startsWith("Original system prompt"))
-        assertTrue(systemText.endsWith("Appended content"))
-    }
-    // endregion
-
-    // region BEFORE_SYSTEM_PROMPT tests
-    @Test
-    fun `mode injection with BEFORE_SYSTEM_PROMPT should prepend to system message`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.BEFORE_SYSTEM_PROMPT,
-            content = "Prepended content"
-        )
-
-        val messages = listOf(
-            UIMessage.system("Original system prompt"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(2, result.size)
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.startsWith("Prepended content"))
-        assertTrue(systemText.contains("Original system prompt"))
-    }
-
-    @Test
-    fun `injection without existing system message should create new system message`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.AFTER_SYSTEM_PROMPT,
-            content = "New system content"
-        )
-
-        val messages = listOf(
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(3, result.size)
-        assertEquals(MessageRole.SYSTEM, result[0].role)
-        assertTrue(result[0].isSynthetic)
-        assertEquals("New system content", getMessageText(result[0]))
-    }
-    // endregion
-
-    // region TOP_OF_CHAT tests
-    @Test
-    fun `mode injection with TOP_OF_CHAT should insert before first user message`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.TOP_OF_CHAT,
-            content = "Top of chat content"
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(4, result.size)
-        assertEquals(MessageRole.SYSTEM, result[0].role)
-        assertEquals("System prompt", getMessageText(result[0]))
-        assertEquals(MessageRole.USER, result[1].role)
-        assertTrue(result[1].isSynthetic)
-        assertEquals("Top of chat content", getMessageText(result[1]))
-        assertEquals(MessageRole.USER, result[2].role)
-    }
-    // endregion
-
-    // region BOTTOM_OF_CHAT tests
-    @Test
-    fun `mode injection with BOTTOM_OF_CHAT should insert before last message`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.BOTTOM_OF_CHAT,
-            content = "Bottom of chat content"
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!"),
-            UIMessage.user("How are you?")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(5, result.size)
-        assertEquals(MessageRole.USER, result[3].role)
-        assertEquals("Bottom of chat content", getMessageText(result[3]))
-        assertEquals(MessageRole.USER, result[4].role)
-        assertEquals("How are you?", getMessageText(result[4]))
-    }
-    // endregion
-
-    // region AT_DEPTH tests
-    @Test
-    fun `mode injection with AT_DEPTH should insert at specified depth from end`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.AT_DEPTH,
-            injectDepth = 2,
-            content = "At depth 2 content"
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Message 1"),
-            UIMessage.assistant("Response 1"),
-            UIMessage.user("Message 2"),
-            UIMessage.assistant("Response 2")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        // depth=2 means insert before the 2nd message from the end
-        // Original: [System, User1, Asst1, User2, Asst2] (5 messages)
-        // Insert at index 5-2=3, so: [System, User1, Asst1, Injected, User2, Asst2]
-        assertEquals(6, result.size)
-        assertEquals(MessageRole.USER, result[3].role)
-        assertEquals("At depth 2 content", getMessageText(result[3]))
-        assertEquals(MessageRole.USER, result[4].role)
-        assertEquals("Message 2", getMessageText(result[4]))
-    }
-
-    @Test
-    fun `AT_DEPTH with depth 1 should insert before last message`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.AT_DEPTH,
-            injectDepth = 1,
-            content = "Before last"
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(4, result.size)
-        assertEquals("Before last", getMessageText(result[2]))
-        assertEquals("Hi!", getMessageText(result[3]))
-    }
-
-    @Test
-    fun `AT_DEPTH with depth larger than message count should insert at beginning`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.AT_DEPTH,
-            injectDepth = 100,
-            content = "Large depth content"
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(3, result.size)
-        assertEquals("Large depth content", getMessageText(result[0]))
-    }
-
-    @Test
-    fun `multiple AT_DEPTH injections with different depths should all apply`() {
-        val id1 = Uuid.random()
-        val id2 = Uuid.random()
-
-        val injections = listOf(
-            createModeInjection(
-                id = id1,
-                position = InjectionPosition.AT_DEPTH,
-                injectDepth = 1,
-                content = "Depth 1"
-            ),
-            createModeInjection(
-                id = id2,
-                position = InjectionPosition.AT_DEPTH,
-                injectDepth = 3,
-                content = "Depth 3"
-            )
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Message 1"),
-            UIMessage.assistant("Response 1"),
-            UIMessage.user("Message 2"),
-            UIMessage.assistant("Response 2")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(id1, id2)),
-            modeInjections = injections,
-            lorebooks = emptyList()
-        )
-
-        // Both should be inserted
-        assertEquals(7, result.size)
-        assertTrue(result.any { getMessageText(it).contains("Depth 1") })
-        assertTrue(result.any { getMessageText(it).contains("Depth 3") })
-    }
-
-    @Test
-    fun `multiple AT_DEPTH injections with same depth should be merged`() {
-        val id1 = Uuid.random()
-        val id2 = Uuid.random()
-
-        val injections = listOf(
-            createModeInjection(
-                id = id1,
-                position = InjectionPosition.AT_DEPTH,
-                injectDepth = 2,
-                priority = 10,
-                content = "Higher priority"
-            ),
-            createModeInjection(
-                id = id2,
-                position = InjectionPosition.AT_DEPTH,
-                injectDepth = 2,
-                priority = 5,
-                content = "Lower priority"
-            )
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(id1, id2)),
-            modeInjections = injections,
-            lorebooks = emptyList()
-        )
-
-        // Same depth injections should be merged into one message
-        assertEquals(4, result.size)
-        val injectedText = getMessageText(result[1])
-        assertTrue(injectedText.contains("Higher priority"))
-        assertTrue(injectedText.contains("Lower priority"))
-        // Higher priority should come first
-        assertTrue(injectedText.indexOf("Higher priority") < injectedText.indexOf("Lower priority"))
-    }
-    // endregion
-
-    // region Priority tests
-    @Test
-    fun `injections should be ordered by priority descending`() {
-        val id1 = Uuid.random()
-        val id2 = Uuid.random()
-        val id3 = Uuid.random()
-
-        val injections = listOf(
-            createModeInjection(id = id1, priority = 1, content = "Priority 1"),
-            createModeInjection(id = id2, priority = 3, content = "Priority 3"),
-            createModeInjection(id = id3, priority = 2, content = "Priority 2")
-        )
-
-        val messages = listOf(
-            UIMessage.system("System"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(id1, id2, id3)),
-            modeInjections = injections,
-            lorebooks = emptyList()
-        )
-
-        val systemText = getMessageText(result[0])
-        // Higher priority should come first when joining
-        assertTrue(systemText.contains("Priority 3"))
-        assertTrue(systemText.indexOf("Priority 3") < systemText.indexOf("Priority 2"))
-        assertTrue(systemText.indexOf("Priority 2") < systemText.indexOf("Priority 1"))
-    }
-    // endregion
-
-    // region Lorebook tests
-    @Test
-    fun `lorebook with keyword match should trigger injection`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("magic"),
-            content = "Magic system explanation"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Tell me about magic")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.contains("Magic system explanation"))
-    }
-
-    @Test
-    fun `lorebook without keyword match should not trigger injection`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("magic"),
-            content = "Should not appear"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Tell me about science")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        assertEquals(2, result.size)
-        val systemText = getMessageText(result[0])
-        assertEquals("System prompt", systemText)
-    }
-
-    @Test
-    fun `lorebook with constantActive should always trigger`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = emptyList(),
-            constantActive = true,
-            content = "Always active content"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Any message")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.contains("Always active content"))
-    }
-
-    @Test
-    fun `lorebook with case insensitive match should trigger`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("MAGIC"),
-            caseSensitive = false,
-            content = "Case insensitive match"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("tell me about magic")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.contains("Case insensitive match"))
-    }
-
-    @Test
-    fun `lorebook with case sensitive match should not trigger on different case`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("MAGIC"),
-            caseSensitive = true,
-            content = "Should not appear"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("tell me about magic")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        assertEquals(2, result.size)
-        val systemText = getMessageText(result[0])
-        assertEquals("System prompt", systemText)
-    }
-
-    @Test
-    fun `lorebook with regex pattern should match`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("mag.*spell"),
-            useRegex = true,
-            content = "Regex match content"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Can you explain magic and spell casting?")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.contains("Regex match content"))
-    }
-
-    @Test
-    fun `scanDepth should limit message scanning range`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("old keyword"),
-            scanDepth = 2, // 只扫描最近2条消息
-            content = "Should not appear"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Message with old keyword"), // 第1条用户消息（超出扫描范围）
-            UIMessage.assistant("Response 1"),
-            UIMessage.user("Message 2"),
-            UIMessage.assistant("Response 2"),
-            UIMessage.user("Latest message") // 最近的消息，不包含关键词
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        // 关键词在第1条用户消息中，但 scanDepth=2 只扫描最后2条
-        // 所以不应该触发注入
-        assertEquals(6, result.size)
-        val systemText = getMessageText(result[0])
-        assertEquals("System prompt", systemText)
-    }
-
-    @Test
-    fun `scanDepth should trigger when keyword is within range`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("latest"),
-            scanDepth = 2,
-            content = "Triggered content"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Old message"),
-            UIMessage.assistant("Response"),
-            UIMessage.user("This is the latest message") // 在扫描范围内
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.contains("Triggered content"))
-    }
-
-    @Test
-    fun `different entries should use their own scanDepth`() {
-        val lorebookId = Uuid.random()
-        val shallowEntry = createRegexInjection(
-            keywords = listOf("old keyword"),
-            scanDepth = 1, // 只扫描最后1条
-            content = "Shallow scan content"
-        )
-        val deepEntry = createRegexInjection(
-            keywords = listOf("old keyword"),
-            scanDepth = 10, // 扫描最后10条
-            content = "Deep scan content"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(shallowEntry, deepEntry)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Message with old keyword"), // 较早的消息
-            UIMessage.assistant("Response 1"),
-            UIMessage.user("Response 2"),
-            UIMessage.assistant("Response 3"),
-            UIMessage.user("Latest message without keyword")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        val systemText = getMessageText(result[0])
-        // shallowEntry (scanDepth=1) 不应触发，因为最后1条消息不含关键词
-        assertTrue(!systemText.contains("Shallow scan content"))
-        // deepEntry (scanDepth=10) 应该触发，因为早期消息包含关键词
-        assertTrue(systemText.contains("Deep scan content"))
-    }
-
-    @Test
-    fun `disabled world book should not trigger`() {
-        val lorebookId = Uuid.random()
-        val regexInjection = createRegexInjection(
-            keywords = listOf("magic"),
-            content = "Should not appear"
-        )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            enabled = false,
-            entries = listOf(regexInjection)
-        )
-
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Tell me about magic")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(lorebookIds = setOf(lorebookId)),
-            modeInjections = emptyList(),
-            lorebooks = listOf(lorebook)
-        )
-
-        assertEquals(2, result.size)
-        val systemText = getMessageText(result[0])
-        assertEquals("System prompt", systemText)
-    }
-    // endregion
-
-    // region Multiple injections tests
-    @Test
-    fun `multiple injections at different positions should all apply`() {
-        val id1 = Uuid.random()
-        val id2 = Uuid.random()
-        val id3 = Uuid.random()
-
-        val injections = listOf(
-            createModeInjection(
-                id = id1,
-                position = InjectionPosition.BEFORE_SYSTEM_PROMPT,
-                content = "Before"
-            ),
-            createModeInjection(
-                id = id2,
-                position = InjectionPosition.AFTER_SYSTEM_PROMPT,
-                content = "After"
-            ),
-            createModeInjection(
-                id = id3,
-                position = InjectionPosition.TOP_OF_CHAT,
-                content = "Top"
-            )
-        )
-
-        val messages = listOf(
-            UIMessage.system("System"),
-            UIMessage.user("Hello")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(id1, id2, id3)),
-            modeInjections = injections,
-            lorebooks = emptyList()
-        )
-
-        assertEquals(3, result.size)
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.startsWith("Before"))
-        assertTrue(systemText.contains("System"))
-        assertTrue(systemText.endsWith("After"))
-        assertEquals("Top", getMessageText(result[1]))
-    }
-
-    @Test
-    fun `combined mode injection and world book should both apply`() {
-        val modeId = Uuid.random()
-        val lorebookId = Uuid.random()
-
-        val modeInjection = createModeInjection(
-            id = modeId,
-            content = "Mode content"
-        )
-
-        val regexInjection = createRegexInjection(
             keywords = listOf("hello"),
-            content = "WorldBook content"
+            content = "injected"
         )
-        val lorebook = createLorebook(
-            id = lorebookId,
-            entries = listOf(regexInjection)
-        )
+        assertFalse(injection.isTriggered("hello world"))
+    }
 
+    @Test
+    fun `constantActive should always trigger when enabled unless excluded by secondary NOT filter`() {
+        val injection = PromptInjection.RegexInjection(
+            enabled = true,
+            constantActive = true,
+            keywords = emptyList(),
+            content = "always active"
+        )
+        assertTrue(injection.isTriggered(""))
+        assertTrue(injection.isTriggered("any content"))
+    }
+
+    @Test
+    fun `uploaded test_json lorebook import and trigger behavior`() {
+        val uploadedJson = """
+            {"entries":{"0":{"addMemo":true,"automationId":"","caseSensitive":null,"characterFilterExclude":false,"characterFilterNames":[],"characterFilterTags":[],"comment":"测试","constant":false,"content":"我们正在测试，能看到吗？","cooldown":0,"delay":0,"delayUntilRecursion":false,"depth":4,"disable":false,"displayIndex":0,"excludeRecursion":false,"group":"","groupOverride":false,"groupWeight":100,"key":["/.*/s"],"keysecondary":["测试"],"matchCharacterDepthPrompt":false,"matchCharacterDescription":false,"matchCharacterPersonality":false,"matchCreatorNotes":false,"matchPersonaDescription":false,"matchScenario":false,"matchWholeWords":null,"order":100,"position":0,"preventRecursion":false,"probability":100,"role":null,"scanDepth":null,"selective":true,"selectiveLogic":2,"sticky":0,"uid":0,"useGroupScoring":null,"useProbability":true,"vectorized":false,"ignoreBudget":false,"outletName":"","triggers":[],"characterFilter":{"isExclude":false,"names":[],"tags":[]}},"1":{"addMemo":true,"automationId":"","caseSensitive":null,"characterFilterExclude":false,"characterFilterNames":[],"characterFilterTags":[],"comment":"测试","constant":true,"content":"我们正在测试，能看到吗？","cooldown":0,"delay":0,"delayUntilRecursion":false,"depth":4,"disable":false,"displayIndex":0,"excludeRecursion":false,"group":"","groupOverride":false,"groupWeight":100,"key":[],"keysecondary":["测试"],"matchCharacterDepthPrompt":false,"matchCharacterDescription":false,"matchCharacterPersonality":false,"matchCreatorNotes":false,"matchPersonaDescription":false,"matchScenario":false,"matchWholeWords":null,"order":100,"position":0,"preventRecursion":false,"probability":100,"role":null,"scanDepth":null,"selective":true,"selectiveLogic":2,"sticky":0,"uid":1,"useGroupScoring":null,"useProbability":true,"vectorized":false,"ignoreBudget":false,"outletName":"","triggers":[],"characterFilter":{"isExclude":false,"names":[],"tags":[]}}}}
+        """.trimIndent()
+
+        val book = LorebookSerializer.importFromString(uploadedJson, "测试")
+        assertNotNull(book)
+        assertEquals(2, book!!.entries.size)
+
+        val entry0 = book.entries[0]
+        val entry1 = book.entries[1]
+        assertEquals(SelectiveLogic.NOT_ANY, entry0.selectiveLogic)
+        assertEquals(SelectiveLogic.NOT_ANY, entry1.selectiveLogic)
+
+        // 当上下文中不含"测试"时，/.*/s 命中且排除词未出现 -> 两个条目均触发
+        assertTrue(entry0.isTriggered("你好\n世界"))
+        assertTrue(entry1.isTriggered("你好\n世界"))
+
+        // 当上下文中包含"测试"时，NOT_ANY 排除过滤器生效 -> 两个条目均不触发
+        assertFalse(entry0.isTriggered("开始测试一下"))
+        assertFalse(entry1.isTriggered("开始测试一下"))
+    }
+
+    // ==================== Order（数字越小越靠上）与 Depth=9999 测试 ====================
+
+    @Test
+    fun `getTriggeredInjections sorts by order ascending (smaller number on top)`() {
+        val injections = listOf(
+            PromptInjection.RegexInjection(
+                name = "low_top",
+                keywords = listOf("a"),
+                priority = 200,
+                content = "low"
+            ),
+            PromptInjection.RegexInjection(
+                name = "high_top",
+                keywords = listOf("a"),
+                priority = 10,
+                content = "high"
+            ),
+            PromptInjection.RegexInjection(
+                name = "mid",
+                keywords = listOf("a"),
+                priority = 100,
+                content = "mid"
+            )
+        )
+        val triggered = getTriggeredInjections(injections, "a")
+        assertEquals(listOf("high_top", "mid", "low_top"), triggered.map { it.name })
+    }
+
+    @Test
+    fun `depth 9999 injects at start of chat history and same depth orders by smaller order first`() {
+        val loreId = Uuid.random()
+        val lorebook = Lorebook(
+            id = loreId,
+            enabled = true,
+            entries = listOf(
+                PromptInjection.RegexInjection(
+                    name = "depth_9999_order_100",
+                    constantActive = true,
+                    position = InjectionPosition.AT_DEPTH,
+                    injectDepth = 9999,
+                    priority = 100,
+                    role = MessageRole.USER,
+                    content = "[对话前-顺序100]"
+                ),
+                PromptInjection.RegexInjection(
+                    name = "depth_9999_order_10",
+                    constantActive = true,
+                    position = InjectionPosition.AT_DEPTH,
+                    injectDepth = 9999,
+                    priority = 10,
+                    role = MessageRole.USER,
+                    content = "[对话前-顺序10]"
+                ),
+            )
+        )
+        val assistant = Assistant(lorebookIds = setOf(loreId))
         val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("hello world")
+            UIMessage.system("系统提示词"),
+            UIMessage.user("第1条消息"),
+            UIMessage.assistant("第2条消息"),
         )
 
         val result = transformMessages(
             messages = messages,
-            assistant = createAssistant(
-                modeInjectionIds = setOf(modeId),
-                lorebookIds = setOf(lorebookId)
-            ),
-            modeInjections = listOf(modeInjection),
-            lorebooks = listOf(lorebook)
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = listOf(lorebook),
         )
 
-        val systemText = getMessageText(result[0])
-        assertTrue(systemText.contains("Mode content"))
-        assertTrue(systemText.contains("WorldBook content"))
-    }
-    // endregion
-
-    // region collectInjections tests
-    @Test
-    fun `collectInjections should return empty for no matching conditions`() {
-        val result = collectInjections(
-            messages = listOf(UIMessage.user("Hello")),
-            assistant = createAssistant(),
-            modeInjections = listOf(createModeInjection()),
-            lorebooks = emptyList()
-        )
-
-        assertTrue(result.isEmpty())
+        // index 0 是系统提示词，index 1 是两条 user 世界书（顺序10在顺序100上面）与后方同角色 user("第1条消息") 合并后的正文
+        assertEquals("系统提示词", result[0].toText())
+        assertEquals("[对话前-顺序10]\n[对话前-顺序100]\n\n第1条消息", result[1].toText())
+        assertEquals("第2条消息", result[2].toText())
     }
 
+    // ==================== 绿灯 STICKY_LOCKED_POSITION 位置锚定测试 ====================
+
     @Test
-    fun `collectInjections should collect linked and enabled mode injections`() {
-        val id1 = Uuid.random()
-        val id2 = Uuid.random()
-
-        val injections = listOf(
-            createModeInjection(id = id1, enabled = true),
-            createModeInjection(id = id2, enabled = false)
+    fun `green light STICKY_LOCKED_POSITION keeps injection locked between msg 4 and 5 after msg 6 arrives`() {
+        val loreId = Uuid.random()
+        val lorebook = Lorebook(
+            id = loreId,
+            enabled = true,
+            greenLightMode = LorebookGreenLightMode.STICKY_LOCKED_POSITION,
+            defaultScanDepth = 1,
+            entries = listOf(
+                PromptInjection.RegexInjection(
+                    name = "locked_entry",
+                    keywords = listOf("触发词"),
+                    position = InjectionPosition.AT_DEPTH,
+                    injectDepth = 1, // 在触发时插在最新消息之前（即 4 和 5 之间）
+                    priority = 100,
+                    role = MessageRole.SYSTEM,
+                    content = "[锚定注入]"
+                )
+            )
         )
+        val assistant = Assistant(lorebookIds = setOf(loreId))
 
-        val result = collectInjections(
-            messages = listOf(UIMessage.user("Hello")),
-            assistant = createAssistant(modeInjectionIds = setOf(id1, id2)),
-            modeInjections = injections,
-            lorebooks = emptyList()
+        // 当只有 1, 2, 3, 4, 5（第 5 条含触发词）时：注入在 4 和 5 之间
+        val messagesAt5 = listOf(
+            UIMessage.user("1"),
+            UIMessage.assistant("2"),
+            UIMessage.user("3"),
+            UIMessage.assistant("4"),
+            UIMessage.user("5 触发词"),
         )
+        val resultAt5 = transformMessages(
+            messages = messagesAt5,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = listOf(lorebook),
+        )
+        assertEquals(listOf("1", "2", "3", "4", "[锚定注入]", "5 触发词"), resultAt5.map { it.toText() })
 
-        assertEquals(1, result.size)
-        assertEquals(id1, result[0].id)
+        // 继续发送第 6 条（不含触发词，且 defaultScanDepth=1 原本已滑出扫描窗口）：
+        // 开启 STICKY_LOCKED_POSITION 后，不仅保持激活，而且位置依然焊死在 4 和 5 之间！
+        val messagesAt6 = messagesAt5 + UIMessage.assistant("6")
+        val resultAt6 = transformMessages(
+            messages = messagesAt6,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = listOf(lorebook),
+        )
+        assertEquals(listOf("1", "2", "3", "4", "[锚定注入]", "5 触发词", "6"), resultAt6.map { it.toText() })
     }
-    // endregion
 
-    // region applyInjections tests
+    // ==================== 连续工具链压底测试 ====================
+
     @Test
-    fun `applyInjections with empty map should return original messages`() {
+    fun `active trailing tool chain stays at the very bottom after preset post-history instructions`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            name = "带底部提示词预设",
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+                PromptBlock(
+                    name = "底部指令",
+                    enabled = true,
+                    role = MessageRole.USER,
+                    content = "[底部后置指令]"
+                ),
+            )
+        )
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
+
+        val activeToolMsg = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(
+                UIMessagePart.Text("正在调用工具1..."),
+                UIMessagePart.Tool(
+                    toolCallId = "call_1",
+                    toolName = "workspace_shell",
+                    input = "{}",
+                    output = listOf(UIMessagePart.Text("ok")),
+                    approvalState = ToolApprovalState.Auto,
+                )
+            )
+        )
         val messages = listOf(
-            UIMessage.system("System"),
-            UIMessage.user("Hello")
+            UIMessage.system("系统提示词"),
+            UIMessage.user("帮我查一下文件"),
+            activeToolMsg,
         )
 
-        val result = applyInjections(messages, emptyMap())
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
+        )
 
-        assertEquals(messages, result)
+        // 顺序必须是：系统提示词 -> 用户消息(Chat History) -> [底部后置指令] -> activeToolMsg(压在最底部)
+        assertEquals(4, result.size)
+        assertEquals("系统提示词", result[0].toText())
+        assertEquals("帮我查一下文件", result[1].toText())
+        assertEquals("[底部后置指令]", result[2].toText())
+        assertEquals(activeToolMsg, result[3])
     }
 
+    // ==================== Outlet 锚点展开测试 ====================
+
     @Test
-    fun `applyInjections should handle messages without system message`() {
-        val injection = createModeInjection(
-            position = InjectionPosition.BEFORE_SYSTEM_PROMPT,
-            content = "Before content"
+    fun `outlet lorebook entry expands inside preset custom block via macro`() {
+        val presetId = Uuid.random()
+        val loreId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(
+                    name = "Main",
+                    enabled = true,
+                    role = MessageRole.SYSTEM,
+                    content = "头部规则：\n{{outlet::状态栏}}"
+                ),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+            )
         )
-
+        val lorebook = Lorebook(
+            id = loreId,
+            enabled = true,
+            entries = listOf(
+                PromptInjection.RegexInjection(
+                    name = "status_outlet",
+                    constantActive = true,
+                    position = InjectionPosition.OUTLET,
+                    outletName = "状态栏",
+                    content = "[HP: 100/100]"
+                )
+            )
+        )
+        val assistant = Assistant(
+            modeInjectionIds = setOf(presetId),
+            lorebookIds = setOf(loreId),
+        )
         val messages = listOf(
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!")
+            UIMessage.system("助手设定"),
+            UIMessage.user("你好"),
         )
 
-        val result = applyInjections(
-            messages,
-            mapOf(InjectionPosition.BEFORE_SYSTEM_PROMPT to listOf(injection))
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = listOf(lorebook),
+            promptPresets = listOf(preset),
+        )
+
+        assertEquals("头部规则：\n[HP: 100/100]\n\n助手设定", result[0].toText())
+        assertEquals("你好", result[1].toText())
+    }
+
+    // ==================== 思维链回传模块与空白角色 "?" 测试 ====================
+
+    @Test
+    fun `reasoning block emits reasoning part with multi-provider signature metadata and text`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+                PromptBlock(
+                    name = "AI 预填思维链",
+                    enabled = true,
+                    role = MessageRole.ASSISTANT,
+                    content = "这是预填正文",
+                    reasoning = "这是思维链摘要或明文",
+                    reasoningSignature = "sig_abc_123",
+                ),
+            )
+        )
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
+        val messages = listOf(
+            UIMessage.system("系统提示词"),
+            UIMessage.user("你好"),
+        )
+
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
         )
 
         assertEquals(3, result.size)
-        assertEquals(MessageRole.SYSTEM, result[0].role)
-        assertEquals("Before content", getMessageText(result[0]))
-    }
-    // endregion
-
-    // region findSafeInsertIndex tests
-    @Test
-    fun `findSafeInsertIndex should not insert between USER and ASSISTANT with tools`() {
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Call a tool"),
-            createAssistantWithUnexecutedTool("call_1", "tool")
-        )
-
-        // 尝试在索引 2（USER 和 ASSISTANT(tool) 之间）插入，应该移到 USER 之前
-        val safeIndex = findSafeInsertIndex(messages, 2)
-        assertEquals(1, safeIndex)
+        val aiMsg = result[2]
+        assertEquals(MessageRole.ASSISTANT, aiMsg.role)
+        val reasoningPart = aiMsg.parts.filterIsInstance<UIMessagePart.Reasoning>().single()
+        val textPart = aiMsg.parts.filterIsInstance<UIMessagePart.Text>().single()
+        assertEquals("这是思维链摘要或明文", reasoningPart.reasoning)
+        assertEquals("这是预填正文", textPart.text)
+        assertNotNull(reasoningPart.metadata)
+        assertEquals("sig_abc_123", reasoningPart.metadata!!["signature"]?.toString()?.trim('"'))
+        assertEquals("sig_abc_123", reasoningPart.metadata!!["thoughtSignature"]?.toString()?.trim('"'))
     }
 
     @Test
-    fun `findSafeInsertIndex should allow insert before ASSISTANT without tools`() {
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!")
+    fun `blank role merges into preceding block content without merging distinct assistant or user blocks`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+                PromptBlock(
+                    name = "AI 块 1",
+                    enabled = true,
+                    role = MessageRole.ASSISTANT,
+                    content = "第一段正文",
+                    reasoning = "第一段思考",
+                    reasoningSignature = "sig_1",
+                ),
+                PromptBlock(
+                    name = "跟随空白块",
+                    enabled = true,
+                    role = MessageRole.SYSTEM,
+                    blankRole = true,
+                    content = "第二段跟随合并正文",
+                ),
+                PromptBlock(
+                    name = "AI 块 2（独立不合并）",
+                    enabled = true,
+                    role = MessageRole.ASSISTANT,
+                    content = "另一条独立AI正文",
+                    reasoning = "第二段思考",
+                    reasoningSignature = "sig_2",
+                ),
+            )
         )
-
-        // ASSISTANT 没有 tool，直接插入不受限制
-        val safeIndex = findSafeInsertIndex(messages, 2)
-        assertEquals(2, safeIndex)
-    }
-
-    @Test
-    fun `findSafeInsertIndex should return original index when no tools`() {
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
         val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Hello"),
-            UIMessage.assistant("Hi!"),
-            UIMessage.user("How are you?")
-        )
-
-        assertEquals(3, findSafeInsertIndex(messages, 3))
-        assertEquals(2, findSafeInsertIndex(messages, 2))
-        assertEquals(0, findSafeInsertIndex(messages, 0))
-    }
-
-    @Test
-    fun `BOTTOM_OF_CHAT should not inject between USER and ASSISTANT with tools`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.BOTTOM_OF_CHAT,
-            content = "Bottom injection"
-        )
-
-        // 消息序列: SYSTEM -> USER -> ASSISTANT(tool)
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Call a tool"),
-            createAssistantWithUnexecutedTool("call_1", "tool")
+            UIMessage.system("系统提示词"),
+            UIMessage.user("用户问题"),
         )
 
         val result = transformMessages(
             messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
         )
 
+        // 系统提示词 + 用户问题 + AI块1(合并了空白块正文) + AI块2(独立不合并) = 4 条
         assertEquals(4, result.size)
+        val aiMsg1 = result[2]
+        assertEquals(MessageRole.ASSISTANT, aiMsg1.role)
+        assertEquals("第一段思考", aiMsg1.parts.filterIsInstance<UIMessagePart.Reasoning>().single().reasoning)
+        assertEquals("第一段正文\n\n第二段跟随合并正文", aiMsg1.parts.filterIsInstance<UIMessagePart.Text>().single().text)
 
-        // 注入应该在 USER 之前，而不是 USER 和 ASSISTANT(tool) 之间
-        val injectedIndex = result.indexOfFirst { getMessageText(it).contains("Bottom injection") }
-        val originalUserIndex = result.indexOfFirst { getMessageText(it).contains("Call a tool") }
-        val assistantWithToolIndex = result.indexOfFirst { it.getTools().isNotEmpty() }
-
-        assertTrue(injectedIndex < originalUserIndex)
-        assertEquals(originalUserIndex + 1, assistantWithToolIndex)
+        val aiMsg2 = result[3]
+        assertEquals(MessageRole.ASSISTANT, aiMsg2.role)
+        assertEquals("第二段思考", aiMsg2.parts.filterIsInstance<UIMessagePart.Reasoning>().single().reasoning)
+        assertEquals("另一条独立AI正文", aiMsg2.parts.filterIsInstance<UIMessagePart.Text>().single().text)
     }
 
     @Test
-    fun `AT_DEPTH should not inject between USER and ASSISTANT with tools`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.AT_DEPTH,
-            injectDepth = 1,
-            content = "Depth injection"
+    fun `json mode block injects raw json element directly into request messages`() {
+        val presetId = Uuid.random()
+        val cacheBlockJson = """
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "静态设定知识库",
+                        "cache_control": { "type": "ephemeral" }
+                    }
+                ]
+            }
+        """.trimIndent()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+                PromptBlock(
+                    name = "Cache Control Block",
+                    enabled = true,
+                    jsonMode = true,
+                    rawJson = cacheBlockJson,
+                ),
+            )
         )
-
-        // 消息序列: SYSTEM -> USER -> ASSISTANT(tool)
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
         val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Call a tool"),
-            createAssistantWithUnexecutedTool("call_1", "tool")
+            UIMessage.system("系统提示词"),
+            UIMessage.user("你好"),
         )
 
         val result = transformMessages(
             messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
         )
 
-        assertEquals(4, result.size)
-
-        val injectedIndex = result.indexOfFirst { getMessageText(it).contains("Depth injection") }
-        val originalUserIndex = result.indexOfFirst { getMessageText(it).contains("Call a tool") }
-        val assistantWithToolIndex = result.indexOfFirst { it.getTools().isNotEmpty() }
-
-        assertTrue(injectedIndex < originalUserIndex)
-        assertEquals(originalUserIndex + 1, assistantWithToolIndex)
+        assertEquals(3, result.size)
+        val rawElem = result[2].rawJsonElementOrNull() as? JsonObject
+        assertNotNull(rawElem)
+        assertEquals("user", rawElem!!["role"]?.jsonPrimitive?.content)
+        assertTrue(result[2].isValidToUpload())
     }
-
-    @Test
-    fun `injection after ASSISTANT with tools should work normally`() {
-        val injectionId = Uuid.random()
-        val injection = createModeInjection(
-            id = injectionId,
-            position = InjectionPosition.BOTTOM_OF_CHAT,
-            content = "Bottom injection"
-        )
-
-        // 消息序列: SYSTEM -> USER -> ASSISTANT(executed tool) -> ASSISTANT(final) -> USER
-        val messages = listOf(
-            UIMessage.system("System prompt"),
-            UIMessage.user("Call a tool"),
-            createAssistantWithExecutedTool("call_1", "tool"),
-            UIMessage.assistant("Here's the result"),
-            UIMessage.user("Thanks!")
-        )
-
-        val result = transformMessages(
-            messages = messages,
-            assistant = createAssistant(modeInjectionIds = setOf(injectionId)),
-            modeInjections = listOf(injection),
-            lorebooks = emptyList()
-        )
-
-        assertEquals(6, result.size)
-
-        // 注入应该在最后一条用户消息之前
-        val injectedIndex = result.indexOfFirst { getMessageText(it).contains("Bottom injection") }
-        val lastUserIndex = result.indexOfLast { it.role == MessageRole.USER && getMessageText(it) == "Thanks!" }
-        assertEquals(lastUserIndex - 1, injectedIndex)
-    }
-    // endregion
 }

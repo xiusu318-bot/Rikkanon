@@ -64,6 +64,7 @@ import me.rerere.rikkahub.data.ai.transformers.DocumentAsPromptTransformer
 import me.rerere.rikkahub.data.ai.transformers.OcrTransformer
 import me.rerere.rikkahub.data.ai.transformers.PlaceholderTransformer
 import me.rerere.rikkahub.data.ai.transformers.PromptInjectionTransformer
+import me.rerere.rikkahub.data.ai.transformers.RegexInputTransformer
 import me.rerere.rikkahub.data.ai.transformers.RegexOutputTransformer
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
 import me.rerere.rikkahub.data.ai.transformers.ThinkTagTransformer
@@ -80,6 +81,7 @@ import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantAffectScope
+import me.rerere.rikkahub.data.model.AssistantRegexPhase
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.allChildConversationIds
 import me.rerere.rikkahub.data.model.bindConfig
@@ -247,6 +249,7 @@ data class SubConversationReadResult(
 private val inputTransformers by lazy {
     listOf(
         TimeReminderTransformer,
+        RegexInputTransformer,
         PromptInjectionTransformer,
         PlaceholderTransformer,
         DocumentAsPromptTransformer,
@@ -496,13 +499,13 @@ class ChatService(
     private suspend fun ensureInitialized(session: ConversationSession) {
         session.initialize {
             loadConversation(session.id) ?: run {
-                // 新建对话, 并添加预设消息
+                // 新建空白对话
                 val assistant = settingsStore.awaitLoaded().getCurrentAssistant()
                 Conversation.ofId(
                     id = session.id,
                     assistantId = assistant.id,
                     newConversation = true
-                ).updateCurrentMessages(assistant.presetMessages)
+                )
             }
         }
     }
@@ -696,7 +699,14 @@ class ChatService(
         return job
     }
 
-    private fun preprocessUserInputParts(parts: List<UIMessagePart>, assistant: Assistant): List<UIMessagePart> {
+    /**
+     * @param depth 该消息的正则深度（0 = 最后一条）；新发送 / 插话的消息为 0，编辑历史消息时为其实际深度
+     */
+    private fun preprocessUserInputParts(
+        parts: List<UIMessagePart>,
+        assistant: Assistant,
+        depth: Int = 0,
+    ): List<UIMessagePart> {
         return parts.map { part ->
             when (part) {
                 is UIMessagePart.Text -> {
@@ -704,7 +714,8 @@ class ChatService(
                         text = part.text.replaceRegexes(
                             assistant = assistant,
                             scope = AssistantAffectScope.USER,
-                            visual = false
+                            phase = AssistantRegexPhase.PERSIST,
+                            depth = depth,
                         )
                     )
                 }
@@ -1175,9 +1186,10 @@ class ChatService(
                     workspaceCwd = conversation.workspaceCwd,
                     memories = memoryRepository.getFiles(assistant.memoryId),
                     inputTransformers = buildList {
-                        addAll(inputTransformers)
-                        add(templateTransformer)
+                        add(TimeReminderTransformer)
                         add(workspaceReminderTransformer)
+                        addAll(inputTransformers.drop(1))
+                        add(templateTransformer)
                     },
                     outputTransformers = outputTransformers,
                     tools = tools,
@@ -1884,7 +1896,14 @@ class ChatService(
         val settings = settingsStore.awaitLoaded()
         val assistant = settings.getAssistantById(currentConversation.assistantId)
             ?: settings.getCurrentAssistant()
-        val processedParts = preprocessUserInputParts(parts, assistant)
+        val editedNodeIndex = currentConversation.messageNodes.indexOfFirst { node ->
+            node.messages.any { it.id == messageId }
+        }
+        val processedParts = preprocessUserInputParts(
+            parts = parts,
+            assistant = assistant,
+            depth = if (editedNodeIndex >= 0) currentConversation.messageNodes.lastIndex - editedNodeIndex else 0,
+        )
         var edited = false
 
         val updatedNodes = currentConversation.messageNodes.map { node ->

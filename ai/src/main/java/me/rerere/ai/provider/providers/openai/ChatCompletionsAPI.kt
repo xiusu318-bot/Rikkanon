@@ -47,6 +47,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
+import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
@@ -458,10 +459,16 @@ class ChatCompletionsAPI(
         val filteredMessages = messages.filter { it.isValidToUpload() }
 
         filteredMessages.forEach { message ->
-            if (message.role == MessageRole.ASSISTANT) {
+            val rawJson = message.rawJsonElementOrNull()
+            if (rawJson != null) {
+                when (rawJson) {
+                    is JsonArray -> rawJson.forEach { add(it) }
+                    else -> add(rawJson)
+                }
+            } else if (message.role == MessageRole.ASSISTANT) {
                 addAssistantMessages(
                     message = message,
-                    includeReasoning = includeHistoryReasoning,
+                    includeReasoning = includeHistoryReasoning || message.isSynthetic,
                     includeOpenRouterReasoningDetails = includeOpenRouterReasoningDetails,
                     supportInputModalities = supportInputModalities,
                 )
@@ -486,8 +493,16 @@ class ChatCompletionsAPI(
                 is PartGroup.Content -> {
                     // 从当前 group 中提取 reasoning（保持顺序）
                     if (includeReasoning) {
-                        group.parts.filterIsInstance<UIMessagePart.Reasoning>().firstOrNull()?.let {
-                            reasoningPart = it
+                        val rParts = group.parts.filterIsInstance<UIMessagePart.Reasoning>()
+                        if (rParts.size == 1) {
+                            reasoningPart = rParts.first()
+                        } else if (rParts.size > 1) {
+                            val combinedReasoning = rParts.mapNotNull { it.reasoning.takeIf(String::isNotBlank) }.joinToString("\n\n")
+                            val firstMeta = rParts.firstNotNullOfOrNull { it.metadata }
+                            reasoningPart = rParts.first().copy(
+                                reasoning = combinedReasoning,
+                                metadata = firstMeta,
+                            )
                         }
                     }
                     group.parts

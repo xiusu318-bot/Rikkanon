@@ -67,8 +67,8 @@ fun ExtensionsPage() {
                     item(
                         onClick = { navController.navigate(Screen.Prompts) },
                         leadingContent = { CardGroupIcon(HugeIcons.Book03, containerColor = containerColor, contentColor = contentColor) },
-                        headlineContent = { Text(stringResource(R.string.extensions_page_prompts)) },
-                        supportingContent = { Text(stringResource(R.string.extensions_page_prompts_desc)) },
+                        headlineContent = { Text("高级提示词模式") },
+                        supportingContent = { Text("管理提示词组装预设与世界书") },
                     )
                     item(
                         onClick = { navController.navigate(Screen.Skills) },

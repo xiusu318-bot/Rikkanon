@@ -53,7 +53,12 @@ class WorkspaceReminderTransformer(
                 RemoteEnvironment(shell = workspaceRepository.shell(workspaceId), distro = readDistroName(workspaceId))
             }.getOrElse { e ->
                 Log.w("WorkspaceReminder", "Workspace unreachable: $workspaceId", e)
-                return messages.withPrompt(buildUnreachablePrompt(workspace, layout, e))
+                val unreachablePrompt = buildUnreachablePrompt(workspace, layout, e)
+                if (ctx.settings.enableAdvancedPrompt) {
+                    ctx.workspacePrompt = unreachablePrompt
+                    return messages
+                }
+                return messages.withPrompt(unreachablePrompt)
             }
             buildSshWorkspacePrompt(
                 workspace = workspace,
@@ -73,6 +78,10 @@ class WorkspaceReminderTransformer(
                 enabledTools = enabledTools,
                 subAgentEnabled = ctx.assistant.isSubAgentEnabled,
             ) + buildAgentsPrompt(workspaceId, ctx.workspaceCwd)
+        }
+        if (ctx.settings.enableAdvancedPrompt) {
+            ctx.workspacePrompt = prompt
+            return messages
         }
         return messages.withPrompt(prompt)
     }

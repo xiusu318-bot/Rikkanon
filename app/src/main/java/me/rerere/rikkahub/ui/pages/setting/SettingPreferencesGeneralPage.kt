@@ -109,12 +109,6 @@ fun SettingPreferencesGeneralPage(vm: SettingVM = koinViewModel()) {
                             headlineContent = { Text(stringResource(R.string.setting_display_page_message_jumper_position_title)) },
                         )
                     }
-                    switchItem(
-                        checked = displaySetting.enableAutoScroll,
-                        onCheckedChange = { updateDisplaySetting(displaySetting.copy(enableAutoScroll = it)) },
-                        supportingContent = { Text(stringResource(R.string.setting_display_page_enable_auto_scroll_desc)) },
-                        headlineContent = { Text(stringResource(R.string.setting_display_page_enable_auto_scroll_title)) },
-                    )
                 }
             }
 

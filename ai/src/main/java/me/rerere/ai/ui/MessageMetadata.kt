@@ -3,6 +3,7 @@ package me.rerere.ai.ui
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
@@ -115,6 +116,20 @@ data class GoogleInteractionsMetadata(
 data class DiffMetadata(
     val diff: String? = null,
 ) : PartMetadata
+
+/**
+ * 提示词块 JSON 模式携带的原始 JSON 元素，作为数组元素直接并入 API 请求内
+ */
+@Serializable
+data class RawJsonMessageMetadata(
+    @SerialName("raw_json_element")
+    val rawJson: JsonElement? = null,
+) : PartMetadata
+
+// 先判断是否含 raw_json_element 字段：不含时解析结果必然为 null，省去对每个带 metadata 的 part（如思维链签名）做完整反序列化
+fun UIMessage.rawJsonElementOrNull(): JsonElement? = parts.firstNotNullOfOrNull { part ->
+    if (part.metadata?.containsKey("raw_json_element") == true) part.metadataAs<RawJsonMessageMetadata>()?.rawJson else null
+}
 
 /**
  * 将 metadata 解析为类型化的 [PartMetadata], 解析失败或 metadata 为 null 时返回 null

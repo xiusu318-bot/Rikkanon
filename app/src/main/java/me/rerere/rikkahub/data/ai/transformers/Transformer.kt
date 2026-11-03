@@ -14,6 +14,9 @@ class TransformerContext(
     val settings: Settings,
     val processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
     val workspaceCwd: String? = null,
+    val memoryPrompt: String = "",
+    val toolSystemPrompt: String = "",
+    var workspacePrompt: String = "",
 )
 
 interface MessageTransformer {
@@ -66,6 +69,8 @@ suspend fun List<UIMessage>.transforms(
     settings: Settings,
     processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
     workspaceCwd: String? = null,
+    memoryPrompt: String = "",
+    toolSystemPrompt: String = "",
 ): List<UIMessage> {
     val ctx = TransformerContext(
         context = context,
@@ -74,6 +79,8 @@ suspend fun List<UIMessage>.transforms(
         settings = settings,
         processingStatus = processingStatus,
         workspaceCwd = workspaceCwd,
+        memoryPrompt = memoryPrompt,
+        toolSystemPrompt = toolSystemPrompt,
     )
     return transformers.fold(this) { acc, transformer ->
         transformer.transform(ctx, acc)
