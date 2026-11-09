@@ -58,6 +58,7 @@ fun TTSProviderConfigure(
                         is TTSProviderSetting.ElevenLabs -> "ElevenLabs"
                         is TTSProviderSetting.FishAudio -> "Fish Audio"
                         is TTSProviderSetting.Volcengine -> "火山引擎"
+                        is TTSProviderSetting.Plugin -> "插件 (Plugin)"
                     },
                     options = TTSProviderSetting.Types,
                     readOnly = true,
@@ -76,6 +77,7 @@ fun TTSProviderConfigure(
                             TTSProviderSetting.FishAudio::class -> "Fish Audio"
                             TTSProviderSetting.Volcengine::class -> "火山引擎"
                             TTSProviderSetting.Step::class -> "Step"
+                            TTSProviderSetting.Plugin::class -> "插件 (Plugin)"
                             else -> providerClass.simpleName ?: "Unknown"
                         }
                     },
@@ -138,6 +140,11 @@ fun TTSProviderConfigure(
 
                             TTSProviderSetting.Volcengine::class -> TTSProviderSetting.Volcengine(id = setting.id)
 
+                            TTSProviderSetting.Plugin::class -> TTSProviderSetting.Plugin(
+                                id = setting.id,
+                                name = "Plugin TTS"
+                            )
+
                             else -> setting
                         }
                         onValueChange(newSetting)
@@ -175,8 +182,27 @@ fun TTSProviderConfigure(
                 is TTSProviderSetting.FishAudio -> fishAudioTTSItems(setting, onValueChange)
                 is TTSProviderSetting.Step -> stepTTSItems(setting, onValueChange)
                 is TTSProviderSetting.Volcengine -> volcengineTTSItems(setting, onValueChange)
+                is TTSProviderSetting.Plugin -> pluginTTSItems(setting, onValueChange)
             }
         }
+    }
+}
+
+private fun CardGroupScope.pluginTTSItems(
+    setting: TTSProviderSetting.Plugin,
+    onValueChange: (TTSProviderSetting) -> Unit
+) {
+    item(
+        headlineContent = { Text("插件来源") },
+        supportingContent = { Text("${setting.pluginId} (${setting.providerName})") },
+    )
+    formItem(headlineContent = { Text("音色参数 (voice, 可选)") }) {
+        OutlinedTextField(
+            value = setting.voice,
+            onValueChange = { onValueChange(setting.copy(voice = it.trim())) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
     }
 }
 

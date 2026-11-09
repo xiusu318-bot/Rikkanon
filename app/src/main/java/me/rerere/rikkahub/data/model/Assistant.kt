@@ -99,6 +99,17 @@ data class Assistant(
         toolName: String,
         mcpServerNameToId: Map<String, Uuid> = emptyMap(),
     ): Boolean = matchesSubAgentApprovalRule(toolName, subAgentAgentApprovalTools, mcpServerNameToId)
+
+    /** 工具是否开启了主代理审批（助手配置勾选或插件 approval.decide 返回 "main_agent"）。 */
+    fun requiresSubAgentAgentApproval(
+        tool: me.rerere.ai.ui.UIMessagePart.Tool,
+        mcpServerNameToId: Map<String, Uuid> = emptyMap(),
+    ): Boolean {
+        if ((tool.metadata?.get(me.rerere.rikkahub.data.plugin.PLUGIN_MAIN_AGENT_APPROVAL_KEY) as? kotlinx.serialization.json.JsonPrimitive)?.content == "true") {
+            return true
+        }
+        return requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+    }
 }
 
 private fun matchesSubAgentApprovalRule(
@@ -361,28 +372,37 @@ fun String.replaceRegexes(
     useCache: Boolean = true,
     depth: Int? = null,
 ): String {
-    if (this.isEmpty() || assistant == null || assistant.regexes.isEmpty()) return this
-    val activeRegexes = assistant.regexes.filter { regex ->
-        regex.enabled &&
-            regex.findRegex.isNotEmpty() &&
-            regex.affectingScope.contains(scope) &&
-            regex.matchesPhase(phase) &&
-            regex.matchesDepth(depth)
+    if (this.isEmpty()) return this
+    val afterBuiltin = if (assistant == null || assistant.regexes.isEmpty()) {
+        this
+    } else {
+        val activeRegexes = assistant.regexes.filter { regex ->
+            regex.enabled &&
+                regex.findRegex.isNotEmpty() &&
+                regex.affectingScope.contains(scope) &&
+                regex.matchesPhase(phase) &&
+                regex.matchesDepth(depth)
+        }
+        if (activeRegexes.isEmpty()) {
+            this
+        } else {
+            val cache = when (phase) {
+                AssistantRegexPhase.VISUAL -> visualRegexResultCache
+                AssistantRegexPhase.REQUEST -> requestRegexResultCache
+                AssistantRegexPhase.PERSIST -> null
+            }
+            if (cache == null || !useCache || this.length > MAX_CACHEABLE_TEXT_LENGTH) {
+                applyRegexRules(activeRegexes)
+            } else {
+                val cacheKey = RegexReplaceCacheKey(this, activeRegexes.map { ActiveRegexRuleKey(it.findRegex, it.replaceString) })
+                cache.get(cacheKey) ?: applyRegexRules(activeRegexes).also { cache.put(cacheKey, it) }
+            }
+        }
     }
-    if (activeRegexes.isEmpty()) return this
-
-    val cache = when (phase) {
-        AssistantRegexPhase.VISUAL -> visualRegexResultCache
-        AssistantRegexPhase.REQUEST -> requestRegexResultCache
-        AssistantRegexPhase.PERSIST -> null
-    }
-    if (cache == null || !useCache || this.length > MAX_CACHEABLE_TEXT_LENGTH) {
-        return applyRegexRules(activeRegexes)
-    }
-
-    val cacheKey = RegexReplaceCacheKey(this, activeRegexes.map { ActiveRegexRuleKey(it.findRegex, it.replaceString) })
-    cache.get(cacheKey)?.let { return it }
-    return applyRegexRules(activeRegexes).also { cache.put(cacheKey, it) }
+    val bridge = runCatching {
+        org.koin.mp.KoinPlatformTools.defaultContext().getOrNull()?.getOrNull<me.rerere.rikkahub.data.plugin.PluginBridge>()
+    }.getOrNull() ?: return afterBuiltin
+    return bridge.applyPluginRegexesBlocking(afterBuiltin, assistant, scope, phase, depth)
 }
 
 private fun String.applyRegexRules(activeRegexes: List<AssistantRegex>): String =
@@ -406,16 +426,24 @@ fun String.replaceLorebookRegexes(
     assistant: Assistant?,
     depth: Int?,
 ): String {
-    if (this.isEmpty() || assistant == null || assistant.regexes.isEmpty()) return this
-    val activeRegexes = assistant.regexes.filter { regex ->
-        regex.enabled &&
-            regex.findRegex.isNotEmpty() &&
-            AssistantAffectScope.LOREBOOK in regex.affectingScope &&
-            (regex.matchesPhase(AssistantRegexPhase.REQUEST) || regex.matchesPhase(AssistantRegexPhase.PERSIST)) &&
-            regex.matchesDepth(depth)
+    if (this.isEmpty()) return this
+    val afterBuiltin = if (assistant == null || assistant.regexes.isEmpty()) {
+        this
+    } else {
+        val activeRegexes = assistant.regexes.filter { regex ->
+            regex.enabled &&
+                regex.findRegex.isNotEmpty() &&
+                AssistantAffectScope.LOREBOOK in regex.affectingScope &&
+                (regex.matchesPhase(AssistantRegexPhase.REQUEST) || regex.matchesPhase(AssistantRegexPhase.PERSIST)) &&
+                regex.matchesDepth(depth)
+        }
+        if (activeRegexes.isEmpty()) this else applyRegexRules(activeRegexes)
     }
-    if (activeRegexes.isEmpty()) return this
-    return applyRegexRules(activeRegexes)
+    val bridge = runCatching {
+        org.koin.mp.KoinPlatformTools.defaultContext().getOrNull()?.getOrNull<me.rerere.rikkahub.data.plugin.PluginBridge>()
+    }.getOrNull() ?: return afterBuiltin
+    val afterReq = bridge.applyPluginRegexesBlocking(afterBuiltin, assistant, AssistantAffectScope.LOREBOOK, AssistantRegexPhase.REQUEST, depth)
+    return bridge.applyPluginRegexesBlocking(afterReq, assistant, AssistantAffectScope.LOREBOOK, AssistantRegexPhase.PERSIST, depth)
 }
 
 fun String.replaceRegexes(

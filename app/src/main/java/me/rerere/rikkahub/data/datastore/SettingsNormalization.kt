@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.datastore
 
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.rikkahub.data.remote.parseProxyProfileOrNull
 
 /** 读盘后和每次修改后都要过一遍，保证内存里的设置始终是规整的。 */
 internal fun Settings.normalized(): Settings =
@@ -39,6 +40,39 @@ internal fun Settings.withBuiltInDefaults(): Settings {
     )
 }
 
+internal fun NetworkSetting.normalized(): NetworkSetting {
+    val migrated = if (proxies.isEmpty() && proxyUrl.isNotBlank()) {
+        val parsed = proxyUrl.parseProxyProfileOrNull(
+            name = "默认代理",
+            fallbackUsername = proxyUsername,
+            fallbackPassword = proxyPassword,
+        )
+        if (parsed != null) {
+            copy(
+                proxyUrl = "",
+                proxyUsername = "",
+                proxyPassword = "",
+                proxies = listOf(parsed),
+                llmProxyId = llmProxyId ?: parsed.id,
+                workspaceProxyId = workspaceProxyId ?: parsed.id,
+                mcpProxyId = mcpProxyId ?: parsed.id,
+            )
+        } else {
+            this
+        }
+    } else {
+        this
+    }
+    val dedupedProxies = migrated.proxies.distinctBy { it.id }
+    val validIds = dedupedProxies.mapTo(HashSet()) { it.id }
+    return migrated.copy(
+        proxies = dedupedProxies,
+        llmProxyId = migrated.llmProxyId?.takeIf { it in validIds },
+        workspaceProxyId = migrated.workspaceProxyId?.takeIf { it in validIds },
+        mcpProxyId = migrated.mcpProxyId?.takeIf { it in validIds },
+    )
+}
+
 // 去重并清理无效引用
 internal fun Settings.withoutInvalidReferences(): Settings {
     val settings = this
@@ -50,6 +84,7 @@ internal fun Settings.withoutInvalidReferences(): Settings {
     val validModelIds by lazy { settings.providers.flatMap { it.models }.mapTo(HashSet()) { it.id } }
     val asrProviders = settings.asrProviders.distinctBy { it.id }
     return settings.copy(
+        networkSetting = settings.networkSetting.normalized(),
         providers = settings.providers.distinctBy { it.id }.map { provider ->
             when (provider) {
                 is ProviderSetting.OpenAI -> provider.copy(
@@ -61,6 +96,10 @@ internal fun Settings.withoutInvalidReferences(): Settings {
                 )
 
                 is ProviderSetting.Claude -> provider.copy(
+                    models = provider.models.distinctBy { model -> model.id }
+                )
+
+                is ProviderSetting.Plugin -> provider.copy(
                     models = provider.models.distinctBy { model -> model.id }
                 )
             }

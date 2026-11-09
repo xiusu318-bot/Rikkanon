@@ -217,6 +217,9 @@ fun SettingMcpPage(vm: SettingVM = koinViewModel()) {
                         modifier = Modifier.animateItem()
                     )
                 }
+                item {
+                    me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPageSlotMounts(slot = "mcp.detail")
+                }
             }
 
             if (mcpConfigs.isEmpty()) {

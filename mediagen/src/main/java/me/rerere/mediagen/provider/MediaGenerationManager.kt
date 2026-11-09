@@ -20,6 +20,7 @@ import kotlin.time.Duration.Companion.seconds
 
 class MediaGenerationManager(
     client: OkHttpClient = OkHttpClient(),
+    var pluginDelegate: MediaGenerationProvider<MediaGenerationProviderSetting.Plugin>? = null,
 ) {
     private val openAI = OpenAIMediaGenerationProvider(client)
     private val aliyun = AliyunMediaGenerationProvider(client)
@@ -86,6 +87,8 @@ class MediaGenerationManager(
             is MediaGenerationProviderSetting.Volcengine -> volcengine
             is MediaGenerationProviderSetting.MiniMax -> miniMax
             is MediaGenerationProviderSetting.OpenRouter -> openRouter
+            is MediaGenerationProviderSetting.Plugin -> pluginDelegate
+                ?: error("插件媒体生成未初始化")
         }
 
     // 厂商适配器尚未实现该模型的 kind 时返回失败，否则返回 null

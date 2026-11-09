@@ -20,8 +20,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "QwenTTSProvider"
 
-class QwenTTSProvider : TTSProvider<TTSProviderSetting.Qwen> {
-    private val httpClient = OkHttpClient.Builder()
+class QwenTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.Qwen> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

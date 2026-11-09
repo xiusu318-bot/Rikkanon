@@ -23,8 +23,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "GeminiTTSProvider"
 
-class GeminiTTSProvider : TTSProvider<TTSProviderSetting.Gemini> {
-    private val httpClient = OkHttpClient.Builder()
+class GeminiTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.Gemini> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
     private val json = Json { ignoreUnknownKeys = true }

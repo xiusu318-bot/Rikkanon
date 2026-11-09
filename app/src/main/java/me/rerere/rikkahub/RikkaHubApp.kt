@@ -106,6 +106,13 @@ class RikkaHubApp : Application() {
         // Extract builtin skills from assets after install/update
         extractBuiltinSkills()
 
+        // 加载已启用的插件（单个插件加载失败只记录错误，插件保持未运行），并同步插件提供的能力
+        get<AppScope>().launch {
+            val host = get<me.rerere.plugin.host.PluginHost>()
+            host.startEnabled()
+            runCatching { me.rerere.rikkahub.data.plugin.PluginCapabilitySync.sync(host, get()) }
+        }
+
         // Load models.dev data for model capability matching, then refresh it in background
         updateModelsDev()
 
@@ -136,7 +143,22 @@ class RikkaHubApp : Application() {
         // 应用被切走后进程随时可能被冻结，等不到空闲计时结束，这时直接开始整理
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_STOP) get<MemoryConsolidationScheduler>().onAppHidden()
+                when (event) {
+                    Lifecycle.Event.ON_START -> {
+                        get<me.rerere.rikkahub.data.plugin.PluginBridge>().emit(
+                            "app.foreground",
+                            kotlinx.serialization.json.JsonObject(emptyMap()),
+                        )
+                    }
+                    Lifecycle.Event.ON_STOP -> {
+                        get<MemoryConsolidationScheduler>().onAppHidden()
+                        get<me.rerere.rikkahub.data.plugin.PluginBridge>().emit(
+                            "app.background",
+                            kotlinx.serialization.json.JsonObject(emptyMap()),
+                        )
+                    }
+                    else -> Unit
+                }
             }
         )
         get<AppScope>().launch(Dispatchers.IO) {

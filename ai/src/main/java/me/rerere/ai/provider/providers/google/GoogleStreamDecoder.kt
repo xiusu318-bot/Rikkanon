@@ -1,6 +1,10 @@
 package me.rerere.ai.provider.providers.google
 
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -33,6 +37,23 @@ internal class GoogleStreamDecoder(
     private var finishReason: String? = null
     private var finished = false
     private var toolSequence = 0
+    private var activePartialTool: PartialToolCallState? = null
+
+    private class PartialToolCallState(
+        val id: String,
+        var name: String,
+    ) {
+        var started = false
+        var activeStringKey: String? = null
+        val fields = linkedMapOf<String, JsonElement>()
+
+        fun closeOpenString(): String {
+            return if (activeStringKey != null) {
+                activeStringKey = null
+                "\""
+            } else ""
+        }
+    }
 
     override fun accept(event: SseEvent): DecodeResult {
         if (finished) return DecodeResult(completed = true)
@@ -59,18 +80,32 @@ internal class GoogleStreamDecoder(
     private fun finish(): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
-        return streamState.finish(finishReason, responseId, model)
+        val tail = flushActivePartialTool()
+        return tail + streamState.finish(finishReason, responseId, model)
+    }
+
+    private fun flushActivePartialTool(): List<StreamChunk> {
+        val state = activePartialTool ?: return emptyList()
+        activePartialTool = null
+        val closing = if (state.started) {
+            state.closeOpenString() + "}"
+        } else {
+            json.encodeToString(JsonObject(state.fields))
+        }
+        return if (closing.isNotEmpty()) {
+            listOf(StreamChunk.ToolCallDelta(state.id, inputDelta = closing))
+        } else emptyList()
     }
 
     private fun parseMessage(content: JsonObject, groundingMetadata: JsonObject?): UIMessage = UIMessage(
         role = MessageRole.ASSISTANT,
-        parts = content["parts"]?.jsonArray?.mapIndexed { index, part ->
+        parts = content["parts"]?.jsonArray?.mapIndexedNotNull { index, part ->
             parsePart(part.jsonObject, index)
         }.orEmpty(),
         annotations = parseAnnotations(groundingMetadata),
     )
 
-    private fun parsePart(part: JsonObject, index: Int): UIMessagePart = when {
+    private fun parsePart(part: JsonObject, index: Int): UIMessagePart? = when {
         part.containsKey("text") -> {
             val text = part["text"]?.jsonPrimitive?.contentOrNull ?: ""
             val metadata = part.toGoogleThoughtMetadata()
@@ -82,17 +117,23 @@ internal class GoogleStreamDecoder(
         }
         part.containsKey("functionCall") -> {
             val functionCall = part["functionCall"]!!.jsonObject
-            val toolCallId = functionCall["id"]?.jsonPrimitive?.contentOrNull
-                ?: "$responseId:tool-${++toolSequence}"
-            UIMessagePart.Tool(
-                toolCallId = toolCallId,
-                toolName = functionCall["name"]?.jsonPrimitive?.contentOrNull ?: "",
-                input = functionCall["args"]?.let(json::encodeToString) ?: "",
-                output = emptyList(),
-                metadata = GoogleThoughtMetadata(
-                    thoughtSignature = part["thoughtSignature"]?.jsonPrimitive?.contentOrNull,
-                ).toMetadata(),
-            )
+            val hasPartial = functionCall.containsKey("partialArgs") || functionCall.containsKey("willContinue") ||
+                (activePartialTool != null && !functionCall.containsKey("args"))
+            if (hasPartial) {
+                parsePartialFunctionCall(part, functionCall)
+            } else {
+                val toolCallId = functionCall["id"]?.jsonPrimitive?.contentOrNull
+                    ?: "$responseId:tool-${++toolSequence}"
+                UIMessagePart.Tool(
+                    toolCallId = toolCallId,
+                    toolName = functionCall["name"]?.jsonPrimitive?.contentOrNull ?: "",
+                    input = functionCall["args"]?.let(json::encodeToString) ?: "",
+                    output = emptyList(),
+                    metadata = GoogleThoughtMetadata(
+                        thoughtSignature = part["thoughtSignature"]?.jsonPrimitive?.contentOrNull,
+                    ).toMetadata(),
+                )
+            }
         }
 
         part.containsKey("toolCall") -> {
@@ -139,7 +180,99 @@ internal class GoogleStreamDecoder(
                 )
             }
         }
-        else -> error("unknown message part type: $part")
+        // 流式末尾仅携带 thoughtSignature 的收尾 part
+        part.containsKey("thoughtSignature") -> {
+            val metadata = part.toGoogleThoughtMetadata()
+            if (part["thought"]?.jsonPrimitive?.booleanOrNull == true) {
+                UIMessagePart.Reasoning("", Clock.System.now(), null, metadata)
+            } else {
+                UIMessagePart.Text("", metadata)
+            }
+        }
+        else -> null
+    }
+
+    /**
+     * 解析 Gemini `streamFunctionCallArguments: true` 产出的增量 `partialArgs` 分片，
+     * 转换为同一 `toolCallId` 下的增量 JSON 字符串片段（供 `StreamChunkHandler` 与 `extractPartialJsonString` 实时拼接展示）。
+     */
+    private fun parsePartialFunctionCall(part: JsonObject, functionCall: JsonObject): UIMessagePart.Tool {
+        val rawName = functionCall["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val rawId = functionCall["id"]?.jsonPrimitive?.contentOrNull
+        val state = activePartialTool?.also {
+            if (rawName.isNotEmpty() && it.name.isEmpty()) it.name = rawName
+        } ?: PartialToolCallState(
+            id = rawId ?: "$responseId:tool-${++toolSequence}",
+            name = rawName,
+        ).also { activePartialTool = it }
+
+        val delta = StringBuilder()
+        val partialArgs = functionCall["partialArgs"] as? JsonArray
+        if (partialArgs != null) {
+            for (el in partialArgs) {
+                val pa = el as? JsonObject ?: continue
+                val key = pa["jsonPath"]?.jsonPrimitive?.contentOrNull
+                    ?.removePrefix("$.")
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: continue
+                val strVal = pa["stringValue"]?.jsonPrimitive?.contentOrNull
+                if (strVal != null) {
+                    if (!state.started) {
+                        state.started = true
+                        delta.append("{")
+                    } else if (state.activeStringKey != key) {
+                        delta.append(state.closeOpenString())
+                        delta.append(",")
+                    }
+                    if (state.activeStringKey != key) {
+                        delta.append(json.encodeToString(JsonPrimitive(key))).append(":\"")
+                        state.activeStringKey = key
+                    }
+                    // 去掉首尾引号后的 JSON 转义内容
+                    val escaped = json.encodeToString(JsonPrimitive(strVal))
+                    delta.append(escaped, 1, escaped.length - 1)
+                } else {
+                    val valueEl: JsonElement = when {
+                        "numberValue" in pa -> pa["numberValue"]!!
+                        "boolValue" in pa -> pa["boolValue"]!!
+                        "nullValue" in pa -> JsonNull
+                        else -> continue
+                    }
+                    delta.append(state.closeOpenString())
+                    if (!state.started) {
+                        state.started = true
+                        delta.append("{")
+                    } else {
+                        delta.append(",")
+                    }
+                    delta.append(json.encodeToString(JsonPrimitive(key)))
+                        .append(":")
+                        .append(json.encodeToString(valueEl))
+                }
+            }
+        }
+
+        val willContinue = functionCall["willContinue"]?.jsonPrimitive?.booleanOrNull ?: false
+        if (!willContinue) {
+            if (state.started) {
+                delta.append(state.closeOpenString()).append("}")
+            } else if (functionCall["args"] is JsonObject) {
+                delta.append(json.encodeToString(functionCall["args"]))
+            } else {
+                delta.append("{}")
+            }
+            activePartialTool = null
+        }
+
+        return UIMessagePart.Tool(
+            toolCallId = state.id,
+            toolName = state.name,
+            input = delta.toString(),
+            output = emptyList(),
+            metadata = GoogleThoughtMetadata(
+                thoughtSignature = part["thoughtSignature"]?.jsonPrimitive?.contentOrNull,
+            ).toMetadata(),
+        )
     }
 
     private fun parseAnnotations(metadata: JsonObject?): List<UIMessageAnnotation> =
@@ -177,7 +310,7 @@ internal class GoogleStreamDecoder(
             var emittedImages = 0
             message.parts.forEach { part ->
                 when (part) {
-                    is UIMessagePart.Text -> if (part.text.isNotEmpty()) {
+                    is UIMessagePart.Text -> if (part.text.isNotEmpty() || part.metadata != null) {
                         addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
                         val id = textId ?: nextId(responseId, "text").also {
                             textId = it; add(StreamChunk.TextStart(it, part.metadata))
@@ -195,7 +328,7 @@ internal class GoogleStreamDecoder(
                         addAll(closeText()); addAll(closeReasoning()); addAll(closeImage())
                         val id = part.toolCallId.ifBlank { nextId(responseId, "tool") }
                         if (openToolIds.add(id)) add(StreamChunk.ToolCallStart(id, part.toolName, part.metadata))
-                        if (part.input.isNotEmpty()) {
+                        if (part.input.isNotEmpty() || part.metadata != null) {
                             add(StreamChunk.ToolCallDelta(id, inputDelta = part.input, metadata = part.metadata))
                         }
                     }
@@ -258,7 +391,7 @@ internal class GoogleStreamDecoder(
             openToolIds.clear()
         }
         private fun nextId(responseId: String, kind: String): String =
-            "$responseId:$kind-${++sequence}"
+            "$responseId:tool-${++sequence}".takeIf { kind == "tool" } ?: "$responseId:$kind-${++sequence}"
     }
 
     private fun JsonObject.toGoogleThoughtMetadata() =

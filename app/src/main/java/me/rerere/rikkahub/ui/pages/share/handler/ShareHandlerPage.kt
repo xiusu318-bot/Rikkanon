@@ -27,12 +27,23 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import me.rerere.plugin.host.PluginHost
+import me.rerere.plugin.manifest.PluginHookKind
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.context.LocalNavController
+import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.utils.base64Encode
 import me.rerere.rikkahub.utils.navigateToChatPage
 import me.rerere.rikkahub.utils.plus
+import me.rerere.ui.toast.ToastType
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 
 @Composable
@@ -41,6 +52,12 @@ fun ShareHandlerPage(text: String, image: String?) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val navController = LocalNavController.current
+    val toaster = LocalToaster.current
+    val host = koinInject<PluginHost>()
+    val version by host.registrationsVersion.collectAsStateWithLifecycle()
+    val shareHandlers = androidx.compose.runtime.remember(version) {
+        host.chain(PluginHookKind.SHARE)
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -76,6 +93,51 @@ fun ShareHandlerPage(text: String, image: String?) {
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
+                    }
+                }
+            }
+
+            if (shareHandlers.isNotEmpty()) {
+                items(shareHandlers, key = { "${it.first.id}:${it.second.key}" }) { (runtime, reg) ->
+                    val meta = reg.meta.jsonObject
+                    val title = meta["title"]?.jsonPrimitive?.contentOrNull
+                        ?: meta["name"]?.jsonPrimitive?.contentOrNull
+                        ?: runtime.manifest.name
+                    val desc = meta["description"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    Surface(
+                        onClick = {
+                            scope.launch {
+                                runCatching {
+                                    val ctx = buildJsonObject {
+                                        put("task", "other")
+                                        image?.let { put("image", it) }
+                                    }
+                                    runtime.invoke(
+                                        PluginHookKind.SHARE,
+                                        reg.handlerId,
+                                        listOf(JsonPrimitive(vm.shareText), ctx),
+                                    )
+                                }.onSuccess {
+                                    toaster.show("已交给插件 ${runtime.manifest.name}")
+                                }.onFailure { e ->
+                                    host.recordError(runtime.id, e)
+                                    toaster.show(e.message ?: e.javaClass.name, type = ToastType.Error)
+                                }
+                            }
+                        },
+                        tonalElevation = 4.dp,
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        ListItem(
+                            headlineContent = { Text(text = title, maxLines = 1) },
+                            supportingContent = {
+                                Text(
+                                    text = if (desc.isNotBlank()) "$desc · ${runtime.manifest.name}" else runtime.manifest.name,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                        )
                     }
                 }
             }

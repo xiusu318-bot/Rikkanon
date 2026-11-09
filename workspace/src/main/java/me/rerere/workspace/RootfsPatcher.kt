@@ -12,12 +12,13 @@ class RootfsPatcher {
         val etcDir = File(linuxDir, "etc")
         if (!etcDir.isDirectory) return
 
-        val cacheKey = "${linuxDir.absolutePath}|${options.nameservers.joinToString(",")}|${options.hostname}|${options.locale}"
+        val cacheKey = "${linuxDir.absolutePath}|${options.nameservers.joinToString(",")}|${options.hostname}|${options.locale}|${options.proxyUrl.orEmpty()}"
         if (cacheKey in patchedRoots &&
             File(etcDir, "resolv.conf").isFile &&
             File(linuxDir, "etc/profile.d/rikkahub-vps.sh").isFile &&
             File(linuxDir, "$FAKE_PROC_REL_DIR/stat").isFile
         ) {
+            ensureTransparentNetworkHook(linuxDir, options.proxyUrl, options.netHookSoFile)
             return
         }
 
@@ -31,6 +32,7 @@ class RootfsPatcher {
         ensureDpkgAndAptSandboxFixes(linuxDir)
         ensureVpsCommandShims(linuxDir)
         ensureVpsRuntimeProfile(linuxDir)
+        ensureTransparentNetworkHook(linuxDir, options.proxyUrl, options.netHookSoFile)
 
         patchedRoots.add(cacheKey)
     }
@@ -463,6 +465,61 @@ class RootfsPatcher {
             )
             vpsProfile.setReadable(true, false)
         }
+
+        // 清理旧版残留的环境变量代理脚本，保持 env 完全干净
+        val legacyProxyProfile = File(profileDir, "rikkahub-proxy.sh")
+        if (legacyProxyProfile.exists()) {
+            legacyProxyProfile.delete()
+        }
+    }
+
+    /**
+     * 配置底层 libc 级透明网络接管（通过 `/etc/ld.so.preload` 加载 `/usr/lib/librikka_net_hook.so`）：
+     * - 不注入任何 `HTTP_PROXY` / `ALL_PROXY` 环境变量；
+     * - 当 [proxyUrl] 含有本地回环桥接端口（且当前工作区开启了出站代理）时，写入 `/run/rikkahub-net.conf`，
+     *   沙盒内所有动态链接程序（含 perl/python/curl/node 手写裸 Socket 与 DNS 查询）自动透明走该代理；
+     * - 当工作区设为直连（[proxyUrl] 为空）时，清空 `/run/rikkahub-net.conf`，所有进程自动直连。
+     */
+    private fun ensureTransparentNetworkHook(
+        linuxDir: File,
+        proxyUrl: String?,
+        netHookSoFile: File?,
+    ) {
+        val etcDir = File(linuxDir, "etc")
+        if (!etcDir.isDirectory) return
+
+        val runDir = File(linuxDir, "run").apply { mkdirs() }
+        val netConf = File(runDir, "rikkahub-net.conf")
+        val preloadFile = File(etcDir, "ld.so.preload")
+        val targetSo = File(linuxDir, "usr/lib/librikka_net_hook.so")
+
+        if (netHookSoFile != null && netHookSoFile.isFile) {
+            targetSo.parentFile?.mkdirs()
+            if (!targetSo.exists() || targetSo.length() != netHookSoFile.length()) {
+                netHookSoFile.copyTo(targetSo, overwrite = true)
+                targetSo.setReadable(true, false)
+                targetSo.setExecutable(true, false)
+            }
+        }
+
+        val port = proxyUrl
+            ?.substringAfterLast(':', "")
+            ?.trimEnd('/')
+            ?.toIntOrNull()
+            ?.takeIf { it in 1..65535 }
+
+        if (port != null && targetSo.isFile) {
+            netConf.writeText("$port\n")
+            netConf.setReadable(true, false)
+            val hookPath = "/usr/lib/librikka_net_hook.so"
+            val existingLines = if (preloadFile.isFile) preloadFile.readLines() else emptyList()
+            if (hookPath !in existingLines.map { it.trim() }) {
+                preloadFile.writeText((existingLines + hookPath).filter { it.isNotBlank() }.joinToString("\n") + "\n")
+                preloadFile.setReadable(true, false)
+            }
+        } else {
+            if (netConf.exists()) netConf.delete()
+        }
     }
 
     private fun currentSupplementaryGroupIds(): List<Long> {
@@ -514,4 +571,6 @@ data class RootfsPatchOptions(
     val hostname: String = "localhost",
     val locale: String = "C.UTF-8",
     val groupIds: List<Long> = emptyList(),
+    val proxyUrl: String? = null,
+    val netHookSoFile: File? = null,
 )

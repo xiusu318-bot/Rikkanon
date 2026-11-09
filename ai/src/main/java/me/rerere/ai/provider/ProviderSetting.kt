@@ -250,6 +250,60 @@ sealed class ProviderSetting {
         }
     }
 
+    @Serializable
+    @SerialName("plugin")
+    data class Plugin(
+        override var id: Uuid = Uuid.random(),
+        override var enabled: Boolean = true,
+        override var name: String = "Plugin",
+        override var models: List<Model> = emptyList(),
+        override val balanceOption: BalanceOption = BalanceOption(),
+        override val customHeaders: List<CustomHeader> = emptyList(),
+        @Transient override val builtIn: Boolean = false,
+        @Transient override val description: @Composable (() -> Unit) = {},
+        @Transient override val shortDescription: @Composable (() -> Unit) = {},
+        var pluginId: String = "",
+        var providerName: String = "",
+        var apiKey: String = "",
+        var baseUrl: String = "",
+    ) : ProviderSetting() {
+        override fun addModel(model: Model): ProviderSetting = copy(models = models + model)
+
+        override fun editModel(model: Model): ProviderSetting =
+            copy(models = models.map { if (it.id == model.id) model.copy() else it })
+
+        override fun delModel(model: Model): ProviderSetting =
+            copy(models = models.filter { it.id != model.id })
+
+        override fun moveMove(from: Int, to: Int): ProviderSetting =
+            copy(models = models.toMutableList().apply {
+                val model = removeAt(from)
+                add(to, model)
+            })
+
+        override fun copyProvider(
+            id: Uuid,
+            enabled: Boolean,
+            name: String,
+            models: List<Model>,
+            balanceOption: BalanceOption,
+            customHeaders: List<CustomHeader>,
+            builtIn: Boolean,
+            description: @Composable (() -> Unit),
+            shortDescription: @Composable (() -> Unit),
+        ): ProviderSetting = copy(
+            id = id,
+            enabled = enabled,
+            name = name,
+            models = models,
+            balanceOption = balanceOption,
+            customHeaders = customHeaders,
+            builtIn = builtIn,
+            description = description,
+            shortDescription = shortDescription,
+        )
+    }
+
     companion object {
         val Types by lazy {
             listOf(

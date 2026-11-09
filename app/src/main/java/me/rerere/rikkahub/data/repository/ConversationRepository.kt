@@ -318,6 +318,17 @@ class ConversationRepository(
             saveMessageNodes(conversation.id.toString(), conversation.messageNodes)
         }
         messageFtsManager.indexConversation(conversation)
+        runCatching {
+            org.koin.mp.KoinPlatformTools.defaultContext().getOrNull()
+                ?.getOrNull<me.rerere.rikkahub.data.plugin.PluginBridge>()
+                ?.emit("conversation.create", kotlinx.serialization.json.buildJsonObject {
+                    put("conversationId", kotlinx.serialization.json.JsonPrimitive(conversation.id.toString()))
+                    put("assistantId", kotlinx.serialization.json.JsonPrimitive(conversation.assistantId.toString()))
+                    conversation.config?.parentConversationId?.let {
+                        put("parentConversationId", kotlinx.serialization.json.JsonPrimitive(it.toString()))
+                    }
+                })
+        }
     }
 
     suspend fun updateConversation(conversation: Conversation) {
@@ -347,6 +358,14 @@ class ConversationRepository(
             )
         }
         filesManager.deleteChatFiles(fullConversation.files)
+        runCatching {
+            org.koin.mp.KoinPlatformTools.defaultContext().getOrNull()
+                ?.getOrNull<me.rerere.rikkahub.data.plugin.PluginBridge>()
+                ?.emit("conversation.delete", kotlinx.serialization.json.buildJsonObject {
+                    put("conversationId", kotlinx.serialization.json.JsonPrimitive(conversation.id.toString()))
+                    put("assistantId", kotlinx.serialization.json.JsonPrimitive(conversation.assistantId.toString()))
+                })
+        }
     }
 
     suspend fun searchMessages(

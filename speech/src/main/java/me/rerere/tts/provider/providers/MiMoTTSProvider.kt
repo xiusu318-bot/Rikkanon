@@ -118,8 +118,10 @@ internal class MiMoSseProcessor(
     }
 }
 
-class MiMoTTSProvider : TTSProvider<TTSProviderSetting.MiMo> {
-    private val httpClient = OkHttpClient.Builder()
+class MiMoTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.MiMo> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

@@ -10,13 +10,17 @@ import me.rerere.document.DocxParser
 import me.rerere.document.EpubParser
 import me.rerere.document.PdfParser
 import me.rerere.document.PptxParser
+import me.rerere.rikkahub.data.plugin.PluginBridge
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.get
 import java.io.File
 
-object DocumentAsPromptTransformer : InputMessageTransformer {
+object DocumentAsPromptTransformer : InputMessageTransformer, KoinComponent {
     override suspend fun transform(
         ctx: TransformerContext,
         messages: List<UIMessage>,
     ): List<UIMessage> {
+        val pluginBridge = runCatching { get<PluginBridge>() }.getOrNull()
         return withContext(Dispatchers.IO) {
             messages.map { message ->
                 message.copy(
@@ -24,8 +28,9 @@ object DocumentAsPromptTransformer : InputMessageTransformer {
                         val documents = filterIsInstance<UIMessagePart.Document>()
                         if (documents.isNotEmpty()) {
                             documents.forEach { document ->
-                                val content = readDocumentContent(document)
                                 val path = resolveWorkspacePath(document)
+                                val pluginParsed = pluginBridge?.attachmentParse(document, path, ctx.pluginCtx)
+                                val content = pluginParsed ?: readDocumentContent(document)
                                 val pathAttr = path?.let { " path=\"$it\"" } ?: ""
                                 val prompt = """
                                   <UploadFile name="${document.fileName}"$pathAttr>

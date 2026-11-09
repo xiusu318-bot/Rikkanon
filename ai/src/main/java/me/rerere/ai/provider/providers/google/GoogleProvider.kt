@@ -52,9 +52,11 @@ import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.leadingSystemMessages
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
+import me.rerere.ai.ui.withoutLeadingSystemMessages
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.configureSessionHeaders
@@ -346,17 +348,19 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         messages: List<UIMessage>,
         params: TextGenerationParams
     ): JsonObject = buildJsonObject {
-        // System message if available
-        val systemMessage = messages.firstOrNull { it.role == MessageRole.SYSTEM }
-        if (systemMessage != null && !params.model.outputModalities.contains(Modality.IMAGE)) {
+        // System messages at the top of the prompt -> systemInstruction.parts (supports multiple parts natively)
+        val leadingSystems = messages.leadingSystemMessages()
+        val systemTextParts = leadingSystems
+            .flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }
+            .filter { it.text.isNotEmpty() }
+        if (systemTextParts.isNotEmpty() && !params.model.outputModalities.contains(Modality.IMAGE)) {
             put("systemInstruction", buildJsonObject {
                 putJsonArray("parts") {
-                    add(buildJsonObject {
-                        put(
-                            "text",
-                            systemMessage.parts.filterIsInstance<UIMessagePart.Text>()
-                                .joinToString { it.text })
-                    })
+                    systemTextParts.forEach { part ->
+                        add(buildJsonObject {
+                            put("text", part.text)
+                        })
+                    }
                 }
             })
         }
@@ -674,18 +678,18 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     }
 
     private fun buildContents(messages: List<UIMessage>): JsonArray {
-        val taggedItems = mutableListOf<Pair<JsonObject, Boolean>>()
+        val taggedItems = mutableListOf<Pair<kotlinx.serialization.json.JsonElement, Boolean>>()
         messages
-            .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
+            .withoutLeadingSystemMessages()
+            .filter { it.isValidToUpload() }
             .forEach { message ->
                 val rawJson = message.rawJsonElementOrNull()
                 if (rawJson != null) {
                     when (rawJson) {
                         is JsonArray -> rawJson.forEach { el ->
-                            if (el is JsonObject) taggedItems.add(el to true)
+                            taggedItems.add(el to true)
                         }
-                        is JsonObject -> taggedItems.add(rawJson to true)
-                        else -> Unit
+                        else -> taggedItems.add(rawJson to true)
                     }
                 } else {
                     val produced = buildJsonArray {
@@ -696,20 +700,21 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         }
                     }
                     produced.forEach { el ->
-                        taggedItems.add(el.jsonObject to message.isSynthetic)
+                        taggedItems.add(el to message.isSynthetic)
                     }
                 }
             }
         // 仅合并聊天历史记录内部（!isSynthetic）相邻的同角色消息，
         // 预设模块（isSynthetic = true 或 JSON 模式块）由用户显式编排，保持独立元素不合并。
-        val merged = mutableListOf<Pair<JsonObject, Boolean>>()
-        for ((obj, isSynthetic) in taggedItems) {
-            val role = obj["role"]?.jsonPrimitive?.contentOrNull
+        val merged = mutableListOf<Pair<kotlinx.serialization.json.JsonElement, Boolean>>()
+        for ((el, isSynthetic) in taggedItems) {
+            val obj = el as? JsonObject
+            val role = obj?.get("role")?.jsonPrimitive?.contentOrNull
             val prevPair = merged.lastOrNull()
-            val prev = prevPair?.first
+            val prev = prevPair?.first as? JsonObject
             val prevSynthetic = prevPair?.second ?: false
             val prevRole = prev?.get("role")?.jsonPrimitive?.contentOrNull
-            if (!isSynthetic && !prevSynthetic && role != null && role == prevRole && prev != null) {
+            if (!isSynthetic && !prevSynthetic && role != null && role == prevRole && prev != null && obj != null) {
                 val prevParts = prev["parts"]?.jsonArray.orEmpty()
                 val curParts = obj["parts"]?.jsonArray.orEmpty()
                 val prevHasFunctionResponse = prevParts.any { it.jsonObject.containsKey("functionResponse") }
@@ -721,7 +726,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     continue
                 }
             }
-            merged.add(obj to isSynthetic)
+            merged.add(el to isSynthetic)
         }
         return JsonArray(merged.map { it.first })
     }

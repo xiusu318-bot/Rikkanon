@@ -35,6 +35,7 @@ val MediaGenerationProviderSetting.typeName: String
         is MediaGenerationProviderSetting.Volcengine -> stringResource(R.string.media_provider_type_volcengine)
         is MediaGenerationProviderSetting.MiniMax -> "MiniMax"
         is MediaGenerationProviderSetting.OpenRouter -> "OpenRouter"
+        is MediaGenerationProviderSetting.Plugin -> "插件 (Plugin)"
     }
 
 val MediaKind.label: String
@@ -116,6 +117,13 @@ fun MediaGenerationProviderConfigure(
                         singleLine = true
                     )
                 }
+            }
+
+            if (setting is MediaGenerationProviderSetting.Plugin) {
+                item(
+                    headlineContent = { Text("插件来源") },
+                    supportingContent = { Text("${setting.pluginId} (${setting.providerName})") },
+                )
             }
         }
 

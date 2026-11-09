@@ -325,16 +325,23 @@ private fun ChatPageContent(
     val allowAudioVideoAttachments =
         currentChatModel?.findProvider(setting.providers) is ProviderSetting.Google
 
-    val completionProviders = remember(assistant.workspaceId, conversation.workspaceCwd, workspaceRepository) {
-        assistant.workspaceId?.let { workspaceId ->
-            listOf(
-                WorkspaceCompletionProvider(
-                    workspaceId = workspaceId.toString(),
-                    repository = workspaceRepository,
-                    currentCwd = conversation.workspaceCwd,
+    val pluginSlashProvider = me.rerere.rikkahub.ui.components.ai.completion.rememberPluginSlashCompletionProvider(
+        conversationId = conversation.id.toString(),
+        assistantId = assistant.id.toString(),
+    )
+    val completionProviders = remember(assistant.workspaceId, conversation.workspaceCwd, workspaceRepository, pluginSlashProvider) {
+        buildList {
+            assistant.workspaceId?.let { workspaceId ->
+                add(
+                    WorkspaceCompletionProvider(
+                        workspaceId = workspaceId.toString(),
+                        repository = workspaceRepository,
+                        currentCwd = conversation.workspaceCwd,
+                    )
                 )
-            )
-        }.orEmpty()
+            }
+            add(pluginSlashProvider)
+        }
     }
 
     TTSAutoPlay(vm = vm, setting = setting, conversation = conversation)
@@ -680,6 +687,10 @@ private fun TopBar(
                 vm = vm,
                 navController = navController,
             )
+            me.rerere.rikkahub.ui.pages.extensions.plugin.PluginChatTopBarMounts(
+                conversationId = conversation.id.toString(),
+                assistantId = assistant.id.toString(),
+            )
 
             IconButton(
                 onClick = {
@@ -805,7 +816,7 @@ private fun TopBarFollowerActions(
                 .count { tool ->
                     tool.isPending && (
                         childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId) ||
-                            !childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                            !childAssistant.requiresSubAgentAgentApproval(tool, mcpServerNameToId)
                         )
                 }
         }
@@ -1573,7 +1584,7 @@ private fun SubAgentPeekSheet(
             .filter { tool ->
                 tool.isPending && (
                     childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId) ||
-                        !childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                        !childAssistant.requiresSubAgentAgentApproval(tool, mcpServerNameToId)
                     )
             }
     }

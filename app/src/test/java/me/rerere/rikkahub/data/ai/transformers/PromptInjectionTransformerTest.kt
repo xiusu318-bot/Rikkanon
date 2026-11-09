@@ -316,8 +316,10 @@ class PromptInjectionTransformerTest {
             promptPresets = listOf(preset),
         )
 
-        assertEquals("头部规则：\n[HP: 100/100]\n\n助手设定", result[0].toText())
-        assertEquals("你好", result[1].toText())
+        assertEquals(3, result.size)
+        assertEquals("头部规则：\n[HP: 100/100]", result[0].toText())
+        assertEquals("助手设定", result[1].toText())
+        assertEquals("你好", result[2].toText())
     }
 
     // ==================== 思维链回传模块与空白角色 "?" 测试 ====================
@@ -482,5 +484,180 @@ class PromptInjectionTransformerTest {
         assertNotNull(rawElem)
         assertEquals("user", rawElem!!["role"]?.jsonPrimitive?.content)
         assertTrue(result[2].isValidToUpload())
+    }
+
+    @Test
+    fun `bottom system block stays at bottom and does not get merged into leading system when no leading system exists`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE, enabled = false),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT, enabled = false),
+                PromptBlock(markerType = PromptMarkerType.MEMORIES, enabled = false),
+                PromptBlock(markerType = PromptMarkerType.WORKSPACE_PROMPT, enabled = false),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER, enabled = false),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY, enabled = true),
+                PromptBlock(
+                    name = "底部系统块",
+                    enabled = true,
+                    role = MessageRole.SYSTEM,
+                    content = "[底部系统指令]",
+                ),
+            )
+        )
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
+        val messages = listOf(
+            UIMessage.user("第1条用户消息"),
+            UIMessage.assistant("第2条助手消息"),
+        )
+
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
+        )
+
+        assertEquals(3, result.size)
+        assertEquals(MessageRole.USER, result[0].role)
+        assertEquals("第1条用户消息", result[0].toText())
+        assertEquals(MessageRole.ASSISTANT, result[1].role)
+        assertEquals("第2条助手消息", result[1].toText())
+        assertEquals(MessageRole.SYSTEM, result[2].role)
+        assertEquals("[底部系统指令]", result[2].toText())
+    }
+
+    @Test
+    fun `moving char description marker below chat history places system message at bottom`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.MEMORIES),
+                PromptBlock(markerType = PromptMarkerType.WORKSPACE_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+            )
+        )
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
+        val messages = listOf(
+            UIMessage.system("助手原本的系统提示词"),
+            UIMessage.user("你好"),
+        )
+
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
+        )
+
+        assertEquals(2, result.size)
+        assertEquals(MessageRole.USER, result[0].role)
+        assertEquals("你好", result[0].toText())
+        assertEquals(MessageRole.SYSTEM, result[1].role)
+        assertEquals("助手原本的系统提示词", result[1].toText())
+    }
+
+    @Test
+    fun `chatHistoryTransform only modifies real chat history before lorebook and preset assembly`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+                PromptBlock(
+                    name = "后置用户块",
+                    enabled = true,
+                    role = MessageRole.USER,
+                    content = "[预设后置块]",
+                ),
+            )
+        )
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
+        val messages = listOf(
+            UIMessage.system("系统提示词"),
+            UIMessage.user("原始对话1"),
+            UIMessage.assistant("原始回复1"),
+        )
+
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
+            chatHistoryTransform = { history ->
+                // history 中只包含真实对话历史，不含系统提示词或预设块
+                assertEquals(2, history.size)
+                history.map { msg ->
+                    if (msg.role == MessageRole.USER) UIMessage.user("[已改写]" + msg.toText()) else msg
+                }
+            }
+        )
+
+        assertEquals(4, result.size)
+        assertEquals("系统提示词", result[0].toText())
+        assertEquals("[已改写]原始对话1", result[1].toText())
+        assertFalse(result[1].isSynthetic)
+        assertEquals("原始回复1", result[2].toText())
+        assertEquals("[预设后置块]", result[3].toText())
+        assertTrue(result[3].isSynthetic)
+    }
+
+    @Test
+    fun `presetBeforeAssembleTransform dynamically modifies preset blocks for current request`() {
+        val presetId = Uuid.random()
+        val preset = PromptPreset(
+            id = presetId,
+            enabled = true,
+            blocks = listOf(
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_BEFORE),
+                PromptBlock(markerType = PromptMarkerType.CHAR_SYSTEM_PROMPT),
+                PromptBlock(markerType = PromptMarkerType.WORLD_INFO_AFTER),
+                PromptBlock(markerType = PromptMarkerType.CHAT_HISTORY),
+            )
+        )
+        val assistant = Assistant(modeInjectionIds = setOf(presetId))
+        val messages = listOf(
+            UIMessage.system("系统提示词"),
+            UIMessage.user("你好"),
+        )
+
+        val result = transformMessages(
+            messages = messages,
+            assistant = assistant,
+            modeInjections = emptyList(),
+            lorebooks = emptyList(),
+            promptPresets = listOf(preset),
+            presetBeforeAssembleTransform = { p ->
+                p.copy(
+                    blocks = p.blocks + PromptBlock(
+                        name = "插件动态注入底部块",
+                        enabled = true,
+                        role = MessageRole.SYSTEM,
+                        content = "[插件动态底部指令]",
+                    )
+                )
+            }
+        )
+
+        assertEquals(3, result.size)
+        assertEquals("系统提示词", result[0].toText())
+        assertEquals("你好", result[1].toText())
+        assertEquals(MessageRole.SYSTEM, result[2].role)
+        assertEquals("[插件动态底部指令]", result[2].toText())
+        assertTrue(result[2].isSynthetic)
     }
 }

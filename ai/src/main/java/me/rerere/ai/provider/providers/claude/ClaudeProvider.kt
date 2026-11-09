@@ -55,9 +55,11 @@ import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.StreamChunkHandler
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.handleTextGenerationResult
+import me.rerere.ai.ui.leadingSystemMessages
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
+import me.rerere.ai.ui.withoutLeadingSystemMessages
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.configureSessionHeaders
@@ -457,9 +459,10 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
 
             put("stream", stream)
 
-            // system prompt
-            val systemMessage = messages.firstOrNull { it.role == MessageRole.SYSTEM }
-            val systemTextParts = systemMessage?.parts?.filterIsInstance<UIMessagePart.Text>().orEmpty()
+            // system prompt: Claude top-level `system` natively supports an array of text blocks
+            val systemTextParts = messages.leadingSystemMessages()
+                .flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }
+                .filter { it.text.isNotEmpty() }
             if (systemTextParts.isNotEmpty()) {
                 put("system", buildJsonArray {
                     systemTextParts.forEachIndexed { index, part ->
@@ -555,18 +558,18 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
         promptCaching: Boolean,
         promptCacheTtl: ClaudePromptCacheTtl
     ): JsonArray {
-        val taggedItems = mutableListOf<Pair<JsonObject, Boolean>>()
+        val taggedItems = mutableListOf<Pair<kotlinx.serialization.json.JsonElement, Boolean>>()
         messages
-            .filter { it.isValidToUpload() && it.role != MessageRole.SYSTEM }
+            .withoutLeadingSystemMessages()
+            .filter { it.isValidToUpload() }
             .forEach { message ->
                 val rawJson = message.rawJsonElementOrNull()
                 if (rawJson != null) {
                     when (rawJson) {
                         is JsonArray -> rawJson.forEach { el ->
-                            if (el is JsonObject) taggedItems.add(el to true)
+                            taggedItems.add(el to true)
                         }
-                        is JsonObject -> taggedItems.add(rawJson to true)
-                        else -> Unit
+                        else -> taggedItems.add(rawJson to true)
                     }
                 } else {
                     val produced = buildJsonArray {
@@ -577,28 +580,29 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                         }
                     }
                     produced.forEach { el ->
-                        taggedItems.add(el.jsonObject to message.isSynthetic)
+                        taggedItems.add(el to message.isSynthetic)
                     }
                 }
             }
 
         // 仅合并聊天历史记录内部（!isSynthetic）相邻的同角色消息，满足 Anthropic API 的交替要求；
         // 预设模块（isSynthetic = true 或 JSON 模式块）由用户显式编排，保持独立元素不合并。
-        val merged = mutableListOf<Pair<JsonObject, Boolean>>()
-        for ((obj, isSynthetic) in taggedItems) {
-            val role = obj["role"]?.jsonPrimitive?.contentOrNull
+        val merged = mutableListOf<Pair<kotlinx.serialization.json.JsonElement, Boolean>>()
+        for ((el, isSynthetic) in taggedItems) {
+            val obj = el as? JsonObject
+            val role = obj?.get("role")?.jsonPrimitive?.contentOrNull
             val prevPair = merged.lastOrNull()
-            val prev = prevPair?.first
+            val prev = prevPair?.first as? JsonObject
             val prevSynthetic = prevPair?.second ?: false
             val prevRole = prev?.get("role")?.jsonPrimitive?.contentOrNull
-            if (!isSynthetic && !prevSynthetic && role != null && role == prevRole && prev != null) {
+            if (!isSynthetic && !prevSynthetic && role != null && role == prevRole && prev != null && obj != null) {
                 val prevContent = prev["content"]?.jsonArray.orEmpty()
                 val curContent = obj["content"]?.jsonArray.orEmpty()
                 merged[merged.lastIndex] = JsonObject(
                     prev + ("content" to JsonArray(prevContent + curContent))
                 ) to false
             } else {
-                merged.add(obj to isSynthetic)
+                merged.add(el to isSynthetic)
             }
         }
         val messagesArray = JsonArray(merged.map { it.first })

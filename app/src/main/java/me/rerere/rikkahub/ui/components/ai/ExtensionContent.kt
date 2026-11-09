@@ -53,6 +53,7 @@ fun PromptPresetsContent(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    onItemClick: ((PromptPreset) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
     ExtensionList(
@@ -60,6 +61,7 @@ fun PromptPresetsContent(
         modifier = modifier,
         contentPadding = contentPadding,
         onManage = onManage,
+        key = { it.id },
     ) { preset, shapes ->
         val enabledBlocksCount = preset.blocks.count { it.enabled }
         ExtensionListItem(
@@ -67,6 +69,7 @@ fun PromptPresetsContent(
             description = preset.description.ifBlank { "启用块: $enabledBlocksCount / ${preset.blocks.size}" },
             checked = selectedIds.contains(preset.id),
             onCheckedChange = { checked -> onToggle(preset.id, checked) },
+            onClick = onItemClick?.let { click -> { click(preset) } },
             shapes = shapes,
             colors = colors,
         )
@@ -81,6 +84,7 @@ fun ModeInjectionsContent(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    onItemClick: ((PromptInjection.ModeInjection) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
     ExtensionList(
@@ -88,11 +92,13 @@ fun ModeInjectionsContent(
         modifier = modifier,
         contentPadding = contentPadding,
         onManage = onManage,
+        key = { it.id },
     ) { injection, shapes ->
         ExtensionListItem(
             title = injection.name.ifBlank { stringResource(R.string.extension_content_unnamed) },
             checked = selectedIds.contains(injection.id),
             onCheckedChange = { checked -> onToggle(injection.id, checked) },
+            onClick = onItemClick?.let { click -> { click(injection) } },
             shapes = shapes,
             colors = colors,
         )
@@ -107,6 +113,7 @@ fun LorebooksContent(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    onItemClick: ((Lorebook) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
     ExtensionList(
@@ -114,12 +121,14 @@ fun LorebooksContent(
         modifier = modifier,
         contentPadding = contentPadding,
         onManage = onManage,
+        key = { it.id },
     ) { lorebook, shapes ->
         ExtensionListItem(
             title = lorebook.name.ifBlank { stringResource(R.string.extension_content_unnamed_lorebook) },
             description = lorebook.description,
             checked = selectedIds.contains(lorebook.id),
             onCheckedChange = { checked -> onToggle(lorebook.id, checked) },
+            onClick = onItemClick?.let { click -> { click(lorebook) } },
             shapes = shapes,
             colors = colors,
         )
@@ -134,6 +143,7 @@ fun SkillsContent(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    onItemClick: ((SkillMetadata) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
     ExtensionList(
@@ -148,6 +158,7 @@ fun SkillsContent(
             description = skill.description,
             checked = enabledSkills.contains(skill.name),
             onCheckedChange = { checked -> onToggle(skill.name, checked) },
+            onClick = onItemClick?.let { click -> { click(skill) } },
             shapes = shapes,
             colors = colors,
         )
@@ -162,6 +173,7 @@ fun QuickMessagesContent(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    onItemClick: ((QuickMessage) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
     ExtensionList(
@@ -177,6 +189,7 @@ fun QuickMessagesContent(
             descriptionMaxLines = 2,
             checked = selectedIds.contains(quickMessage.id),
             onCheckedChange = { checked -> onToggle(quickMessage.id, checked) },
+            onClick = onItemClick?.let { click -> { click(quickMessage) } },
             shapes = shapes,
             colors = colors,
         )
@@ -217,30 +230,47 @@ private fun ExtensionListItem(
     onCheckedChange: (Boolean) -> Unit,
     shapes: ListItemShapes,
     colors: ListItemColors,
+    onClick: (() -> Unit)? = null,
     description: String = "",
     // 技能等的描述可能很长，完整内容在管理页看
     descriptionMaxLines: Int = 3,
 ) {
-    SegmentedListItem(
-        checked = checked,
-        onCheckedChange = onCheckedChange,
-        shapes = shapes,
-        colors = colors,
-        supportingContent = if (description.isNotBlank()) {
-            {
-                Text(
-                    text = description,
-                    maxLines = descriptionMaxLines,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        } else null,
-        trailingContent = {
-            // 整行都能点击切换，开关只用来显示状态
-            Switch(checked = checked, onCheckedChange = null)
-        },
-    ) {
-        Text(title)
+    val supporting: (@Composable () -> Unit)? = if (description.isNotBlank()) {
+        {
+            Text(
+                text = description,
+                maxLines = descriptionMaxLines,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    } else null
+
+    if (onClick != null) {
+        SegmentedListItem(
+            onClick = onClick,
+            shapes = shapes,
+            colors = colors,
+            supportingContent = supporting,
+            trailingContent = {
+                // 点击开关以外区域进入管理，只有点击开关才切换启用状态
+                Switch(checked = checked, onCheckedChange = onCheckedChange)
+            },
+        ) {
+            Text(title)
+        }
+    } else {
+        SegmentedListItem(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            shapes = shapes,
+            colors = colors,
+            supportingContent = supporting,
+            trailingContent = {
+                Switch(checked = checked, onCheckedChange = onCheckedChange)
+            },
+        ) {
+            Text(title)
+        }
     }
 }
 

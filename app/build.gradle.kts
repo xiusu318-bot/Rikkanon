@@ -31,8 +31,8 @@ android {
         applicationId = "me.rerere.rikkahub.rikkanon"
         minSdk = 26
         targetSdk = 37
-        versionCode = 191
-        versionName = "1.2.0"
+        versionCode = 192
+        versionName = "1.2.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -490,6 +490,7 @@ dependencies {
     implementation(project(":ui"))
     implementation(project(":terminal"))
     implementation(project(":workspace"))
+    implementation(project(":plugin"))
     implementation(project(":oauth"))
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
 

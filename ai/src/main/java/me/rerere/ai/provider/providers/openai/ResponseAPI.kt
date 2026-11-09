@@ -47,9 +47,11 @@ import me.rerere.ai.ui.ServerToolProtocol
 import me.rerere.ai.ui.ServerToolStatus
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.leadingSystemMessages
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
+import me.rerere.ai.ui.withoutLeadingSystemMessages
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.configureSessionHeaders
@@ -227,12 +229,15 @@ class ResponseAPI(
             }
             if (params.maxTokens != null) put("max_output_tokens", params.maxTokens)
 
-            // system instructions
-            if (messages.any { it.role == MessageRole.SYSTEM }) {
-                val parts = messages.first { it.role == MessageRole.SYSTEM }.parts
+            // system instructions: Response API `instructions` is a single string, join leading system blocks
+            val leadingSystemTexts = messages.leadingSystemMessages()
+                .flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }
+                .mapNotNull { it.text.takeIf(String::isNotEmpty) }
+            if (leadingSystemTexts.isNotEmpty()) {
                 put(
                     "instructions",
-                    parts.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text })
+                    leadingSystemTexts.joinToString("\n\n")
+                )
             }
 
             // messages
@@ -307,13 +312,12 @@ class ResponseAPI(
 
     internal fun buildMessages(messages: List<UIMessage>) = buildJsonArray {
         messages
+            .withoutLeadingSystemMessages()
             .filter { message ->
-                message.role != MessageRole.SYSTEM && (
-                    message.isValidToUpload() || message.parts.any { part ->
-                        part is UIMessagePart.Reasoning &&
-                            part.metadataAs<OpenAIReasoningMetadata>()?.encryptedContent != null
-                    }
-                )
+                message.isValidToUpload() || message.parts.any { part ->
+                    part is UIMessagePart.Reasoning &&
+                        part.metadataAs<OpenAIReasoningMetadata>()?.encryptedContent != null
+                }
             }
             .forEach { message ->
                 val rawJson = message.rawJsonElementOrNull()
@@ -526,7 +530,7 @@ class ResponseAPI(
                         when (part) {
                             is UIMessagePart.Text -> {
                                 add(buildJsonObject {
-                                    put("type", if (role == MessageRole.USER) "input_text" else "output_text")
+                                    put("type", if (role == MessageRole.ASSISTANT) "output_text" else "input_text")
                                     put("text", part.text)
                                 })
                             }

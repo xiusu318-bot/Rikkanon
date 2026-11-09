@@ -303,6 +303,17 @@ class RouteActivity : ComponentActivity() {
         )
 
         val backStack = rememberNavBackStack(startScreen)
+        LaunchedEffect(backStack) {
+            me.rerere.rikkahub.data.plugin.PluginUiEvents.events.collect { event ->
+                when (event) {
+                    is me.rerere.rikkahub.data.plugin.PluginUiEvent.OpenPanel ->
+                        if (event.presentation == "page") {
+                            backStack.add(Screen.PluginPanel(event.pluginId, event.path, event.argsJson, event.title))
+                        }
+                    else -> Unit
+                }
+            }
+        }
         SideEffect {
             navStack = backStack
             while (pendingIntents.isNotEmpty()) {
@@ -544,12 +555,18 @@ class RouteActivity : ComponentActivity() {
                                 ExtensionsPage()
                             }
 
-                            entry<Screen.QuickMessages> {
-                                QuickMessagesPage()
+                            entry<Screen.QuickMessages> { key ->
+                                QuickMessagesPage(
+                                    initialQuickMessageId = key.quickMessageId,
+                                )
                             }
 
-                            entry<Screen.Prompts> {
-                                PromptPage()
+                            entry<Screen.Prompts> { key ->
+                                PromptPage(
+                                    initialTab = key.initialTab,
+                                    initialPresetId = key.presetId,
+                                    initialLorebookId = key.lorebookId,
+                                )
                             }
 
                             entry<Screen.Skills> {
@@ -561,6 +578,18 @@ class RouteActivity : ComponentActivity() {
                             }
                             entry<Screen.SecretKeys> {
                                 SecretKeysPage()
+                            }
+
+                            entry<Screen.Plugins> {
+                                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginsPage()
+                            }
+
+                            entry<Screen.PluginDetail> { key ->
+                                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginDetailPage(key.id)
+                            }
+
+                            entry<Screen.PluginPanel> { key ->
+                                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPanelPage(key.pluginId, key.path, key.argsJson, key.title)
                             }
 
                             entry<Screen.WorkspaceDetail> { key ->
@@ -596,6 +625,7 @@ class RouteActivity : ComponentActivity() {
                             }
                         }
                     )
+                    me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPanelOverlays()
                     if (BuildConfig.DEBUG) {
                         Text(
                             text = "[开发模式]",
@@ -791,10 +821,16 @@ sealed interface Screen : NavKey {
     data object Extensions : Screen
 
     @Serializable
-    data object QuickMessages : Screen
+    data class QuickMessages(
+        val quickMessageId: String? = null,
+    ) : Screen
 
     @Serializable
-    data object Prompts : Screen
+    data class Prompts(
+        val initialTab: Int = 0,
+        val presetId: String? = null,
+        val lorebookId: String? = null,
+    ) : Screen
 
     @Serializable
     data object Skills : Screen
@@ -804,6 +840,15 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SecretKeys : Screen
+
+    @Serializable
+    data object Plugins : Screen
+
+    @Serializable
+    data class PluginDetail(val id: String) : Screen
+
+    @Serializable
+    data class PluginPanel(val pluginId: String, val path: String, val argsJson: String = "null", val title: String? = null) : Screen
 
     @Serializable
     data class WorkspaceDetail(val id: String) : Screen

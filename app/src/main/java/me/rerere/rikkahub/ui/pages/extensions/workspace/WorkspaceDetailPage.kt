@@ -514,6 +514,17 @@ private fun WorkspaceBasicPage(
                 onToolApprovalChange = onToolApprovalChange,
             )
         }
+
+        if (workspace != null) {
+            item {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPageSlotMounts(
+                    slot = "workspace.detail",
+                    contextArgs = kotlinx.serialization.json.buildJsonObject {
+                        put("workspaceId", kotlinx.serialization.json.JsonPrimitive(workspace.id))
+                    },
+                )
+            }
+        }
     }
 }
 

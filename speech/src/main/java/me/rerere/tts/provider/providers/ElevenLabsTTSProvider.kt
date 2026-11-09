@@ -19,8 +19,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "ElevenLabsTTSProvider"
 
-class ElevenLabsTTSProvider : TTSProvider<TTSProviderSetting.ElevenLabs> {
-    private val httpClient = OkHttpClient.Builder()
+class ElevenLabsTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.ElevenLabs> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

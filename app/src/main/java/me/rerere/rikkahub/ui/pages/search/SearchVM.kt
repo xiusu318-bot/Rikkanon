@@ -17,6 +17,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.db.fts.MessageSearchResult
 import me.rerere.rikkahub.data.db.fts.MessageSearchSort
+import me.rerere.rikkahub.data.plugin.PluginBridge
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.ui.hooks.readStringPreference
 import me.rerere.rikkahub.ui.hooks.writeStringPreference
@@ -41,6 +42,7 @@ class SearchVM(
     private val context: Application,
     private val conversationRepo: ConversationRepository,
     private val settingsStore: SettingsStore,
+    private val pluginBridge: PluginBridge,
 ) : ViewModel() {
     private val searchRequests = Channel<SearchRequest>(Channel.CONFLATED)
     private var currentAssistantId: Uuid? = null
@@ -145,7 +147,8 @@ class SearchVM(
         isLoading = true
         try {
             if (request.debounce) delay(300L)
-            results = conversationRepo.searchMessages(request.query, request.sort, request.assistantId)
+            val raw = conversationRepo.searchMessages(request.query, request.sort, request.assistantId)
+            results = pluginBridge.searchResults(raw, request.query, request.assistantId)
         } finally {
             isLoading = false
         }

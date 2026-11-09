@@ -26,6 +26,7 @@ val ASRProviderSetting.typeName: String
         is ASRProviderSetting.Volcengine -> "Volcengine"
         is ASRProviderSetting.MiMo -> "MiMo"
         is ASRProviderSetting.Step -> "Step"
+        is ASRProviderSetting.Plugin -> "插件 (Plugin)"
     }
 
 @Composable
@@ -66,8 +67,39 @@ fun ASRProviderConfigure(
                 is ASRProviderSetting.Volcengine -> volcengineASRItems(setting, onValueChange)
                 is ASRProviderSetting.MiMo -> miMoASRItems(setting, onValueChange)
                 is ASRProviderSetting.Step -> stepASRItems(setting, onValueChange)
+                is ASRProviderSetting.Plugin -> pluginASRItems(setting, onValueChange)
             }
         }
+    }
+}
+
+private fun CardGroupScope.pluginASRItems(
+    setting: ASRProviderSetting.Plugin,
+    onValueChange: (ASRProviderSetting) -> Unit
+) {
+    item(
+        headlineContent = { Text("插件来源") },
+        supportingContent = { Text("${setting.pluginId} (${setting.providerName})") },
+    )
+    formItem(headlineContent = { Text(stringResource(R.string.setting_asr_configure_sample_rate)) }) {
+        OutlinedNumberInput(
+            value = setting.sampleRate,
+            onValueChange = { value ->
+                if (value in 8000..48000) onValueChange(setting.copy(sampleRate = value))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = "Sample Rate"
+        )
+    }
+    formItem(headlineContent = { Text(stringResource(R.string.setting_asr_configure_segment_duration)) }) {
+        OutlinedNumberInput(
+            value = setting.segmentDurationSec,
+            onValueChange = { value ->
+                if (value in 0..300) onValueChange(setting.copy(segmentDurationSec = value))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = "Segment Duration (s)"
+        )
     }
 }
 

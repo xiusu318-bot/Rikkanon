@@ -30,6 +30,27 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.DISPLAY_ONLY_PART_KEY
+import me.rerere.ai.ui.TOOL_DISPLAY_KEY
+import me.rerere.ai.ui.TOOL_DISPLAY_PARTS_KEY
+import me.rerere.ai.ui.withDisplay
+import me.rerere.ai.provider.CustomHeader
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.put
+import me.rerere.plugin.http.PluginRequestContext
+import me.rerere.plugin.http.PluginRequestContexts
+import me.rerere.plugin.manifest.PluginHookKind
+import me.rerere.rikkahub.data.plugin.ApprovalDecision
+import me.rerere.rikkahub.data.plugin.PLUGIN_MAIN_AGENT_APPROVAL_KEY
+import me.rerere.rikkahub.data.plugin.PluginBridge
+import me.rerere.rikkahub.data.plugin.PluginCtx
+import me.rerere.rikkahub.data.plugin.ToolBeforeResult
+import me.rerere.rikkahub.data.plugin.isPluginError
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.StreamChunkHandler
 import me.rerere.ai.ui.handleTextGenerationResult
@@ -81,6 +102,7 @@ class GenerationLoop(
     private val context: Context,
     private val providerManager: ProviderManager,
     private val json: Json,
+    private val pluginBridge: PluginBridge,
 ) {
     fun generateText(
         settings: Settings,
@@ -98,9 +120,24 @@ class GenerationLoop(
         workspaceCwd: String? = null,
         autoApproveTools: Boolean = false,
         pollQueuedUserMessages: (suspend () -> List<UIMessage>)? = null,
+        isSubAgent: Boolean = false,
+        parentConversationId: Uuid? = null,
+        subAgentCode: String? = null,
+        pluginTask: String = "chat",
     ): Flow<GenerationChunk> = flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = providerManager.getProviderByType(provider)
+        fun pluginCtx(step: Int?) = PluginCtx(
+            task = pluginTask,
+            assistantId = assistant.id,
+            conversationId = conversationId,
+            isSubAgent = isSubAgent,
+            parentConversationId = parentConversationId,
+            subAgentCode = subAgentCode,
+            stepIndex = step,
+            model = model,
+            workspaceId = assistant.workspaceId,
+        )
 
         var messages: List<UIMessage> = messages
         val hasCustomStepLimit = maxSteps > 0
@@ -130,8 +167,12 @@ class GenerationLoop(
         }
         val loopLimit = if (hasCustomStepLimit) maxToolRounds + 1 else maxToolRounds
 
+        val eventBase = pluginCtx(null).toJson()
+        pluginBridge.emit("generation.start", eventBase)
+        try {
         for (stepIndex in 0 until loopLimit) {
             Log.i(TAG, "streamText: start step #$stepIndex (${model.id}, maxToolRounds=$maxToolRounds)")
+            pluginBridge.emit("generation.step", pluginCtx(stepIndex).toJson())
 
             // Check if we have tool calls ready to continue after user interaction.
             val pendingTools = messages.lastOrNull()?.getTools()?.filter {
@@ -142,6 +183,7 @@ class GenerationLoop(
 
             // Skip generation if we have approved/denied tool calls to handle
             if (pendingTools.isEmpty()) {
+                val curCtx = pluginCtx(stepIndex)
                 generateInternal(
                     assistant = assistant,
                     settings = settings,
@@ -152,19 +194,18 @@ class GenerationLoop(
                             context = context,
                             model = model,
                             assistant = assistant,
-                            settings = settings
+                            settings = settings,
+                            pluginCtx = curCtx,
                         )
-                        emit(
-                            GenerationChunk.Messages(
-                                messages.visualTransforms(
-                                    transformers = outputTransformers,
-                                    context = context,
-                                    model = model,
-                                    assistant = assistant,
-                                    settings = settings
-                                )
-                            )
-                        )
+                        val visual = messages.visualTransforms(
+                            transformers = outputTransformers,
+                            context = context,
+                            model = model,
+                            assistant = assistant,
+                            settings = settings,
+                            pluginCtx = curCtx,
+                        ).let { vm -> pluginBridge.responseVisual(vm, assistant, curCtx) }
+                        emit(GenerationChunk.Messages(visual))
                     },
                     transformers = inputTransformers,
                     model = model,
@@ -177,25 +218,37 @@ class GenerationLoop(
                     conversationSystemPrompt = conversationSystemPrompt,
                     conversationId = conversationId,
                     workspaceCwd = workspaceCwd,
+                    pluginCtx = curCtx,
                 )
                 messages = messages.visualTransforms(
                     transformers = outputTransformers,
                     context = context,
                     model = model,
                     assistant = assistant,
-                    settings = settings
-                )
+                    settings = settings,
+                    pluginCtx = curCtx,
+                ).let { vm -> pluginBridge.responseVisual(vm, assistant, curCtx) }
                 messages = messages.onGenerationFinish(
                     transformers = outputTransformers,
                     context = context,
                     model = model,
                     assistant = assistant,
-                    settings = settings
+                    settings = settings,
+                    pluginCtx = curCtx,
                 )
+                messages = pluginBridge.responseFinish(messages, assistant, curCtx)
                 messages = messages.slice(0 until messages.lastIndex) + messages.last().copy(
                     finishedAt = Clock.System.now()
                         .toLocalDateTime(TimeZone.currentSystemDefault())
                 )
+                messages.last().usage?.let { u ->
+                    pluginBridge.emit("usage", JsonObject(curCtx.toJson() + ("usage" to buildJsonObject {
+                        put("promptTokens", u.promptTokens)
+                        put("completionTokens", u.completionTokens)
+                        put("totalTokens", u.totalTokens)
+                        put("cachedTokens", u.cachedTokens)
+                    })))
+                }
                 emit(GenerationChunk.Messages(messages))
 
                 val toolCalls = messages.last().getTools().filter { !it.isExecuted }
@@ -230,10 +283,28 @@ class GenerationLoop(
                 // Check for tools that need approval (bypass if autoApproveTools is enabled on sub-conversations,
                 // except interactive HITL tools like ask_user / ask_key which always require user input)
                 var hasPendingApproval = false
+                // 插件审批决策（approval.decide）：优先于工具自身的审批设置
+                val pluginApprovals = if (pluginBridge.hasHook(PluginHookKind.APPROVAL, assistant)) {
+                    toolCalls.filter { it.approvalState is ToolApprovalState.Auto }
+                        .mapNotNull { t -> pluginBridge.approvalDecide(t, assistant, pluginCtx(stepIndex))?.let { t.toolCallId to it } }
+                        .toMap()
+                } else emptyMap()
                 val updatedTools = toolCalls.map { tool ->
                     val toolDef = tools.find { it.name == tool.toolName }
                     val isInteractiveHitl = tool.toolName == "ask_user" || tool.toolName == "ask_key"
+                    val pluginDecision = pluginApprovals[tool.toolCallId]
                     when {
+                        pluginDecision is ApprovalDecision.Deny -> tool.copy(approvalState = ToolApprovalState.Denied(pluginDecision.reason))
+                        pluginDecision == ApprovalDecision.User -> {
+                            hasPendingApproval = true
+                            tool.copy(approvalState = ToolApprovalState.Pending)
+                        }
+                        pluginDecision == ApprovalDecision.MainAgent -> {
+                            hasPendingApproval = true
+                            val meta = JsonObject((tool.metadata ?: JsonObject(emptyMap())) + (PLUGIN_MAIN_AGENT_APPROVAL_KEY to JsonPrimitive(true)))
+                            tool.copy(approvalState = ToolApprovalState.Pending, metadata = meta)
+                        }
+                        pluginDecision == ApprovalDecision.Auto -> tool
                         (isInteractiveHitl || !autoApproveTools) &&
                             toolDef?.needsApproval(tool.inputAsJson()) == true &&
                             tool.approvalState is ToolApprovalState.Auto -> {
@@ -299,6 +370,7 @@ class GenerationLoop(
             // Handle tools concurrently (supports parallel sub-agents & parallel workspace tools)
             // Use CoroutineStart.UNDISPATCHED so concurrent tool calls (e.g. multiple conversation_send)
             // enter their initial synchronous registration/reservation block strictly in list order.
+            val progressMutex = Mutex()
             val executedTools = coroutineScope {
                 toolsToProcess.map { tool ->
                     async(start = CoroutineStart.UNDISPATCHED) {
@@ -334,6 +406,7 @@ class GenerationLoop(
 
                             else -> {
                                 val useSecretAlias = settings.enableSecretKeyAlias
+                                val toolScope = this
                                 runCatching {
                                     val toolDef = tools.find { toolDef -> toolDef.name == tool.toolName }
                                         ?: error("Tool ${tool.toolName} not found")
@@ -342,10 +415,38 @@ class GenerationLoop(
                                     }.getOrElse {
                                         error("Invalid tool arguments JSON for ${tool.toolName}: ${it.message}")
                                     }
-                                    val args = rawArgs.replaceSecretKeyAliases(settings, useSecretAlias)
+                                    val toolCtx = pluginCtx(stepIndex)
+                                    // tool.before 看到的是代名词形式的参数，替换真实密钥在插件之后进行
+                                    val before = pluginBridge.toolBefore(tool, rawArgs, assistant, toolCtx)
                                     Log.i(TAG, "generateText: executing tool ${toolDef.name}")
-                                    val rawResult = toolDef.execute(args)
-                                    val result = if (useSecretAlias) {
+                                    val progressElement = PluginBridge.ToolProgressElement { progressParts ->
+                                        toolScope.launch {
+                                            progressMutex.withLock {
+                                                val lastMsg = messages.lastOrNull() ?: return@withLock
+                                                val newParts = lastMsg.parts.map { p ->
+                                                    if (p is UIMessagePart.Tool && p.toolCallId == tool.toolCallId && p.finishedAt == null) {
+                                                        p.copy(output = progressParts)
+                                                    } else p
+                                                }
+                                                messages = messages.dropLast(1) + lastMsg.copy(parts = newParts)
+                                                emit(GenerationChunk.Messages(messages))
+                                            }
+                                        }
+                                    }
+                                    val rawResult = when (before) {
+                                        is ToolBeforeResult.Proceed -> withContext(progressElement) {
+                                            toolDef.execute(before.args.replaceSecretKeyAliases(settings, useSecretAlias))
+                                        }
+                                        is ToolBeforeResult.Result -> before.parts
+                                        is ToolBeforeResult.Deny -> listOf(
+                                            UIMessagePart.Text(
+                                                json.encodeToString(buildJsonObject {
+                                                    put("error", JsonPrimitive("Tool execution denied by plugin. Reason: ${before.reason}"))
+                                                })
+                                            )
+                                        )
+                                    }
+                                    val redacted = if (useSecretAlias) {
                                         rawResult.map { part ->
                                             if (part is UIMessagePart.Text) {
                                                 part.copy(text = settings.redactSecretKeyValues(part.text, true))
@@ -354,10 +455,21 @@ class GenerationLoop(
                                     } else {
                                         rawResult
                                     }
+                                    val afterHook = pluginBridge.toolAfter(tool, rawArgs, redacted, assistant, toolCtx)
+                                    // 仅展示部件（插件 display / MCP _meta.rikka/display）移入 metadata，不发给模型
+                                    val (displayOnly, result) = afterHook.partition {
+                                        (it.metadata?.get(DISPLAY_ONLY_PART_KEY) as? JsonPrimitive)?.content == "true"
+                                    }
+                                    val toolMetadata = if (displayOnly.isEmpty()) tool.metadata else JsonObject(
+                                        (tool.metadata ?: JsonObject(emptyMap())) + (TOOL_DISPLAY_PARTS_KEY to JsonArray(
+                                            displayOnly.map { json.encodeToJsonElement(UIMessagePart.serializer(), it) }
+                                        ))
+                                    )
                                     val hasShellAccess = tools.any { it.name == "workspace_write_file" || it.name == "workspace_edit_file" }
                                     tool.copy(
-                                        output = maybeTruncateToolOutput(tool, result, hasShellAccess),
+                                        output = maybeTruncateToolOutput(tool, result.ifEmpty { listOf(UIMessagePart.Text("")) }, hasShellAccess),
                                         finishedAt = Clock.System.now(),
+                                        metadata = toolMetadata,
                                     )
                                 }.getOrElse {
                                     if (it is CancellationException) throw it
@@ -422,11 +534,29 @@ class GenerationLoop(
             // and starts a fresh assistant message block.
             val steeredMessages = pollQueuedUserMessages?.invoke().orEmpty()
             if (steeredMessages.isNotEmpty()) {
+                pluginBridge.emit("steer.injected", JsonObject(eventBase + ("count" to JsonPrimitive(steeredMessages.size))))
                 Log.i(TAG, "generateText: injecting ${steeredMessages.size} mid-turn steered user message(s)")
                 messages = messages + steeredMessages
             }
 
             emit(GenerationChunk.Messages(messages))
+
+            // 本步执行的工具全部声明 endTurn（插件 / MCP）且没有插话：结束本轮，不再请求模型
+            val endTurn = steeredMessages.isEmpty() && executedTools.all { executed ->
+                tools.find { it.name == executed.toolName }?.endTurn == true
+            }
+            if (endTurn) {
+                Log.i(TAG, "generateText: all executed tools declared endTurn, finishing turn")
+                break
+            }
+        }
+        pluginBridge.emit("generation.finish", eventBase)
+        } catch (e: CancellationException) {
+            pluginBridge.emit("generation.stopped", eventBase)
+            throw e
+        } catch (e: Throwable) {
+            pluginBridge.emit("generation.error", JsonObject(eventBase + ("error" to JsonPrimitive(e.message ?: e.javaClass.name))))
+            throw e
         }
 
     }.flowOn(Dispatchers.IO)
@@ -447,6 +577,7 @@ class GenerationLoop(
         conversationSystemPrompt: String? = null,
         conversationId: Uuid? = null,
         workspaceCwd: String? = null,
+        pluginCtx: PluginCtx = PluginCtx(),
     ) {
         val effectiveSystemPrompt =
             if (assistant.allowConversationSystemPrompt && !conversationSystemPrompt.isNullOrBlank()) {
@@ -499,6 +630,12 @@ class GenerationLoop(
             workspaceCwd = workspaceCwd,
             memoryPrompt = memoryPromptText,
             toolSystemPrompt = toolPromptText,
+            pluginCtx = pluginCtx,
+        ).let { pluginBridge.beforeSend(it, assistant, pluginCtx) }
+
+        // 插件请求上下文：经请求头携带到 PluginInterceptor，发往上游前移除
+        val pluginToken = PluginRequestContexts.register(
+            PluginRequestContext(pluginCtx.toJson()) { true }
         )
 
         var messages: List<UIMessage> = messages
@@ -512,13 +649,14 @@ class GenerationLoop(
             customHeaders = buildList {
                 addAll(assistant.customHeaders)
                 addAll(model.customHeaders)
+                add(CustomHeader(PluginRequestContexts.HEADER, pluginToken))
             },
             customBody = buildList {
                 addAll(assistant.customBodies)
                 addAll(model.customBodies)
             },
             sessionId = (conversationId ?: Uuid.random()).toString(),
-        )
+        ).let { pluginBridge.paramsBeforeSend(it, assistant, pluginCtx) }
         try {
             if (stream) {
                 // 每次重试都从本次模型调用开始前的消息快照重新合并，避免将重试响应
@@ -539,6 +677,8 @@ class GenerationLoop(
                 while (true) {
                     val streamChunkHandler = StreamChunkHandler(model)
                     var attemptMessages = responseBaseMessages
+                    // 插件 onStream：每次请求（含重试）新建实例
+                    val pluginStream = pluginBridge.openStream(assistant, pluginCtx)
                     try {
                         providerImpl.streamText(
                             providerSetting = provider,
@@ -549,7 +689,11 @@ class GenerationLoop(
                                 if (retryCount > 0) {
                                     processingStatus.value = null
                                 }
-                                attemptMessages = streamChunkHandler.handle(attemptMessages, chunk)
+                                val chunks = pluginStream?.process(chunk) ?: listOf(chunk)
+                                for (c in chunks) {
+                                    attemptMessages = streamChunkHandler.handle(attemptMessages, c)
+                                }
+                                attemptMessages = applyToolDisplays(attemptMessages, tools)
                                 onUpdateMessages(attemptMessages)
                             } catch (error: CancellationException) {
                                 throw error
@@ -558,9 +702,17 @@ class GenerationLoop(
                                 throw StreamChunkHandlingException(error)
                             }
                         }
+                        pluginStream?.end()?.takeIf { it.isNotEmpty() }?.let { tail ->
+                            for (c in tail) {
+                                attemptMessages = streamChunkHandler.handle(attemptMessages, c)
+                            }
+                            attemptMessages = applyToolDisplays(attemptMessages, tools)
+                            onUpdateMessages(attemptMessages)
+                        }
                         messages = attemptMessages
                         break
                     } catch (error: Throwable) {
+                        pluginStream?.abort()
                         if (error is StreamChunkHandlingException) {
                             throw error.cause ?: error
                         }
@@ -573,6 +725,9 @@ class GenerationLoop(
                     }
                 }
             } else {
+                if (pluginBridge.hasHook(PluginHookKind.STREAM, assistant)) {
+                    throw IllegalStateException("[plugin] onStream 暂不支持非流式输出，请在助手设置中开启流式输出")
+                }
                 val result = executeProviderRequestWithRetry(
                     processingStatus = processingStatus,
                     enabled = settings.networkSetting.enableAutoRetry,
@@ -583,12 +738,29 @@ class GenerationLoop(
                         params = params,
                     )
                 }
-                messages = messages.handleTextGenerationResult(result = result, model = model)
+                messages = applyToolDisplays(messages.handleTextGenerationResult(result = result, model = model), tools)
                 onUpdateMessages(messages)
             }
         } finally {
             processingStatus.value = null
+            PluginRequestContexts.remove(pluginToken)
         }
+    }
+
+    /** 给声明了 display 的工具调用部件写入显示声明（流式期间持续补齐，provider 可能覆盖 metadata）。 */
+    private fun applyToolDisplays(messages: List<UIMessage>, tools: List<Tool>): List<UIMessage> {
+        val displays = tools.mapNotNull { t -> t.display?.let { t.name to it } }.toMap()
+        if (displays.isEmpty()) return messages
+        val last = messages.lastOrNull() ?: return messages
+        var changed = false
+        val parts = last.parts.map { part ->
+            val display = (part as? UIMessagePart.Tool)?.let { displays[it.toolName] }
+            if (part is UIMessagePart.Tool && display != null && part.metadata?.get(TOOL_DISPLAY_KEY) != display) {
+                changed = true
+                part.withDisplay(display)
+            } else part
+        }
+        return if (changed) messages.dropLast(1) + last.copy(parts = parts) else messages
     }
 
     private suspend fun <T> executeProviderRequestWithRetry(
@@ -621,6 +793,8 @@ class GenerationLoop(
         // 先检查协程状态，确保取消不会被当作网络波动重新拉起。
         currentCoroutineContext().ensureActive()
         if (error is CancellationException) throw error
+        // 插件错误（含插件 intercept 抛出的 PluginIOException）不是网络波动，直接失败
+        if (error.isPluginError()) throw error
         val isRateLimitOrOverload = isRateLimitOrOverloadError(error)
         if ((!enabled && !isRateLimitOrOverload) || (!isRateLimitOrOverload && error !is IOException) || retryCount >= MAX_PROVIDER_NETWORK_RETRIES) {
             throw error

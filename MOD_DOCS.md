@@ -1,9 +1,14 @@
 # Rikkanon 功能与架构说明文档（基于 RikkaHub 二开）
 
-> **当前版本**：`v1.2.0`（重大版本更新）
+> **当前版本**：`v1.2.5`
 > **应用包名**：`me.rerere.rikkahub.rikkanon`（与原版 `me.rerere.rikkahub` 独立共存，互不覆盖）
 
-本文档介绍 **Rikkanon** 中针对 **高级提示词模式（最大化自由构造 API 请求体：提示词预设组装、JSON 显式缓存编排、世界书引擎与深度正则）**、**工作区持久化交互式多终端（`workspace_terminal`）**、**子代理独立模块与多助手模型绑定（Sub-Agent）**、**连续工具调用中途插话（Steer）**、**双层 Roll 与全消息双模式编辑器** 以及 **工作区终端 & 子代理主从跟随 UI** 的核心功能设计与更新记录。
+本文档介绍 **Rikkanon** 中针对 **轻量级高自由度 JS 插件系统（`:plugin`）**、**高级提示词模式（最大化自由构造 API 请求体：提示词预设组装、JSON 显式缓存编排、世界书引擎与深度正则）**、**多代理管理与本地沙盒底层透明无痕出网**、**工作区持久化交互式多终端（`workspace_terminal`）**、**子代理独立模块与多助手模型绑定（Sub-Agent）**、**连续工具调用中途插话（Steer）**、**双层 Roll 与全消息双模式编辑器** 以及 **工作区终端 & 子代理主从跟随 UI** 的核心功能设计与更新记录。
+
+> [!CAUTION]
+> ### ⚠️ 插件系统安全声明（必读）
+> - **请务必了解所安装插件的全部源代码及具体作用**：请仅导入和启用你自己编写、或已完整审阅全部源码并明确知晓其行为逻辑的插件。
+> - **App 层面无任何针对插件的额外限制**：出于作者个人需求（不喜欢太严格、繁琐的安全限制与沙盒阉割），**Rikkanon 在应用层面对插件完全开放底层控制权，没有任何针对插件能力的限制**。插件在声明权限后即可读写对话、修改全局设置与提示词预设、拦截并改写底层 HTTP 请求与流式响应、发起网络请求以及操控工作区终端与子代理，请使用者自行对所加载的插件代码负责。
 
 ---
 
@@ -146,6 +151,21 @@
 ---
 
 ## 三、 版本迭代更新记录 (Changelog)
+
+### v1.2.5 更新（高自由度插件系统、扩展面板交互重构与预设停留记忆、多代理分模块出站与沙盒透明无痕出网）
+1. **轻量级高自由度 JS 插件系统（`:plugin` 模块与全量宿主 API / Hook / UI 挂载）**：
+   - **安全与高自由度声明**：出于作者个人需求（不喜欢太严格的安全限制），**App 层面未对插件施加任何能力阉割或黑盒限制**，插件拥有与宿主应用同等的完整控制能力；**使用前请务必完整了解插件全部源代码及具体作用**。
+   - 支持 `.zip` 插件导入、ES2020 ES Module 运行时、权限声明校验、单项能力独立开关、调用超时与内存上限控制；
+   - 支持 `registerTool`（含 `display` 正文气泡渲染、`endTurn`、`when`、`ctx.progress`）、全链路请求/响应改写（`intercept`、`onStream`、`chat.history`、`preset.beforeAssemble`、`prompt.assembled`、`messages.beforeSend`、`params.beforeSend`、`tool.before/after`）、高级提示词/世界书/正则 Hook、底层服务自动同步（`PluginCapabilitySync`）以及 `plugin.detail` 内聚配置表单与 WebView 自有面板（详见 [`PLUGIN_API_DOC.md`](PLUGIN_API_DOC.md) 与 [`PLUGIN_DESIGN.md`](PLUGIN_DESIGN.md)）。
+2. **对话内扩展面板交互逻辑优化 & 提示词预设停留记忆上次打开项**：
+   - **对话与助手扩展面板交互更自然**：将预设、世界书、Skills、快捷消息列表项重构为 **「点击卡片主体直接进入对应条目的管理/编辑界面」与「点击右侧开关独立切换启用状态」分离**；同时优化扩展管理排序，将「高级提示词模式 / 模式注入（提示词预设）」置顶，将「快捷消息」排在「Agent Skills」正下方；
+   - **提示词预设界面停留在上一个打开的预设**：修复了每次进入提示词组装页都重置回默认第一个预设的问题，现在会自动持久化记忆并停留在上一次查看、编辑或切换的预设。
+3. **多代理管理、分模块出站路由、真 HTTPS / SOCKS5(h) 代理与沙盒 glibc 级透明无痕出网**：
+   - **「网络 -> 代理」双面板（管理代理 + 出站设置）**：支持保存多个 `HTTP` / `HTTPS`（TLS 隧道）/ `SOCKS5`（远端 DNS）代理节点，支持一键粘贴 `scheme://user:pass@host:port` 或住宅/家宽四段式 `host:port:user:pass` 自动拆解，支持在编辑弹窗内直接测试连接延迟；
+   - **三大模块独立出站与一键全出站**：支持「一键全直连」与「全部设为指定代理」，并支持为 **LLM 本体与常规请求**、**工作区（本地沙盒）**、**MCP 服务** 分别指定不同代理或空代理（直连），代理删除后自动回退为空代理；全面打通 `McpManager`、`TTSManager`（11 家 Provider）、WebDAV/S3 备份同步与 `RootfsInstaller`；
+   - **本地 PRoot 沙盒 glibc 透明无痕出网（`librikka_net_hook.so` + `WorkspaceLoopbackProxyBridge`）**：无需注入任何 `HTTP_PROXY` / `ALL_PROXY` 环境变量（保持沙盒 `env` 纯净且不暴露代理 IP 与账密），通过 `/etc/ld.so.preload` 在 libc 层透明接管 `getaddrinfo` / `gethostbyname` / `connect`，经宿主桥接器执行远端 DoH 解析（彻底消除本机 TUN Fake-IP `28.0.x.x`）并将包括 Perl/Python 手写裸 Socket 在内的所有外网 TCP 连接透明路由至工作区代理，支持已开终端实时热切换。
+4. **Gemini `streamFunctionCallArguments` 流式工具参数原生支持**：
+   - `GoogleStreamDecoder` 原生解析 `partialArgs` 流式分片并合并为 `ToolCallDelta`。
 
 ### v1.2.0 重大更新（高级提示词模式、自由请求体 JSON 编排、世界书引擎与深度正则）
 1. **升级「高级提示词模式」并确立「最大化自由请求体」架构**：

@@ -401,20 +401,30 @@ internal fun FilesPicker(
                     settings = settings,
                     onUpdate = onUpdateAssistant,
                     modifier = Modifier.weight(1f),
-                    onNavigateToQuickMessages = {
+                    onNavigateToQuickMessages = { quickMessageId ->
                         showExtensionSheet = false
                         onDismiss()
-                        navController.navigate(Screen.QuickMessages)
+                        navController.navigate(Screen.QuickMessages(quickMessageId = quickMessageId))
                     },
-                    onNavigateToPrompts = {
+                    onNavigateToPrompts = { initialTab, presetId, lorebookId ->
                         showExtensionSheet = false
                         onDismiss()
-                        navController.navigate(Screen.Prompts)
+                        navController.navigate(
+                            Screen.Prompts(
+                                initialTab = initialTab,
+                                presetId = presetId,
+                                lorebookId = lorebookId,
+                            )
+                        )
                     },
-                    onNavigateToSkills = {
+                    onNavigateToSkills = { skillName ->
                         showExtensionSheet = false
                         onDismiss()
-                        navController.navigate(Screen.Skills)
+                        if (skillName != null) {
+                            navController.navigate(Screen.SkillDetail(skillName))
+                        } else {
+                            navController.navigate(Screen.Skills)
+                        }
                     },
                 )
                 Spacer(modifier = Modifier.height(16.dp))

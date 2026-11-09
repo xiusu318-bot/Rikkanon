@@ -5,6 +5,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.displayText
+import me.rerere.ai.ui.toolDisplay
 import me.rerere.rikkahub.utils.JsonInstant
 
 internal const val CHART_DISPLAY_TOOL_NAME = "chart_display"
@@ -66,7 +68,17 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
             }
 
             is UIMessagePart.Tool -> {
-                if (part.isSuccessfulChartDisplay()) {
+                val display = part.toolDisplay()
+                if (display != null && !part.isPending && (display.isText || display.isHidden)) {
+                    // 插件 / MCP 显示声明：按正文显示（流式期间实时解析参数）或隐藏；执行出错时仍显示工具步骤
+                    if (display.isText) {
+                        flushThinkingSteps()
+                        result.add(MessagePartBlock.ContentBlock(UIMessagePart.Text(part.displayText().orEmpty()), index))
+                    }
+                    if (part.isToolError()) {
+                        currentThinkingSteps.add(ThinkingStep.ToolStep(part, index))
+                    }
+                } else if (part.isSuccessfulChartDisplay()) {
                     flushThinkingSteps()
                     result.add(MessagePartBlock.ChartBlock(part, index))
                 } else {
@@ -86,6 +98,14 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
     }
     flushThinkingSteps()
     return result
+}
+
+private fun UIMessagePart.Tool.isToolError(): Boolean {
+    if (!isExecuted) return false
+    val outputText = output.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }.trimStart()
+    if (!outputText.startsWith("{")) return false
+    val result = runCatching { JsonInstant.parseToJsonElement(outputText) }.getOrNull() as? JsonObject
+    return result?.containsKey("error") == true
 }
 
 private fun UIMessagePart.Tool.isSuccessfulChartDisplay(): Boolean {

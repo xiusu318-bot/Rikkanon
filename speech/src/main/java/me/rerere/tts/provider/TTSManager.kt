@@ -16,20 +16,25 @@ import me.rerere.tts.provider.providers.StepTTSProvider
 import me.rerere.tts.provider.providers.SystemTTSProvider
 import me.rerere.tts.provider.providers.VolcengineTTSProvider
 import me.rerere.tts.provider.providers.XAITTSProvider
+import okhttp3.OkHttpClient
 
-class TTSManager(private val context: Context) {
-    private val openAIProvider = OpenAITTSProvider()
-    private val geminiProvider = GeminiTTSProvider()
+class TTSManager(
+    private val context: Context,
+    baseClient: OkHttpClient = OkHttpClient(),
+    var pluginDelegate: TTSProvider<TTSProviderSetting.Plugin>? = null,
+) {
+    private val openAIProvider = OpenAITTSProvider(baseClient)
+    private val geminiProvider = GeminiTTSProvider(baseClient)
     private val systemProvider = SystemTTSProvider()
-    private val miniMaxProvider = MiniMaxTTSProvider()
-    private val qwenProvider = QwenTTSProvider()
-    private val groqProvider = GroqTTSProvider()
-    private val xaiProvider = XAITTSProvider()
-    private val miMoProvider = MiMoTTSProvider()
-    private val stepProvider = StepTTSProvider()
-    private val elevenLabsProvider = ElevenLabsTTSProvider()
-    private val fishAudioProvider = FishAudioTTSProvider()
-    private val volcengineProvider = VolcengineTTSProvider()
+    private val miniMaxProvider = MiniMaxTTSProvider(baseClient)
+    private val qwenProvider = QwenTTSProvider(baseClient)
+    private val groqProvider = GroqTTSProvider(baseClient)
+    private val xaiProvider = XAITTSProvider(baseClient)
+    private val miMoProvider = MiMoTTSProvider(baseClient)
+    private val stepProvider = StepTTSProvider(baseClient)
+    private val elevenLabsProvider = ElevenLabsTTSProvider(baseClient)
+    private val fishAudioProvider = FishAudioTTSProvider(baseClient)
+    private val volcengineProvider = VolcengineTTSProvider(baseClient)
 
     fun generateSpeech(
         providerSetting: TTSProviderSetting,
@@ -48,6 +53,8 @@ class TTSManager(private val context: Context) {
             is TTSProviderSetting.FishAudio -> fishAudioProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.Step -> stepProvider.generateSpeech(context, providerSetting, request)
             is TTSProviderSetting.Volcengine -> volcengineProvider.generateSpeech(context, providerSetting, request)
+            is TTSProviderSetting.Plugin -> (pluginDelegate ?: error("插件 TTS 未初始化"))
+                .generateSpeech(context, providerSetting, request)
         }
     }
 
@@ -69,6 +76,7 @@ class TTSManager(private val context: Context) {
             is TTSProviderSetting.FishAudio -> fishAudioProvider.promptGuidance
             is TTSProviderSetting.Step -> stepProvider.promptGuidance
             is TTSProviderSetting.Volcengine -> volcengineProvider.promptGuidance
+            is TTSProviderSetting.Plugin -> pluginDelegate?.promptGuidance.orEmpty()
         }
     }
 }

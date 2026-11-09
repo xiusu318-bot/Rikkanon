@@ -454,6 +454,54 @@ class GoogleRequestMessageTest {
         assertEquals("Steered user text 2", steeredParts[1].jsonObject["text"]?.jsonPrimitive?.content)
     }
 
+    @Test
+    fun `bottom system message is not pulled into systemInstruction and stays at bottom of contents`() {
+        val buildBodyMethod = GoogleProvider::class.java.getDeclaredMethod(
+            "buildCompletionRequestBody",
+            List::class.java,
+            me.rerere.ai.provider.TextGenerationParams::class.java,
+        )
+        buildBodyMethod.isAccessible = true
+
+        // Case 1: No leading system message, only a bottom system message
+        val messagesNoLeading = listOf(
+            UIMessage.user("Hello"),
+            UIMessage.assistant("Hi"),
+            UIMessage.system("Bottom system instruction").copy(isSynthetic = true),
+        )
+        val params = me.rerere.ai.provider.TextGenerationParams(
+            model = me.rerere.ai.provider.Model(modelId = "gemini-2.5-pro")
+        )
+        val body1 = buildBodyMethod.invoke(provider, messagesNoLeading, params) as kotlinx.serialization.json.JsonObject
+        org.junit.Assert.assertNull("systemInstruction should be null when no leading system message", body1["systemInstruction"])
+        val contents1 = body1["contents"]!!.jsonArray
+        assertEquals(3, contents1.size)
+        assertEquals("user", contents1[0].jsonObject["role"]?.jsonPrimitive?.content)
+        assertEquals("model", contents1[1].jsonObject["role"]?.jsonPrimitive?.content)
+        assertEquals("system", contents1[2].jsonObject["role"]?.jsonPrimitive?.content)
+        assertEquals(
+            "Bottom system instruction",
+            contents1[2].jsonObject["parts"]?.jsonArray?.get(0)?.jsonObject?.get("text")?.jsonPrimitive?.content
+        )
+
+        // Case 2: Multiple leading system messages + bottom system message
+        val messagesWithBoth = listOf(
+            UIMessage.system("Top system 1").copy(isSynthetic = true),
+            UIMessage.system("Top system 2").copy(isSynthetic = true),
+            UIMessage.user("Hello"),
+            UIMessage.system("Bottom system instruction").copy(isSynthetic = true),
+        )
+        val body2 = buildBodyMethod.invoke(provider, messagesWithBoth, params) as kotlinx.serialization.json.JsonObject
+        val sysParts = body2["systemInstruction"]?.jsonObject?.get("parts")?.jsonArray
+        assertEquals(2, sysParts?.size)
+        assertEquals("Top system 1", sysParts?.get(0)?.jsonObject?.get("text")?.jsonPrimitive?.content)
+        assertEquals("Top system 2", sysParts?.get(1)?.jsonObject?.get("text")?.jsonPrimitive?.content)
+        val contents2 = body2["contents"]!!.jsonArray
+        assertEquals(2, contents2.size)
+        assertEquals("user", contents2[0].jsonObject["role"]?.jsonPrimitive?.content)
+        assertEquals("system", contents2[1].jsonObject["role"]?.jsonPrimitive?.content)
+    }
+
     // ==================== Helper Functions ====================
 
     private fun createExecutedTool(

@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.util.json
 
 /**
@@ -129,6 +130,76 @@ data class RawJsonMessageMetadata(
 // 先判断是否含 raw_json_element 字段：不含时解析结果必然为 null，省去对每个带 metadata 的 part（如思维链签名）做完整反序列化
 fun UIMessage.rawJsonElementOrNull(): JsonElement? = parts.firstNotNullOfOrNull { part ->
     if (part.metadata?.containsKey("raw_json_element") == true) part.metadataAs<RawJsonMessageMetadata>()?.rawJson else null
+}
+
+/**
+ * 提取列表最开头（第一条非 SYSTEM 消息或 JSON 模式块之前）的所有连续普通 SYSTEM 消息；
+ * 位于非首位（如预设底部、@D 深度或任意非 SYSTEM 块之后）的 SYSTEM 消息保留在消息数组原位置发出。
+ */
+fun List<UIMessage>.leadingSystemMessages(): List<UIMessage> {
+    val firstNonSysIdx = indexOfFirst { it.role != MessageRole.SYSTEM || it.rawJsonElementOrNull() != null }
+    return when {
+        isEmpty() -> emptyList()
+        firstNonSysIdx == -1 -> this
+        firstNonSysIdx == 0 -> emptyList()
+        else -> subList(0, firstNonSysIdx)
+    }
+}
+
+/**
+ * 仅当列表最开头（第 0 条）为非 JSON 模式的普通 SYSTEM 消息时，提取并合并开头所有连续 SYSTEM 消息；
+ * 位于非首位（如预设底部、@D 深度或任意非 SYSTEM 块之后）的 SYSTEM 消息保留在消息数组原位置发出。
+ */
+fun List<UIMessage>.leadingSystemMessageOrNull(): UIMessage? {
+    val leading = leadingSystemMessages()
+    if (leading.isEmpty()) return null
+    if (leading.size == 1) return leading.first()
+    val reasoningParts = leading.flatMap { it.parts.filterIsInstance<UIMessagePart.Reasoning>() }
+    val textParts = leading.flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }
+        .filter { it.text.isNotEmpty() }
+    return leading.first().copy(parts = reasoningParts + textParts, isSynthetic = true)
+}
+
+/**
+ * 跳过已被提取为顶层 systemInstruction / system / instructions 的最开头连续 SYSTEM 消息；
+ * 其余所有位置的消息（含非首位的 SYSTEM 消息与 JSON 模式块）均保留在原位置。
+ */
+fun List<UIMessage>.withoutLeadingSystemMessages(): List<UIMessage> {
+    val leadingCount = leadingSystemMessages().size
+    return if (leadingCount > 0) drop(leadingCount) else this
+}
+
+/**
+ * 递归对 [JsonElement] 中的所有字符串值应用转换函数（用于对 JSON 模式块中的字符串展开占位符与宏）
+ */
+fun JsonElement.mapJsonStrings(transform: (String) -> String): JsonElement = when (this) {
+    is kotlinx.serialization.json.JsonPrimitive -> if (isString) kotlinx.serialization.json.JsonPrimitive(transform(content)) else this
+    is JsonArray -> JsonArray(map { it.mapJsonStrings(transform) })
+    is JsonObject -> JsonObject(mapValues { (_, v) -> v.mapJsonStrings(transform) })
+}
+
+fun UIMessage.mapRawJsonStrings(transform: (String) -> String): UIMessage {
+    if (rawJsonElementOrNull() == null) return this
+    var changed = false
+    val newParts = parts.map { part ->
+        val raw = if (part.metadata?.containsKey("raw_json_element") == true) {
+            part.metadataAs<RawJsonMessageMetadata>()?.rawJson
+        } else null
+        if (raw != null) {
+            val mapped = raw.mapJsonStrings(transform)
+            if (mapped != raw) {
+                changed = true
+                val newMeta = JsonObject(
+                    (part.metadata ?: JsonObject(emptyMap())) + ("raw_json_element" to mapped)
+                )
+                when (part) {
+                    is UIMessagePart.Text -> part.copy(metadata = newMeta)
+                    else -> part
+                }
+            } else part
+        } else part
+    }
+    return if (changed) copy(parts = newParts) else this
 }
 
 /**

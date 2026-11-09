@@ -9,6 +9,7 @@ import androidx.compose.ui.res.stringResource
 import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.mapRawJsonStrings
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
@@ -122,10 +123,10 @@ object PlaceholderTransformer : InputMessageTransformer, KoinComponent {
         messages: List<UIMessage>,
     ): List<UIMessage> {
         val settingsStore = get<SettingsStore>()
-        return messages.map {
-            it.copy(
-                parts = it.parts.map { part ->
-                    if (part is UIMessagePart.Text) {
+        return messages.map { message ->
+            message.copy(
+                parts = message.parts.map { part ->
+                    if (part is UIMessagePart.Text && part.text.isNotEmpty()) {
                         part.copy(
                             text = replacePlaceholders(text = part.text, ctx = ctx, settingsStore = settingsStore)
                         )
@@ -133,7 +134,9 @@ object PlaceholderTransformer : InputMessageTransformer, KoinComponent {
                         part
                     }
                 }
-            )
+            ).mapRawJsonStrings { str ->
+                if (str.contains('{')) replacePlaceholders(text = str, ctx = ctx, settingsStore = settingsStore) else str
+            }
         }
     }
 

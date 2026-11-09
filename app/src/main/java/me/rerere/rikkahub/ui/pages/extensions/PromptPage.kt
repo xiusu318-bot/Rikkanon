@@ -139,6 +139,7 @@ import me.rerere.rikkahub.ui.components.ui.longPressReorder
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.hooks.rememberExporter
 import me.rerere.rikkahub.ui.hooks.rememberImporter
+import me.rerere.rikkahub.ui.hooks.rememberSharedPreferenceString
 import me.rerere.rikkahub.ui.hooks.useEditState
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.utils.plus
@@ -161,10 +162,18 @@ private enum class PromptTab(
         @Composable get() = titleText
 }
 
+private const val LAST_SELECTED_PRESET_PREF_KEY = "last_selected_prompt_preset_id"
+
 @Composable
-fun PromptPage(vm: PromptVM = koinViewModel()) {
+fun PromptPage(
+    initialTab: Int = 0,
+    initialPresetId: String? = null,
+    initialLorebookId: String? = null,
+    vm: PromptVM = koinViewModel(),
+) {
     val settings by vm.settings.collectAsStateWithLifecycle()
-    val pagerState = rememberPagerState { PromptTab.entries.size }
+    val safeInitialTab = initialTab.coerceIn(0, PromptTab.entries.lastIndex)
+    val pagerState = rememberPagerState(initialPage = safeInitialTab) { PromptTab.entries.size }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     Scaffold(
@@ -251,6 +260,7 @@ fun PromptPage(vm: PromptVM = koinViewModel()) {
                         when (PromptTab.entries[page]) {
                             PromptTab.PRESET_COMPOSER -> PresetComposerTab(
                                 presets = settings.promptPresets,
+                                initialPresetId = initialPresetId,
                                 onUpdate = { updated ->
                                     vm.updateSettings { latest -> latest.copy(promptPresets = updated) }
                                 }
@@ -258,6 +268,7 @@ fun PromptPage(vm: PromptVM = koinViewModel()) {
 
                             PromptTab.LOREBOOKS -> LorebookTab(
                                 lorebooks = settings.lorebooks,
+                                initialLorebookId = initialLorebookId,
                                 onUpdate = { updated ->
                                     vm.updateSettings { latest -> latest.copy(lorebooks = updated) }
                                 }
@@ -275,17 +286,46 @@ fun PromptPage(vm: PromptVM = koinViewModel()) {
 @Composable
 private fun PresetComposerTab(
     presets: List<PromptPreset>,
+    initialPresetId: String? = null,
     onUpdate: (List<PromptPreset>) -> Unit,
 ) {
     val toaster = LocalToaster.current
     val currentPresets by rememberUpdatedState(presets)
 
+    var lastSavedPresetIdStr by rememberSharedPreferenceString(
+        keyForString = LAST_SELECTED_PRESET_PREF_KEY,
+        defaultValue = null,
+    )
     var selectedPresetIdStr by rememberSaveable {
-        mutableStateOf(presets.firstOrNull()?.id?.toString().orEmpty())
+        mutableStateOf(
+            initialPresetId
+                ?: lastSavedPresetIdStr
+                ?: presets.firstOrNull()?.id?.toString().orEmpty()
+        )
     }
+    var consumedInitialPreset by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(initialPresetId) {
+        if (!consumedInitialPreset && !initialPresetId.isNullOrBlank()) {
+            consumedInitialPreset = true
+            selectedPresetIdStr = initialPresetId
+            lastSavedPresetIdStr = initialPresetId
+        }
+    }
+
     val activePreset = presets.find { it.id.toString() == selectedPresetIdStr }
+        ?: presets.find { it.id.toString() == lastSavedPresetIdStr }
         ?: presets.firstOrNull()
         ?: PromptPreset(name = "默认预设", blocks = defaultPromptBlocks())
+
+    LaunchedEffect(activePreset.id) {
+        val idStr = activePreset.id.toString()
+        if (selectedPresetIdStr != idStr) {
+            selectedPresetIdStr = idStr
+        }
+        if (lastSavedPresetIdStr != idStr) {
+            lastSavedPresetIdStr = idStr
+        }
+    }
 
     // 本地维护当前预设的草稿状态（双保存机制：弹窗内保存/拖拽/开关仅修改本地草稿，点外部「保存预设」才真正写盘）
     var localBlocks by remember(activePreset.id) { mutableStateOf(activePreset.blocks) }
@@ -343,6 +383,7 @@ private fun PresetComposerTab(
             val updated = currentPresets + imported
             onUpdate(updated)
             selectedPresetIdStr = imported.id.toString()
+            lastSavedPresetIdStr = imported.id.toString()
             toaster.show("已导入预设「${imported.name}」（共 ${imported.blocks.size} 个块）")
         }.onFailure {
             it.printStackTrace()
@@ -378,7 +419,11 @@ private fun PresetComposerTab(
             PresetHeaderBar(
                 presets = presets,
                 activePreset = activePreset.copy(enabled = localPresetEnabled, blocks = localBlocks),
-                onSelectPreset = { selectedPresetIdStr = it.id.toString() },
+                onSelectPreset = {
+                    val idStr = it.id.toString()
+                    selectedPresetIdStr = idStr
+                    lastSavedPresetIdStr = idStr
+                },
                 onTogglePresetEnabled = { enabled ->
                     localPresetEnabled = enabled
                 },
@@ -574,6 +619,7 @@ private fun PresetComposerTab(
                 )
                 onUpdate(currentPresets + created)
                 selectedPresetIdStr = created.id.toString()
+                lastSavedPresetIdStr = created.id.toString()
                 showNewPresetDialog = false
             }
         )
@@ -587,7 +633,9 @@ private fun PresetComposerTab(
         onConfirm = {
             val remaining = currentPresets.filterNot { it.id == activePreset.id }
             onUpdate(remaining)
-            selectedPresetIdStr = remaining.firstOrNull()?.id?.toString().orEmpty()
+            val fallbackIdStr = remaining.firstOrNull()?.id?.toString().orEmpty()
+            selectedPresetIdStr = fallbackIdStr
+            lastSavedPresetIdStr = fallbackIdStr
             showDeletePresetDialog = false
         },
         onDismiss = { showDeletePresetDialog = false },
@@ -1578,6 +1626,7 @@ private fun PresetNameDialog(
 @Composable
 private fun LorebookTab(
     lorebooks: List<Lorebook>,
+    initialLorebookId: String? = null,
     onUpdate: (List<Lorebook>) -> Unit,
 ) {
     val toaster = LocalToaster.current
@@ -1590,6 +1639,17 @@ private fun LorebookTab(
             list + edited
         }
         onUpdate(updated)
+    }
+
+    var consumedInitialLorebook by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(initialLorebookId, lorebooks) {
+        if (!consumedInitialLorebook && !initialLorebookId.isNullOrBlank()) {
+            val target = lorebooks.find { it.id.toString() == initialLorebookId }
+            if (target != null) {
+                consumedInitialLorebook = true
+                editState.open(target)
+            }
+        }
     }
 
     val importer = rememberImporter(LorebookSerializer) { result ->

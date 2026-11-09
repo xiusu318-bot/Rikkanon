@@ -16,6 +16,7 @@ data class WorkspaceBindMount(
 class ProotShellRunner(
     private val nativeLibraryDir: File,
     private val patcher: RootfsPatcher = RootfsPatcher(),
+    private val proxyUrlProvider: () -> String? = { null },
 ) : WorkspaceShellRunner {
     override fun execute(context: WorkspaceShellContext): WorkspaceCommandResult {
         if (!WorkspaceManager.isUsableRootfs(context.linuxDir)) {
@@ -44,7 +45,15 @@ class ProotShellRunner(
         }
 
         context.tempDir.mkdirs()
-        patcher.patch(context.linuxDir)
+        val proxyUrl = proxyUrlProvider()?.trim()?.takeIf { it.isNotEmpty() }
+        val hookSo = File(nativeLibraryDir, NET_HOOK_SO).takeIf { it.isFile }
+        patcher.patch(
+            context.linuxDir,
+            RootfsPatchOptions(
+                proxyUrl = proxyUrl,
+                netHookSoFile = hookSo,
+            ),
+        )
         val process = ProcessBuilder(buildCommand(context, proot))
             .directory(context.filesDir)
             .redirectErrorStream(false)
@@ -65,6 +74,15 @@ class ProotShellRunner(
 
     override fun terminalLaunch(context: WorkspaceTerminalContext): WorkspaceTerminalLaunch {
         val shell = WorkspaceManager.rootfsShell(context.linuxDir)
+        val proxyUrl = proxyUrlProvider()?.trim()?.takeIf { it.isNotEmpty() }
+        val hookSo = File(nativeLibraryDir, NET_HOOK_SO).takeIf { it.isFile }
+        patcher.patch(
+            context.linuxDir,
+            RootfsPatchOptions(
+                proxyUrl = proxyUrl,
+                netHookSoFile = hookSo,
+            ),
+        )
         val args = prootArgs(context.linuxDir, context.filesDir, context.tempDir, WORKSPACE_DIR, context.bindMounts)
         args += ROOTFS_ENV
         args += listOf(
@@ -178,9 +196,10 @@ class ProotShellRunner(
     private companion object {
         private const val PROOT_EXEC = "libproot_exec.so"
         private const val PROOT_LOADER = "libproot_loader.so"
+        private const val NET_HOOK_SO = "librikka_net_hook.so"
         private val WORKSPACE_DIR = WorkspaceManager.ROOTFS_WORKSPACE_DIR
 
-        /** 清空宿主机环境变量后 Rootfs 内的基础环境（含类 VPS 防崩变量） */
+        /** 清空宿主机环境变量后 Rootfs 内的基础环境（不含任何 HTTP_PROXY 等代理痕迹） */
         private val ROOTFS_ENV = listOf(
             "/usr/bin/env",
             "-i",

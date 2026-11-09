@@ -19,8 +19,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "XAITTSProvider"
 
-class XAITTSProvider : TTSProvider<TTSProviderSetting.XAI> {
-    private val httpClient = OkHttpClient.Builder()
+class XAITTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.XAI> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

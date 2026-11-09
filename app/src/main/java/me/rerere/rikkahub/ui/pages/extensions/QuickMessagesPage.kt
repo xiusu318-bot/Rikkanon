@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,12 +52,26 @@ import me.rerere.ui.components.RikkaConfirmDialog
 import org.koin.androidx.compose.koinViewModel
 
 @Composable
-fun QuickMessagesPage(vm: QuickMessagesVM = koinViewModel()) {
+fun QuickMessagesPage(
+    initialQuickMessageId: String? = null,
+    vm: QuickMessagesVM = koinViewModel(),
+) {
     val settings = vm.settings.collectAsStateWithLifecycle().value
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<QuickMessage?>(null) }
     var deleteTarget by remember { mutableStateOf<QuickMessage?>(null) }
+    var consumedInitialQuickMessage by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(initialQuickMessageId, settings.quickMessages) {
+        if (!consumedInitialQuickMessage && !initialQuickMessageId.isNullOrBlank()) {
+            val target = settings.quickMessages.find { it.id.toString() == initialQuickMessageId }
+            if (target != null) {
+                consumedInitialQuickMessage = true
+                editTarget = target
+            }
+        }
+    }
 
     Scaffold(
         topBar = {

@@ -14,7 +14,7 @@ import me.rerere.common.http.AcceptLanguageBuilder
 import me.rerere.mediagen.provider.MediaGenerationManager
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.BuildConfig
-import me.rerere.rikkahub.data.ai.AIRequestInterceptor
+import me.rerere.plugin.http.PluginInterceptor
 import me.rerere.rikkahub.data.ai.RequestLoggingInterceptor
 import me.rerere.rikkahub.data.ai.transformers.AssistantTemplateLoader
 import me.rerere.rikkahub.data.ai.GenerationLoop
@@ -32,9 +32,13 @@ import me.rerere.rikkahub.data.db.AppDatabaseFactory
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
 import me.rerere.rikkahub.data.ai.mcp.McpManager
-import me.rerere.rikkahub.data.remote.SettingsProxySelector
+import me.rerere.rikkahub.data.remote.OutboundTarget
 import me.rerere.rikkahub.data.remote.SettingsProxyAuthenticator
+import me.rerere.rikkahub.data.remote.SettingsProxySelector
 import me.rerere.rikkahub.data.remote.SettingsSocks5Authenticator
+import me.rerere.rikkahub.data.remote.WorkspaceLoopbackProxyBridge
+import me.rerere.rikkahub.data.remote.configureOutboundProxy
+import me.rerere.rikkahub.data.remote.resolveProxy
 import me.rerere.rikkahub.data.sync.webdav.WebDavSync
 import me.rerere.search.SearchService
 import me.rerere.rikkahub.data.sync.S3Sync
@@ -134,6 +138,7 @@ val dataSourceModule = module {
             context = get(),
             providerManager = get(),
             json = get(),
+            pluginBridge = get(),
         )
     }
 
@@ -144,6 +149,7 @@ val dataSourceModule = module {
             conversationRepo = get(),
             consolidationDao = get(),
             settingsStore = get(),
+            pluginBridge = get(),
         )
     }
 
@@ -157,7 +163,7 @@ val dataSourceModule = module {
     }
 
     single {
-        TranslationHandler(providerManager = get())
+        TranslationHandler(providerManager = get(), pluginBridge = get())
     }
 
     single<OkHttpClient> {
@@ -165,18 +171,17 @@ val dataSourceModule = module {
         val acceptLang = AcceptLanguageBuilder.fromAndroid(get())
             .build()
         java.net.Authenticator.setDefault(SettingsSocks5Authenticator(settingsStore))
-        val initialNetworkSetting = settingsStore.settingsFlow.value.networkSetting
-        val appliedProxySetting = AtomicReference(
-            Triple(
-                initialNetworkSetting.proxyUrl,
-                initialNetworkSetting.proxyUsername,
-                initialNetworkSetting.proxyPassword,
-            )
-        )
+        // 启动本地工作区回环代理桥（供 PRoot 沙盒环境与已打开终端动态路由到 workspaceProxy）
+        WorkspaceLoopbackProxyBridge.ensureStarted {
+            settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.WORKSPACE)
+        }
+        val initialLlmProxy = settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+        val appliedProxySetting = AtomicReference(initialLlmProxy)
         lateinit var client: OkHttpClient
         client = OkHttpClient.Builder()
-            .proxySelector(SettingsProxySelector(settingsStore))
-            .proxyAuthenticator(SettingsProxyAuthenticator(settingsStore))
+            .configureOutboundProxy {
+                settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+            }
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.MINUTES)
             .writeTimeout(120, TimeUnit.SECONDS)
@@ -184,13 +189,8 @@ val dataSourceModule = module {
             .followRedirects(true)
             .retryOnConnectionFailure(true)
             .addInterceptor { chain ->
-                val networkSetting = settingsStore.settingsFlow.value.networkSetting
-                val currentProxySetting = Triple(
-                    networkSetting.proxyUrl,
-                    networkSetting.proxyUsername,
-                    networkSetting.proxyPassword,
-                )
-                if (appliedProxySetting.getAndSet(currentProxySetting) != currentProxySetting) {
+                val currentProxy = settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+                if (appliedProxySetting.getAndSet(currentProxy) != currentProxy) {
                     client.connectionPool.evictAll()
                 }
 
@@ -225,12 +225,16 @@ val dataSourceModule = module {
                 }
             }
             .addNetworkInterceptor(RequestLoggingInterceptor())
-            .addInterceptor(AIRequestInterceptor())
+            .addInterceptor(PluginInterceptor(get()))
             .addInterceptor(HttpLoggingInterceptor().apply {
                 redactHeader("Proxy-Authorization")
                 level = HttpLoggingInterceptor.Level.HEADERS
             })
             .build()
+        val host: me.rerere.plugin.host.PluginHost = get()
+        SearchService.pluginExecutor = { pluginId, name, method, args ->
+            host.callMethod(pluginId, me.rerere.plugin.manifest.PluginHookKind.SEARCH, name, method, args)
+        }
         client.also { SearchService.init(it, get()) }
     }
 
@@ -243,7 +247,9 @@ val dataSourceModule = module {
     }
 
     single {
-        ProviderManager(client = get(), context = get())
+        ProviderManager(client = get(), context = get()).apply {
+            registerProvider("plugin", me.rerere.rikkahub.data.plugin.PluginAiProvider(get()))
+        }
     }
 
     single { BackupManager(context = get(), database = get(), settingsStore = get(), json = get()) }
@@ -257,16 +263,10 @@ val dataSourceModule = module {
     }
 
     single<HttpClient> {
+        val baseOkHttpClient: OkHttpClient = get()
         HttpClient(OkHttp) {
             engine {
-                config {
-                    connectTimeout(20, TimeUnit.SECONDS)
-                    readTimeout(10, TimeUnit.MINUTES)
-                    writeTimeout(120, TimeUnit.SECONDS)
-                    followSslRedirects(true)
-                    followRedirects(true)
-                    retryOnConnectionFailure(true)
-                }
+                preconfigured = baseOkHttpClient
             }
         }
     }
@@ -288,12 +288,16 @@ val dataSourceModule = module {
     }
 
     single {
-        MediaGenerationManager(client = get())
+        MediaGenerationManager(
+            client = get(),
+            pluginDelegate = me.rerere.rikkahub.data.plugin.PluginMediaGenProvider(get()),
+        )
     }
 
     single<Retrofit> {
         Retrofit.Builder()
             .baseUrl("https://api.rikka-ai.com")
+            .client(get())
             .addConverterFactory(get<Json>().asConverterFactory("application/json; charset=UTF8".toMediaType()))
             .build()
     }

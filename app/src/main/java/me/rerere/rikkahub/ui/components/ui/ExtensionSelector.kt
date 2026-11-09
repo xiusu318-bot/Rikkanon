@@ -37,10 +37,10 @@ internal enum class ExtensionTab(
     override val icon: ImageVector,
     @param:StringRes private val labelRes: Int,
 ) : PagerTab {
-    QUICK_MESSAGES(HugeIcons.Zap, R.string.extension_selector_tab_quick_messages),
     MODE_INJECTIONS(HugeIcons.MagicWand01, R.string.extension_selector_tab_mode_injections),
     LOREBOOKS(HugeIcons.Book01, R.string.extension_selector_tab_lorebooks),
-    SKILLS(HugeIcons.Puzzle, R.string.extension_selector_tab_skills);
+    SKILLS(HugeIcons.Puzzle, R.string.extension_selector_tab_skills),
+    QUICK_MESSAGES(HugeIcons.Zap, R.string.extension_selector_tab_quick_messages);
 
     override val label: String
         @Composable get() = stringResource(labelRes)
@@ -53,9 +53,9 @@ fun ExtensionSelector(
     assistant: Assistant,
     settings: Settings,
     onUpdate: (Assistant) -> Unit,
-    onNavigateToQuickMessages: () -> Unit = {},
-    onNavigateToPrompts: () -> Unit = {},
-    onNavigateToSkills: () -> Unit = {},
+    onNavigateToQuickMessages: (quickMessageId: String?) -> Unit = {},
+    onNavigateToPrompts: (initialTab: Int, presetId: String?, lorebookId: String?) -> Unit = { _, _, _ -> },
+    onNavigateToSkills: (skillName: String?) -> Unit = {},
 ) {
     val skillManager: SkillManager = koinInject()
     var skills by remember { mutableStateOf<List<SkillMetadata>>(emptyList()) }
@@ -98,13 +98,16 @@ fun ExtensionSelector(
                                 }
                                 onUpdate(assistant.copy(quickMessageIds = newIds))
                             },
-                            onManage = onNavigateToQuickMessages,
+                            onItemClick = { quickMessage ->
+                                onNavigateToQuickMessages(quickMessage.id.toString())
+                            },
+                            onManage = { onNavigateToQuickMessages(null) },
                         )
                     } else {
                         ExtensionEmptyState(
                             message = stringResource(R.string.extension_selector_quick_messages_empty),
                             buttonText = stringResource(R.string.extension_selector_go_to_extensions),
-                            onAction = onNavigateToQuickMessages,
+                            onAction = { onNavigateToQuickMessages(null) },
                             icon = tab.icon,
                         )
                     }
@@ -124,13 +127,16 @@ fun ExtensionSelector(
                                 }
                                 onUpdate(assistant.copy(modeInjectionIds = newIds))
                             },
-                            onManage = onNavigateToPrompts,
+                            onItemClick = { preset ->
+                                onNavigateToPrompts(0, preset.id.toString(), null)
+                            },
+                            onManage = { onNavigateToPrompts(0, null, null) },
                         )
                     } else {
                         ExtensionEmptyState(
                             message = "暂无提示词预设",
                             buttonText = stringResource(R.string.extension_selector_go_to_extensions),
-                            onAction = onNavigateToPrompts,
+                            onAction = { onNavigateToPrompts(0, null, null) },
                             icon = tab.icon,
                         )
                     }
@@ -149,13 +155,16 @@ fun ExtensionSelector(
                                 }
                                 onUpdate(assistant.copy(lorebookIds = newIds))
                             },
-                            onManage = onNavigateToPrompts,
+                            onItemClick = { lorebook ->
+                                onNavigateToPrompts(1, null, lorebook.id.toString())
+                            },
+                            onManage = { onNavigateToPrompts(1, null, null) },
                         )
                     } else {
                         ExtensionEmptyState(
                             message = stringResource(R.string.extension_selector_lorebooks_empty),
                             buttonText = stringResource(R.string.extension_selector_go_to_extensions),
-                            onAction = onNavigateToPrompts,
+                            onAction = { onNavigateToPrompts(1, null, null) },
                             icon = tab.icon,
                         )
                     }
@@ -174,13 +183,16 @@ fun ExtensionSelector(
                                 }
                                 onUpdate(assistant.copy(enabledSkills = newSkills))
                             },
-                            onManage = onNavigateToSkills,
+                            onItemClick = { skill ->
+                                onNavigateToSkills(skill.name)
+                            },
+                            onManage = { onNavigateToSkills(null) },
                         )
                     } else {
                         ExtensionEmptyState(
                             message = stringResource(R.string.extension_selector_skills_empty),
                             buttonText = stringResource(R.string.extension_selector_go_to_skills),
-                            onAction = onNavigateToSkills,
+                            onAction = { onNavigateToSkills(null) },
                             icon = tab.icon,
                         )
                     }

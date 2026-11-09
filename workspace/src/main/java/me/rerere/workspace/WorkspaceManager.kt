@@ -235,7 +235,13 @@ class WorkspaceManager(
     fun prepareTerminal(root: String, nameservers: List<String>) {
         ensureWorkspace(root)
         bindMounts.forEach { it.source.mkdirs() }
-        RootfsPatcher().patch(linuxDir(root), RootfsPatchOptions(nameservers = nameservers))
+        val existingPort = File(linuxDir(root), "run/rikkahub-net.conf")
+            .takeIf { it.isFile }
+            ?.readText()
+            ?.trim()
+            ?.toIntOrNull()
+        val currentProxy = existingPort?.let { "http://127.0.0.1:$it" }
+        RootfsPatcher().patch(linuxDir(root), RootfsPatchOptions(nameservers = nameservers, proxyUrl = currentProxy))
     }
 
     fun terminalLaunch(root: String, shellCompatibilityMode: Boolean): WorkspaceTerminalLaunch? =

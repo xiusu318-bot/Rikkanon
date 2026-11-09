@@ -44,9 +44,11 @@ import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.leadingSystemMessages
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
+import me.rerere.ai.ui.withoutLeadingSystemMessages
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.configureSessionHeaders
@@ -197,15 +199,18 @@ internal class InteractionsAPI(
 
         val outputsImage = params.model.outputModalities.contains(Modality.IMAGE)
 
-        val systemMessage = messages.firstOrNull { it.role == MessageRole.SYSTEM }
-        if (systemMessage != null && !outputsImage) {
+        // Interactions API 的 system_instruction 仅接受单字符串，自动将顶部连续 SYSTEM 块合并
+        val leadingSystemTexts = messages.leadingSystemMessages()
+            .flatMap { it.parts.filterIsInstance<UIMessagePart.Text>() }
+            .mapNotNull { it.text.takeIf(String::isNotEmpty) }
+        if (leadingSystemTexts.isNotEmpty() && !outputsImage) {
             put(
                 "system_instruction",
-                systemMessage.parts.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
+                leadingSystemTexts.joinToString("\n\n")
             )
         }
 
-        put("input", buildInput(messages))
+        put("input", buildInput(if (!outputsImage) messages.withoutLeadingSystemMessages() else messages))
 
         val generationConfig = buildJsonObject {
             if (params.temperature != null) put("temperature", params.temperature)
@@ -271,7 +276,7 @@ internal class InteractionsAPI(
 
     internal fun buildInput(messages: List<UIMessage>): JsonArray = buildJsonArray {
         messages
-            .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
+            .filter { it.isValidToUpload() }
             .forEach { message ->
                 val rawJson = message.rawJsonElementOrNull()
                 if (rawJson != null) {

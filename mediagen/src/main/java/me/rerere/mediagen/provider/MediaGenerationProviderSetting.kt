@@ -212,6 +212,35 @@ sealed class MediaGenerationProviderSetting {
         }
     }
 
+    @Serializable
+    @SerialName("plugin")
+    data class Plugin(
+        override val id: Uuid = Uuid.random(),
+        override val name: String = "Plugin",
+        override val apiKey: String = "",
+        override val baseUrl: String = "",
+        val pluginId: String = "",
+        val providerName: String = "",
+        override val models: List<MediaGenerationModel> = emptyList(),
+    ) : MediaGenerationProviderSetting() {
+        override val supportedKinds: Set<MediaKind>
+            get() = setOf(MediaKind.IMAGE, MediaKind.VIDEO)
+
+        override fun copyProvider(
+            id: Uuid,
+            name: String,
+            apiKey: String,
+            baseUrl: String,
+            models: List<MediaGenerationModel>,
+        ): MediaGenerationProviderSetting = copy(
+            id = id,
+            name = name,
+            apiKey = apiKey,
+            baseUrl = baseUrl,
+            models = models,
+        )
+    }
+
     companion object {
         val Types by lazy {
             listOf(

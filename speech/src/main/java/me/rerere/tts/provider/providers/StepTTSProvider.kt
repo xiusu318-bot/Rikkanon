@@ -37,8 +37,10 @@ private val JSON_MEDIA_TYPE = "application/json".toMediaType()
  * - 模型总览: https://platform.stepfun.com/docs/zh/guides/models/stepaudio-2.5-tts
  * - 开发指南: https://platform.stepfun.com/docs/zh/guides/developer/tts
  */
-class StepTTSProvider : TTSProvider<TTSProviderSetting.Step> {
-    private val httpClient = OkHttpClient.Builder()
+class StepTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.Step> {
+    private val httpClient = baseClient.newBuilder()
         // 一次性合成可能比较慢 (长文本 + 高质量模型), 给足读超时
         .readTimeout(120, TimeUnit.SECONDS)
         .build()

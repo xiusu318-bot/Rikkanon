@@ -14,6 +14,9 @@ import me.rerere.rikkahub.data.db.dao.WorkspaceDAO
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
 import me.rerere.rikkahub.data.model.SshWorkspaceDraft
 import me.rerere.rikkahub.data.model.SshWorkspaceSettings
+import me.rerere.rikkahub.data.remote.OutboundTarget
+import me.rerere.rikkahub.data.remote.ProxyTunnelDialer
+import me.rerere.rikkahub.data.remote.resolveProxy
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.SecretCipher
 import me.rerere.workspace.RootfsInstallProgress

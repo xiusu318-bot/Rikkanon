@@ -18,10 +18,19 @@ import me.rerere.asr.ASRState
 import me.rerere.asr.providers.DashScopeASRController
 import me.rerere.asr.providers.MiMoASRController
 import me.rerere.asr.providers.OpenAIRealtimeASRController
+import me.rerere.asr.providers.PluginASRController
 import me.rerere.asr.providers.StepASRController
 import me.rerere.asr.providers.VolcengineASRController
+import me.rerere.plugin.host.PluginHost
+import me.rerere.plugin.manifest.PluginHookKind
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getSelectedASRProvider
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import org.koin.compose.koinInject
 
@@ -30,10 +39,11 @@ fun rememberCustomAsrState(): CustomAsrState {
     val context = LocalContext.current
     val settingsStore = koinInject<SettingsStore>()
     val httpClient = koinInject<OkHttpClient>()
+    val pluginHost = koinInject<PluginHost>()
     val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle()
 
     val asrState = remember {
-        CustomAsrStateImpl(context.applicationContext, httpClient)
+        CustomAsrStateImpl(context.applicationContext, httpClient, pluginHost)
     }
 
     DisposableEffect(settings.selectedASRProviderId, settings.asrProviders) {
@@ -59,7 +69,8 @@ interface CustomAsrState {
 
 private class CustomAsrStateImpl(
     private val context: Context,
-    private val httpClient: OkHttpClient
+    private val httpClient: OkHttpClient,
+    private val pluginHost: PluginHost,
 ) : CustomAsrState {
     private var controller: ASRController? = null
     private val idleState = MutableStateFlow(ASRState())
@@ -129,6 +140,22 @@ private class CustomAsrStateImpl(
             is ASRProviderSetting.Step -> {
                 if (provider.apiKey.isBlank()) return null
                 StepASRController(context, httpClient, provider)
+            }
+
+            is ASRProviderSetting.Plugin -> {
+                if (provider.pluginId.isBlank() || provider.providerName.isBlank()) return null
+                PluginASRController(context, provider) { pluginId, providerName, wavBase64, sampleRate ->
+                    val arg = buildJsonObject {
+                        put("audio", wavBase64)
+                        put("format", "wav")
+                        put("sampleRate", sampleRate)
+                    }
+                    val res = pluginHost.callMethod(pluginId, PluginHookKind.ASR, providerName, "transcribe", listOf(arg))
+                    when (res) {
+                        is JsonPrimitive -> res.content
+                        else -> res.jsonObject["text"]?.jsonPrimitive?.contentOrNull ?: ""
+                    }
+                }
             }
         }
     }

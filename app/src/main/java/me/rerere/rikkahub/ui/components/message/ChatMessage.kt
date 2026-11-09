@@ -453,7 +453,7 @@ private fun MessagePartsBlock(
                                     val hideUserApprovalPopup = isSubAgentConversation &&
                                         assistant != null &&
                                         !assistant.requiresSubAgentUserApproval(step.tool.toolName, mcpServerNameToId) &&
-                                        assistant.requiresSubAgentAgentApproval(step.tool.toolName, mcpServerNameToId)
+                                        assistant.requiresSubAgentAgentApproval(step.tool, mcpServerNameToId)
                                     ChatMessageToolStep(
                                         tool = step.tool,
                                         loading = loading && !step.tool.isExecuted,
@@ -487,7 +487,24 @@ private fun MessagePartsBlock(
             }
 
             is MessagePartBlock.ContentBlock -> key(block.index) {
-                when (val part = block.part) {
+                val partRendererType = remember(block.part.metadata) {
+                    (block.part.metadata?.get("rikka.renderer") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                }
+                val partMounts = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginUiMounts("message.part")
+                val matchedPartMount = remember(partMounts, partRendererType) {
+                    if (partRendererType.isNullOrBlank()) null
+                    else partMounts.find { (_, reg) ->
+                        val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
+                        (spec?.get("rendererType") as? kotlinx.serialization.json.JsonPrimitive)?.content == partRendererType
+                    }
+                }
+                if (matchedPartMount != null) {
+                    PluginMessagePartRenderer(
+                        runtime = matchedPartMount.first,
+                        reg = matchedPartMount.second,
+                        part = block.part,
+                    )
+                } else when (val part = block.part) {
                     is UIMessagePart.Text -> {
                         val scope = if (role == MessageRole.USER) {
                             AssistantAffectScope.USER
@@ -1317,5 +1334,59 @@ private fun PartMetadataEditorField(
         maxLines = 6,
         isError = hasError,
     )
+}
+
+@Composable
+private fun PluginMessagePartRenderer(
+    runtime: me.rerere.plugin.runtime.PluginRuntime,
+    reg: me.rerere.plugin.registry.PluginRegistration,
+    part: UIMessagePart,
+) {
+    val host = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
+    val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
+    val path = (spec?.get("path") as? kotlinx.serialization.json.JsonPrimitive)?.content
+    val heightDp = ((spec?.get("height") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 200).coerceIn(60, 800)
+    val partJsonElement = remember(part) {
+        me.rerere.rikkahub.utils.JsonInstant.encodeToJsonElement(UIMessagePart.serializer(), part)
+    }
+    if (!path.isNullOrBlank()) {
+        me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
+            pluginId = runtime.id,
+            path = path,
+            argsJson = partJsonElement.toString(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(heightDp.dp),
+        )
+    } else {
+        val rendered by androidx.compose.runtime.produceState<String?>(initialValue = null, runtime.id, reg.handlerId, part) {
+            value = runCatching {
+                val res = host.callUiHandler(runtime.id, reg.handlerId, partJsonElement)
+                when (res) {
+                    is kotlinx.serialization.json.JsonPrimitive -> res.content
+                    is kotlinx.serialization.json.JsonObject ->
+                        (res["html"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            ?: (res["text"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    else -> null
+                }
+            }.getOrNull()
+        }
+        val content = rendered
+        if (content != null) {
+            if (content.trimStart().startsWith("<")) {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
+                    pluginId = runtime.id,
+                    path = "",
+                    argsJson = partJsonElement.toString(),
+                    inlineHtml = content,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(heightDp.dp),
+                )
+            } else {
+                MarkdownBlock(content = content)
+            }
+        }
+    }
 }
 

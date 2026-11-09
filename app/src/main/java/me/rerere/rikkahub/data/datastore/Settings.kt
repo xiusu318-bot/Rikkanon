@@ -103,12 +103,48 @@ data class Settings(
 }
 
 @Serializable
+enum class ProxyType(val scheme: String, val label: String) {
+    @SerialName("http")
+    HTTP("http", "HTTP"),
+
+    @SerialName("https")
+    HTTPS("https", "HTTPS"),
+
+    @SerialName("socks5")
+    SOCKS5("socks5", "SOCKS5"),
+}
+
+@Serializable
+data class ProxyProfile(
+    val id: Uuid = Uuid.random(),
+    val name: String = "",
+    val type: ProxyType = ProxyType.HTTP,
+    val host: String = "",
+    val port: Int = 7890,
+    val username: String = "",
+    val password: String = "",
+) {
+    val displayName: String
+        get() = name.trim().ifEmpty { "$host:$port" }
+
+    val displayUrl: String
+        get() {
+            val formattedHost = if (":" in host && !host.startsWith("[")) "[$host]" else host
+            return "${type.scheme}://$formattedHost:$port"
+        }
+}
+
+@Serializable
 data class NetworkSetting(
     val userAgent: String = "",
     val proxyUrl: String = "",
     val proxyUsername: String = "",
     val proxyPassword: String = "",
     val enableAutoRetry: Boolean = true,
+    val proxies: List<ProxyProfile> = emptyList(),
+    val llmProxyId: Uuid? = null,
+    val workspaceProxyId: Uuid? = null,
+    val mcpProxyId: Uuid? = null,
 )
 
 @Serializable

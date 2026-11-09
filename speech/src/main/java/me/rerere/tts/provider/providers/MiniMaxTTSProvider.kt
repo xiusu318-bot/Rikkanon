@@ -36,8 +36,10 @@ private data class MiniMaxResponse(
     val data: MiniMaxResponseData
 )
 
-class MiniMaxTTSProvider : TTSProvider<TTSProviderSetting.MiniMax> {
-    private val httpClient = OkHttpClient.Builder()
+class MiniMaxTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.MiniMax> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 

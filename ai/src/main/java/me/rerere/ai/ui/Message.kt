@@ -38,6 +38,7 @@ data class UIMessage(
         val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->
             when (part) {
                 is UIMessagePart.Text -> part.text
+                is UIMessagePart.Tool -> part.displayText() ?: ""
                 else -> ""
             }
         }
@@ -47,6 +48,8 @@ data class UIMessage(
     fun toText() = parts.joinToString(separator = "\n") { part ->
         when (part) {
             is UIMessagePart.Text -> part.text
+            // 声明为正文显示的工具调用（插件 / MCP 显示声明）按正文读取
+            is UIMessagePart.Tool -> part.displayText() ?: ""
             else -> ""
         }
     }

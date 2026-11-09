@@ -32,15 +32,29 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.update
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.CustomHeader
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.TextGenerationParams
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import me.rerere.plugin.http.PluginRequestContext
+import me.rerere.plugin.http.PluginRequestContexts
+import me.rerere.rikkahub.data.plugin.PluginCtx
+import me.rerere.rikkahub.data.plugin.TaskBeforeResult
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -281,6 +295,7 @@ class ChatService(
     val mcpManager: McpManager,
     private val filesManager: FilesManager,
     private val workspaceRepository: WorkspaceRepository,
+    private val pluginBridge: me.rerere.rikkahub.data.plugin.PluginBridge,
     private val folderRepository: FolderRepository,
 ) {
     // workspace 系统提示注入 (依赖 workspaceRepository, 故在类内构造)
@@ -588,6 +603,11 @@ class ChatService(
 
     fun sendMessage(conversationId: Uuid, content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
+        pluginBridge.emit("message.send", kotlinx.serialization.json.buildJsonObject {
+            put("conversationId", conversationId.toString())
+            put("text", content.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text })
+            put("answer", answer)
+        })
         val session = sessionManager.getOrCreate(conversationId)
         synchronized(session) {
             if (session.messageQueue.state.value.messages.isEmpty()) session.messageQueue.resume()
@@ -644,7 +664,7 @@ class ChatService(
                 val settings = settingsStore.awaitLoaded()
                 val assistant = settings.getAssistantById(currentConversation.assistantId)
                     ?: settings.getCurrentAssistant()
-                val processedContent = preprocessUserInputParts(content, assistant)
+                val processedContent = preprocessUserInputParts(content, assistant, conversationId = conversationId)
 
                 // 添加消息到列表
                 val newConversation = currentConversation.copy(
@@ -702,12 +722,20 @@ class ChatService(
     /**
      * @param depth 该消息的正则深度（0 = 最后一条）；新发送 / 插话的消息为 0，编辑历史消息时为其实际深度
      */
-    private fun preprocessUserInputParts(
+    private suspend fun preprocessUserInputParts(
         parts: List<UIMessagePart>,
         assistant: Assistant,
         depth: Int = 0,
+        conversationId: Uuid? = null,
     ): List<UIMessagePart> {
-        return parts.map { part ->
+        val ctx = PluginCtx(
+            task = "chat",
+            assistantId = assistant.id,
+            conversationId = conversationId,
+            workspaceId = assistant.workspaceId,
+        )
+        val afterPlugin = pluginBridge.inputBeforeSave(parts, assistant, ctx)
+        return afterPlugin.map { part ->
             when (part) {
                 is UIMessagePart.Text -> {
                     part.copy(
@@ -1126,6 +1154,10 @@ class ChatService(
 
             val isSubConversation = conversation.config?.autoApproveTools == true ||
                 conversation.config?.parentConversationId != null
+            val parentId = conversation.config?.parentConversationId
+            val subAgentCode = if (parentId != null) {
+                getOrLoadConversation(parentId)?.resolveLogicalSubAgentId(conversationId)
+            } else null
             // 子代理的工具审批已在 ChatToolFactory.createTools 中按「用户审批 / 主代理审批」逐工具设置 needsApproval
             val autoApproveTools = false
 
@@ -1138,6 +1170,8 @@ class ChatService(
                     conversationId = conversationId,
                     chatService = this,
                     isSubConversation = isSubConversation,
+                    parentConversationId = parentId,
+                    subAgentCode = subAgentCode,
                 )
             } catch (error: InvalidMcpServerNamesException) {
                 sessionManager.get(conversationId)?.messageQueue?.pause()
@@ -1155,7 +1189,6 @@ class ChatService(
 
             // start generating
             val session = sessionManager.getOrCreate(conversationId)
-            val parentId = conversation.config?.parentConversationId
             val configuredMaxSteps = if (isSubConversation) {
                 val overrideSteps = conversation.config?.subAgentMaxStepsOverride
                 when {
@@ -1195,6 +1228,9 @@ class ChatService(
                     tools = tools,
                     maxSteps = configuredMaxSteps,
                     autoApproveTools = autoApproveTools,
+                    isSubAgent = isSubConversation,
+                    parentConversationId = parentId,
+                    subAgentCode = subAgentCode,
                     pollQueuedUserMessages = {
                         val steered = mutableListOf<UIMessage>()
                         // 若该对话有后台运行完毕且尚未被 conversation_read 消费的子代理结果，在下一步直接通过 Steer 通道通知父代理
@@ -1208,7 +1244,7 @@ class ChatService(
                             val next = synchronized(session) {
                                 session.messageQueue.takeNext()
                             } ?: break
-                            val processed = preprocessUserInputParts(next.parts, assistant)
+                            val processed = preprocessUserInputParts(next.parts, assistant, conversationId = conversationId)
                             steered += UIMessage(
                                 role = MessageRole.USER,
                                 parts = processed,
@@ -1448,30 +1484,65 @@ class ChatService(
 
         runCatching {
             val model = settings.findModelById(settings.fastModelId)
-                ?: throw IllegalStateException(context.getString(R.string.error_fast_model_not_found))
-            val provider = model.findProvider(settings.providers)
-                ?: throw IllegalStateException(context.getString(R.string.error_fast_model_provider_not_found))
-
-            val providerHandler = providerManager.getProviderByType(provider)
-            val result = providerHandler.generateText(
-                providerSetting = provider,
-                messages = listOf(
-                    UIMessage.user(
-                        prompt = settings.titlePrompt.applyPlaceholders(
-                            "locale" to Locale.getDefault().displayName,
-                            "content" to conversation.currentMessages
-                                .takeLast(4).joinToString("\n\n") { it.summaryAsText(maxLength = 500) })
-                    ),
-                ),
-                params = backgroundTextGenerationParams(model, conversationId, settings.fastModelReasoningLevel),
+            val titleCtx = PluginCtx(
+                task = "title",
+                assistantId = conversation.assistantId,
+                conversationId = conversationId,
+                model = model,
             )
+            val contentText = conversation.currentMessages
+                .takeLast(4).joinToString("\n\n") { it.summaryAsText(maxLength = 500) }
+            val defaultPrompt = settings.titlePrompt.applyPlaceholders(
+                "locale" to Locale.getDefault().displayName,
+                "content" to contentText,
+            )
+            val extra = buildJsonObject {
+                put("conversationId", conversationId.toString())
+                put("content", contentText)
+                put("locale", Locale.getDefault().displayName)
+            }
 
-            // 生成完，conversation可能不是最新了，因此需要重新获取
-            conversationRepo.getConversationById(conversation.id)?.let {
-                saveConversation(
-                    conversationId,
-                    it.copy(title = result.message.toText().trim())
-                )
+            val rawTitle = if (pluginBridge.hasTaskReplace("title")) {
+                val r = pluginBridge.taskReplace("title", JsonObject(extra + ("prompt" to JsonPrimitive(defaultPrompt))), titleCtx)
+                when (r) {
+                    is JsonPrimitive -> r.content
+                    null -> ""
+                    else -> r.jsonObject["text"]?.jsonPrimitive?.contentOrNull ?: r.toString()
+                }
+            } else {
+                when (val before = pluginBridge.taskBeforePrompt("title", defaultPrompt, extra, titleCtx)) {
+                    is TaskBeforeResult.ShortCircuit -> before.output
+                    is TaskBeforeResult.Proceed -> {
+                        val resolvedModel = model
+                            ?: throw IllegalStateException(context.getString(R.string.error_fast_model_not_found))
+                        val provider = resolvedModel.findProvider(settings.providers)
+                            ?: throw IllegalStateException(context.getString(R.string.error_fast_model_provider_not_found))
+                        val providerHandler = providerManager.getProviderByType(provider)
+                        val token = PluginRequestContexts.register(PluginRequestContext(titleCtx.toJson()) { true })
+                        try {
+                            val baseParams = backgroundTextGenerationParams(resolvedModel, conversationId, settings.fastModelReasoningLevel)
+                            val result = providerHandler.generateText(
+                                providerSetting = provider,
+                                messages = listOf(UIMessage.user(prompt = before.value)),
+                                params = baseParams.copy(customHeaders = baseParams.customHeaders + CustomHeader(PluginRequestContexts.HEADER, token)),
+                            )
+                            result.message.toText().trim()
+                        } finally {
+                            PluginRequestContexts.remove(token)
+                        }
+                    }
+                }
+            }
+
+            val finalTitle = pluginBridge.taskAfterText("title", rawTitle, extra, titleCtx).trim()
+            if (finalTitle.isNotEmpty()) {
+                // 生成完，conversation可能不是最新了，因此需要重新获取
+                conversationRepo.getConversationById(conversation.id)?.let {
+                    saveConversation(
+                        conversationId,
+                        it.copy(title = finalTitle)
+                    )
+                }
             }
         }.onFailure {
             it.printStackTrace()
@@ -1494,8 +1565,23 @@ class ChatService(
             val settings = settingsStore.awaitLoaded()
             if (!settings.enableSuggestion) return@runCatching
             val model = settings.findModelById(settings.fastModelId)
-                ?: return@runCatching
-            val provider = model.findProvider(settings.providers) ?: return@runCatching
+            val sugCtx = PluginCtx(
+                task = "suggestion",
+                assistantId = conversation.assistantId,
+                conversationId = conversationId,
+                model = model,
+            )
+            val contentText = conversation.currentMessages
+                .takeLast(8).joinToString("\n\n") { it.summaryAsText(maxLength = 500) }
+            val defaultPrompt = settings.suggestionPrompt.applyPlaceholders(
+                "locale" to Locale.getDefault().displayName,
+                "content" to contentText,
+            )
+            val extra = buildJsonObject {
+                put("conversationId", conversationId.toString())
+                put("content", contentText)
+                put("locale", Locale.getDefault().displayName)
+            }
 
             sessionManager.get(conversationId)?.let { session ->
                 updateConversation(
@@ -1504,22 +1590,39 @@ class ChatService(
                 )
             }
 
-            val providerHandler = providerManager.getProviderByType(provider)
-            val result = providerHandler.generateText(
-                providerSetting = provider,
-                messages = listOf(
-                    UIMessage.user(
-                        settings.suggestionPrompt.applyPlaceholders(
-                            "locale" to Locale.getDefault().displayName,
-                            "content" to conversation.currentMessages
-                                .takeLast(8).joinToString("\n\n") { it.summaryAsText(maxLength = 500) }),
-                    )
-                ),
-                params = backgroundTextGenerationParams(model, conversationId, settings.fastModelReasoningLevel),
-            )
-            val suggestions =
-                result.message.toText().split("\n").map { it.trim() }
-                    .filter { it.isNotBlank() }
+            val rawText = if (pluginBridge.hasTaskReplace("suggestion")) {
+                val r = pluginBridge.taskReplace("suggestion", JsonObject(extra + ("prompt" to JsonPrimitive(defaultPrompt))), sugCtx)
+                when (r) {
+                    is JsonPrimitive -> r.content
+                    is JsonArray -> r.joinToString("\n") { it.jsonPrimitive.content }
+                    null -> ""
+                    else -> r.jsonObject["text"]?.jsonPrimitive?.contentOrNull ?: r.toString()
+                }
+            } else {
+                when (val before = pluginBridge.taskBeforePrompt("suggestion", defaultPrompt, extra, sugCtx)) {
+                    is TaskBeforeResult.ShortCircuit -> before.output
+                    is TaskBeforeResult.Proceed -> {
+                        val resolvedModel = model ?: return@runCatching
+                        val provider = resolvedModel.findProvider(settings.providers) ?: return@runCatching
+                        val providerHandler = providerManager.getProviderByType(provider)
+                        val token = PluginRequestContexts.register(PluginRequestContext(sugCtx.toJson()) { true })
+                        try {
+                            val baseParams = backgroundTextGenerationParams(resolvedModel, conversationId, settings.fastModelReasoningLevel)
+                            val result = providerHandler.generateText(
+                                providerSetting = provider,
+                                messages = listOf(UIMessage.user(before.value)),
+                                params = baseParams.copy(customHeaders = baseParams.customHeaders + CustomHeader(PluginRequestContexts.HEADER, token)),
+                            )
+                            result.message.toText()
+                        } finally {
+                            PluginRequestContexts.remove(token)
+                        }
+                    }
+                }
+            }
+
+            val finalText = pluginBridge.taskAfterText("suggestion", rawText, extra, sugCtx)
+            val suggestions = finalText.split("\n").map { it.trim() }.filter { it.isNotBlank() }
 
             val latestConversation = conversationRepo.getConversationById(conversationId)
                 ?: sessionManager.get(conversationId)?.state?.value
@@ -1553,11 +1656,12 @@ class ChatService(
         val settings = settingsStore.awaitLoaded()
         val model = settings.findModelById(settings.compressModelId)
             ?: settings.getChatModelOf(conversation)
-            ?: throw IllegalStateException("No model available for compression")
-        val provider = model.findProvider(settings.providers)
-            ?: throw IllegalStateException("Provider not found")
-
-        val providerHandler = providerManager.getProviderByType(provider)
+        val compCtx = PluginCtx(
+            task = "compress",
+            assistantId = conversation.assistantId,
+            conversationId = conversationId,
+            model = model,
+        )
 
         val maxMessagesPerChunk = 256
         val nodes = conversation.messageNodes
@@ -1589,7 +1693,7 @@ class ChatService(
                 // 上一份摘要是更早历史的唯一来源，不能截断。
                 it.summaryAsText(maxLength = if (it.isContextCheckpoint) Int.MAX_VALUE else 2000)
             }
-            val prompt = settings.compressPrompt.applyPlaceholders(
+            val defaultPrompt = settings.compressPrompt.applyPlaceholders(
                 "content" to contentToCompress,
                 "target_tokens" to targetTokens.toString(),
                 "additional_context" to if (additionalPrompt.isNotBlank()) {
@@ -1597,14 +1701,45 @@ class ChatService(
                 } else "",
                 "locale" to Locale.getDefault().displayName
             )
+            val extra = buildJsonObject {
+                put("conversationId", conversationId.toString())
+                put("content", contentToCompress)
+                put("targetTokens", targetTokens)
+                put("additionalPrompt", additionalPrompt)
+            }
 
-            val result = providerHandler.generateText(
-                providerSetting = provider,
-                messages = listOf(UIMessage.user(prompt)),
-                params = backgroundTextGenerationParams(model, conversationId),
-            )
+            val rawSummary = if (pluginBridge.hasTaskReplace("compress")) {
+                val r = pluginBridge.taskReplace("compress", JsonObject(extra + ("prompt" to JsonPrimitive(defaultPrompt))), compCtx)
+                when (r) {
+                    is JsonPrimitive -> r.content
+                    null -> ""
+                    else -> r.jsonObject["text"]?.jsonPrimitive?.contentOrNull ?: r.toString()
+                }
+            } else {
+                when (val before = pluginBridge.taskBeforePrompt("compress", defaultPrompt, extra, compCtx)) {
+                    is TaskBeforeResult.ShortCircuit -> before.output
+                    is TaskBeforeResult.Proceed -> {
+                        val resolvedModel = model ?: throw IllegalStateException("No model available for compression")
+                        val provider = resolvedModel.findProvider(settings.providers)
+                            ?: throw IllegalStateException("Provider not found")
+                        val providerHandler = providerManager.getProviderByType(provider)
+                        val token = PluginRequestContexts.register(PluginRequestContext(compCtx.toJson()) { true })
+                        try {
+                            val baseParams = backgroundTextGenerationParams(resolvedModel, conversationId)
+                            val result = providerHandler.generateText(
+                                providerSetting = provider,
+                                messages = listOf(UIMessage.user(before.value)),
+                                params = baseParams.copy(customHeaders = baseParams.customHeaders + CustomHeader(PluginRequestContexts.HEADER, token)),
+                            )
+                            result.message.toText().trim()
+                        } finally {
+                            PluginRequestContexts.remove(token)
+                        }
+                    }
+                }
+            }
 
-            return result.message.toText().trim().takeIf { it.isNotBlank() }
+            return pluginBridge.taskAfterText("compress", rawSummary, extra, compCtx).trim().takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("Failed to generate compressed summary")
         }
 
@@ -1627,6 +1762,9 @@ class ChatService(
         }
 
         saveConversation(conversationId, newConversation)
+        pluginBridge.emit("context.compressed", kotlinx.serialization.json.buildJsonObject {
+            put("conversationId", conversationId.toString())
+        })
     }
 
     // ---- 聊天页配置 ----
@@ -1805,7 +1943,18 @@ class ChatService(
 
         // 会话落库即视为开始，此时把助手的配置固定到会话上
         val settings = settingsStore.awaitLoaded()
-        val updatedConversation = conversation.bindConfig(settings).fillModelSnapshots(settings)
+        val saveCtx = PluginCtx(
+            task = "other",
+            assistantId = conversation.assistantId,
+            conversationId = conversationId,
+            isSubAgent = conversation.config?.parentConversationId != null,
+            parentConversationId = conversation.config?.parentConversationId,
+            workspaceId = conversation.config?.workspaceId,
+        )
+        val updatedConversation = pluginBridge.conversationBeforeSave(
+            conversation.bindConfig(settings).fillModelSnapshots(settings),
+            saveCtx,
+        )
         updateConversation(conversationId, updatedConversation)
 
         if (!exists) {
@@ -1843,7 +1992,8 @@ class ChatService(
                 translationHandler.translateText(
                     settings = settings,
                     sourceText = messageText,
-                    targetLanguage = targetLanguage
+                    targetLanguage = targetLanguage,
+                    conversationId = conversationId,
                 ) { translatedText ->
                     // Update translation field in real-time
                     updateTranslationField(conversationId, message.id, translatedText)
@@ -1903,6 +2053,7 @@ class ChatService(
             parts = parts,
             assistant = assistant,
             depth = if (editedNodeIndex >= 0) currentConversation.messageNodes.lastIndex - editedNodeIndex else 0,
+            conversationId = conversationId,
         )
         var edited = false
 
@@ -2047,6 +2198,11 @@ class ChatService(
 
         saveConversation(forkConversation.id, forkConversation)
         memoryConsolidationScheduler.onConversationForked(forkConversation)
+        pluginBridge.emit("conversation.fork", kotlinx.serialization.json.buildJsonObject {
+            put("conversationId", forkConversation.id.toString())
+            put("sourceConversationId", conversationId.toString())
+            put("messageId", messageId.toString())
+        })
         return forkConversation
     }
 
@@ -2207,7 +2363,7 @@ class ChatService(
             .filter { it.isPending }
             .map { tool ->
                 val allowUser = childAssistant.requiresSubAgentUserApproval(tool.toolName, mcpServerNameToId)
-                val allowAgent = childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                val allowAgent = childAssistant.requiresSubAgentAgentApproval(tool, mcpServerNameToId)
                 SubConversationPendingToolInfo(
                     toolCallId = tool.toolCallId,
                     toolName = tool.toolName,
@@ -2543,6 +2699,14 @@ class ChatService(
                 else -> completedReply?.takeIf { it.isNotBlank() } ?: latestAssistantText
             }
 
+            pluginBridge.emit("subagent.status", buildJsonObject {
+                put("conversationId", targetId.toString())
+                put("parentConversationId", parentConversationId.toString())
+                put("logicalId", logicalId)
+                put("status", finalStatus)
+                put("timedOut", isRunningOrUserApprovalTimeout)
+            })
+
             return SubConversationSendResult(
                 conversationId = targetId,
                 logicalId = logicalId,
@@ -2632,7 +2796,7 @@ class ChatService(
                 } else {
                     // 校验待审批工具是否开启了「主代理审批」权限
                     val unauthorizedTools = pendingTools.filterNot { tool ->
-                        childAssistant.requiresSubAgentAgentApproval(tool.toolName, mcpServerNameToId)
+                        childAssistant.requiresSubAgentAgentApproval(tool, mcpServerNameToId)
                     }
                     if (unauthorizedTools.isNotEmpty()) {
                         val names = unauthorizedTools.joinToString(", ") { it.toolName }
@@ -3099,6 +3263,13 @@ class ChatService(
 
                 val currentParent = getOrLoadConversation(parentConversationId)
                 val resolvedLogicalId = currentParent?.resolveLogicalSubAgentId(targetId) ?: logicalId
+
+                pluginBridge.emit("subagent.status", buildJsonObject {
+                    put("conversationId", targetId.toString())
+                    put("parentConversationId", parentConversationId.toString())
+                    put("logicalId", resolvedLogicalId)
+                    put("status", reportStatus)
+                })
 
                 val report = CompletedSubAgentReport(
                     childId = targetId,

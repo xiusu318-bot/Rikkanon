@@ -3,11 +3,15 @@ package me.rerere.rikkahub.di
 import com.google.firebase.Firebase
 import com.google.firebase.analytics.analytics
 import com.google.firebase.crashlytics.crashlytics
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.remote.OutboundTarget
+import me.rerere.rikkahub.data.remote.configureOutboundProxy
+import me.rerere.rikkahub.data.remote.resolveProxy
 import me.rerere.rikkahub.service.ChatFloatingTracker
 import me.rerere.rikkahub.service.ChatNotificationManager
 import me.rerere.rikkahub.service.ChatService
@@ -25,6 +29,38 @@ import org.koin.dsl.module
 
 val appModule = module {
     single<Json> { JsonInstant }
+
+    // 插件注册表：PluginHost 只是登记与运行容器；PluginBridge 供各挂点读取 hook 链
+    single {
+        val context: android.content.Context = get()
+        val appScope: AppScope = get()
+        val settingsStore: me.rerere.rikkahub.data.datastore.SettingsStore = get()
+        me.rerere.plugin.host.PluginHost(
+            store = me.rerere.plugin.store.PluginStore(java.io.File(context.filesDir, "plugins")),
+        ) { host ->
+            me.rerere.plugin.host.DefaultPluginServices(
+                host = host,
+                // 插件 fetch 使用独立客户端，不挂载插件 intercept，默认跟随 LLM 出站代理设置
+                fetchClient = okhttp3.OkHttpClient.Builder()
+                    .configureOutboundProxy {
+                        settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+                    }
+                    .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+                    .build(),
+                hostApi = me.rerere.rikkahub.data.plugin.AppPluginHostApi(context),
+            )
+        }.also { host ->
+            host.onChanged = {
+                runCatching { me.rerere.rikkahub.data.plugin.PluginScheduleManager.sync(context, host) }
+                appScope.launch {
+                    runCatching { me.rerere.rikkahub.data.plugin.PluginCapabilitySync.sync(host, settingsStore) }
+                }
+            }
+        }
+    }
+
+    single { me.rerere.rikkahub.data.plugin.PluginBridge(get()) }
 
     single {
         AppEventBus()
@@ -50,7 +86,11 @@ val appModule = module {
     }
 
     single {
-        TTSManager(get())
+        TTSManager(
+            context = get(),
+            baseClient = get(),
+            pluginDelegate = me.rerere.rikkahub.data.plugin.PluginTtsProvider(get()),
+        )
     }
 
     single {
@@ -107,6 +147,7 @@ val appModule = module {
             mcpManager = get(),
             skillManager = get(),
             workspaceRepository = get(),
+            pluginBridge = get(),
         )
     }
 
@@ -127,6 +168,7 @@ val appModule = module {
             mcpManager = get(),
             filesManager = get(),
             workspaceRepository = get(),
+            pluginBridge = get(),
             folderRepository = get()
         )
     }

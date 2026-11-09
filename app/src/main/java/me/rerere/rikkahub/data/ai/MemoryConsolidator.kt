@@ -31,6 +31,15 @@ import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.memoryId
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import me.rerere.plugin.manifest.PluginHookKind
+import me.rerere.rikkahub.data.plugin.PluginBridge
+import me.rerere.rikkahub.data.plugin.PluginCtx
+import me.rerere.rikkahub.data.plugin.TaskBeforeResult
 import me.rerere.common.android.Logging
 import kotlin.uuid.Uuid
 
@@ -64,6 +73,7 @@ class MemoryConsolidator(
     private val conversationRepo: ConversationRepository,
     private val consolidationDao: MemoryConsolidationDAO,
     private val settingsStore: SettingsStore,
+    private val pluginBridge: PluginBridge? = null,
 ) : MemoryConsolidationWorker {
 
     override suspend fun pendingOf(conversation: Conversation): PendingMemoryConversation? =
@@ -155,17 +165,64 @@ class MemoryConsolidator(
             .filter { fullReview || it.name != MemoryToolNames.DELETE } +
             createMemoryConversationTools(conversationRepo, assistantIds)
 
+        val defaultInput = buildMemoryConsolidationInput(
+            files = files,
+            conversations = batches.map { it.input },
+        )
+        val memCtx = PluginCtx(
+            task = "memory",
+            assistantId = assistants.first().id,
+            conversationId = batches.firstOrNull()?.conversation?.id,
+            model = model,
+        )
+        val extra = buildJsonObject {
+            put("memoryId", memoryId)
+            put("fullReview", fullReview)
+            put("conversationIds", JsonArray(batches.map { JsonPrimitive(it.conversation.id.toString()) }))
+        }
+
+        if (pluginBridge != null && pluginBridge.hasTaskReplace("memory")) {
+            pluginBridge.taskReplace("memory", JsonObject(extra + ("prompt" to JsonPrimitive(defaultInput))), memCtx)
+            batches.forEach { batch ->
+                batch.pending.consolidatedThrough?.let { advance(batch.conversation.id, it) }
+            }
+            pluginBridge.taskAfterText("memory", "", extra, memCtx)
+            val remaining = memoryRepository.getFiles(memoryId).associateBy { it.path }
+            return MemoryConsolidationRun(
+                memoryId = memoryId,
+                finishedAt = System.currentTimeMillis(),
+                fullReview = fullReview,
+                changedPaths = remaining.keys.toList(),
+                deletedPaths = emptyList(),
+                titles = remaining.mapValues { it.value.title },
+            )
+        }
+
+        val before = pluginBridge?.taskBeforePrompt("memory", defaultInput, extra, memCtx)
+            ?: TaskBeforeResult.Proceed(defaultInput)
+        if (before is TaskBeforeResult.ShortCircuit) {
+            batches.forEach { batch ->
+                batch.pending.consolidatedThrough?.let { advance(batch.conversation.id, it) }
+            }
+            pluginBridge?.taskAfterText("memory", before.output, extra, memCtx)
+            val remaining = memoryRepository.getFiles(memoryId).associateBy { it.path }
+            return MemoryConsolidationRun(
+                memoryId = memoryId,
+                finishedAt = System.currentTimeMillis(),
+                fullReview = fullReview,
+                changedPaths = emptyList(),
+                deletedPaths = emptyList(),
+                titles = remaining.mapValues { it.value.title },
+            )
+        }
+        val effectiveInput = (before as TaskBeforeResult.Proceed).value
+
         var messages = emptyList<UIMessage>()
         generationLoop.generateText(
             settings = settings,
             model = model,
             messages = listOf(
-                UIMessage.user(
-                    buildMemoryConsolidationInput(
-                        files = files,
-                        conversations = batches.map { it.input },
-                    )
-                )
+                UIMessage.user(effectiveInput)
             ),
             assistant = Assistant(
                 systemPrompt = buildMemoryConsolidationPrompt(fullReview),
@@ -176,6 +233,7 @@ class MemoryConsolidator(
             maxSteps = MAX_STEPS,
             // 只用来当请求的会话 ID：整次整理的每一步用同一个，服务端才能命中前面几步的缓存
             conversationId = Uuid.random(),
+            pluginTask = "memory",
         ).collect { chunk ->
             when (chunk) {
                 is GenerationChunk.Messages -> messages = chunk.messages
@@ -192,6 +250,18 @@ class MemoryConsolidator(
             .map { MemoryFile.normalizePath(it) ?: it }
             .distinct()
         val remaining = memoryRepository.getFiles(memoryId).associateBy { it.path }
+        val lastText = messages.lastOrNull()?.toText().orEmpty()
+        pluginBridge?.taskAfterText(
+            "memory",
+            lastText,
+            JsonObject(
+                extra + mapOf(
+                    "changedPaths" to JsonArray(touched.filter { it in remaining }.map(::JsonPrimitive)),
+                    "deletedPaths" to JsonArray(touched.filterNot { it in remaining }.map(::JsonPrimitive)),
+                )
+            ),
+            memCtx,
+        )
         return MemoryConsolidationRun(
             memoryId = memoryId,
             finishedAt = System.currentTimeMillis(),

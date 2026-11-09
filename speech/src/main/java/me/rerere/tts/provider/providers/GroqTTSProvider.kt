@@ -19,8 +19,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "GroqTTSProvider"
 
-class GroqTTSProvider : TTSProvider<TTSProviderSetting.Groq> {
-    private val httpClient = OkHttpClient.Builder()
+class GroqTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.Groq> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

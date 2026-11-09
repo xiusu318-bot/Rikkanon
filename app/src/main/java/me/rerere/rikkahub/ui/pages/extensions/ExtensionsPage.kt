@@ -10,6 +10,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
@@ -59,13 +62,7 @@ fun ExtensionsPage() {
                     title = { Text(stringResource(R.string.extensions_page_section_extensions)) },
                 ) {
                     item(
-                        onClick = { navController.navigate(Screen.QuickMessages) },
-                        leadingContent = { CardGroupIcon(HugeIcons.Zap, containerColor = containerColor, contentColor = contentColor) },
-                        headlineContent = { Text(stringResource(R.string.assistant_page_quick_messages)) },
-                        supportingContent = { Text(stringResource(R.string.extensions_page_quick_messages_desc)) },
-                    )
-                    item(
-                        onClick = { navController.navigate(Screen.Prompts) },
+                        onClick = { navController.navigate(Screen.Prompts()) },
                         leadingContent = { CardGroupIcon(HugeIcons.Book03, containerColor = containerColor, contentColor = contentColor) },
                         headlineContent = { Text("高级提示词模式") },
                         supportingContent = { Text("管理提示词组装预设与世界书") },
@@ -75,6 +72,12 @@ fun ExtensionsPage() {
                         leadingContent = { CardGroupIcon(HugeIcons.Puzzle, containerColor = containerColor, contentColor = contentColor) },
                         headlineContent = { Text(stringResource(R.string.extensions_page_agent_skills)) },
                         supportingContent = { Text(stringResource(R.string.extensions_page_agent_skills_desc)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.QuickMessages()) },
+                        leadingContent = { CardGroupIcon(HugeIcons.Zap, containerColor = containerColor, contentColor = contentColor) },
+                        headlineContent = { Text(stringResource(R.string.assistant_page_quick_messages)) },
+                        supportingContent = { Text(stringResource(R.string.extensions_page_quick_messages_desc)) },
                     )
                     item(
                         onClick = { navController.navigate(Screen.Workspaces) },
@@ -88,7 +91,17 @@ fun ExtensionsPage() {
                         headlineContent = { Text("密钥代名词") },
                         supportingContent = { Text("管理密钥代名词并在工具调用时自动替换为真实密钥") },
                     )
+                    item(
+                        onClick = { navController.navigate(Screen.Plugins) },
+                        leadingContent = { CardGroupIcon(HugeIcons.Puzzle, containerColor = containerColor, contentColor = contentColor) },
+                        headlineContent = { Text("插件") },
+                        supportingContent = { Text("安装、启用插件并调整执行顺序") },
+                    )
                 }
+            }
+            // 插件通过 rikka.ui.mount("extensions.list", ...) 挂到这里的入口/表单/面板
+            item {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPageSlotMounts(slot = "extensions.list")
             }
         }
     }

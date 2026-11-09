@@ -96,8 +96,10 @@ internal class VolcengineTTSStreamProcessor {
 }
 
 // V3 SSE: https://www.volcengine.com/docs/6561/1598757
-class VolcengineTTSProvider : TTSProvider<TTSProviderSetting.Volcengine> {
-    private val httpClient = OkHttpClient.Builder()
+class VolcengineTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.Volcengine> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

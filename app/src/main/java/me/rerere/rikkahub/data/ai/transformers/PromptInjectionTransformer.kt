@@ -22,7 +22,12 @@ import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.PromptMarkerType
 import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.defaultPromptBlocks
+import me.rerere.rikkahub.data.model.parseWorldInfoContentDecorators
 import me.rerere.rikkahub.data.model.replaceLorebookRegexes
+import me.rerere.rikkahub.data.plugin.PluginBridge
+import me.rerere.plugin.manifest.PluginHookKind
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.get
 
 /**
  * 高级提示词组装与世界书注入转换器
@@ -43,17 +48,70 @@ import me.rerere.rikkahub.data.model.replaceLorebookRegexes
  *    - 历史轮次已完成的工具调用留在 Chat History 中（且 @D 插入自动避开 USER -> ASSISTANT(含Tool) 之间）
  *    - 当前回合正在进行的连续工具链拆出并压在整个请求体的最底部（位于底部提示词之后）
  */
-object PromptInjectionTransformer : InputMessageTransformer {
+object PromptInjectionTransformer : InputMessageTransformer, KoinComponent {
     override suspend fun transform(
         ctx: TransformerContext,
         messages: List<UIMessage>,
     ): List<UIMessage> {
-        if (!ctx.settings.enableAdvancedPrompt) return messages
+        val pluginBridge = runCatching { get<PluginBridge>() }.getOrNull()
+        if (!ctx.settings.enableAdvancedPrompt) {
+            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.CHAT_HISTORY, ctx.assistant)) {
+                val firstSysIdx = messages.indexOfFirst { it.role == MessageRole.SYSTEM }
+                val leadingSys = if (firstSysIdx == 0) listOf(messages[0]) else emptyList()
+                val nonSys = if (firstSysIdx == 0) messages.drop(1) else messages.filter { it.role != MessageRole.SYSTEM }
+                val lastNonSys = nonSys.lastOrNull()
+                val hasActiveTool = lastNonSys != null && lastNonSys.role == MessageRole.ASSISTANT && lastNonSys.getTools().isNotEmpty()
+                val chatHist = if (hasActiveTool) nonSys.dropLast(1) else nonSys
+                val activeTool = if (hasActiveTool) listOf(lastNonSys) else emptyList()
+                val updatedHist = pluginBridge.chatHistory(chatHist, ctx.assistant, ctx.pluginCtx)
+                return leadingSys + updatedHist + activeTool
+            }
+            return messages
+        }
         val combinedWorkspacePrompt = listOfNotNull(
             ctx.toolSystemPrompt.trim().takeIf { it.isNotEmpty() },
             ctx.workspacePrompt.trim().takeIf { it.isNotEmpty() },
         ).joinToString("\n\n")
-        return transformMessages(
+        val chatHistoryHook: ((List<UIMessage>) -> List<UIMessage>)? =
+            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.CHAT_HISTORY, ctx.assistant)) {
+                { rawHistory ->
+                    kotlinx.coroutines.runBlocking {
+                        pluginBridge.chatHistory(rawHistory, ctx.assistant, ctx.pluginCtx)
+                    }
+                }
+            } else null
+        val presetHook: ((PromptPreset) -> PromptPreset)? =
+            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.PRESET_BEFORE_ASSEMBLE, ctx.assistant)) {
+                { rawPreset ->
+                    kotlinx.coroutines.runBlocking {
+                        pluginBridge.presetBeforeAssemble(rawPreset, ctx.assistant, ctx.pluginCtx)
+                    }
+                }
+            } else null
+        val lorebookHook: ((List<ActivatedLoreEntry>) -> List<ActivatedLoreEntry>)? =
+            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.LOREBOOK_ACTIVATED, ctx.assistant)) {
+                { rawEntries ->
+                    val byId = rawEntries.associateBy { it.entry.id }
+                    val updated = kotlinx.coroutines.runBlocking {
+                        pluginBridge.lorebookActivated(rawEntries.map { it.entry }, ctx.assistant, ctx.pluginCtx)
+                    }
+                    updated.map { entry ->
+                        val prev = byId[entry.id]
+                        if (prev != null && prev.entry.content == entry.content) {
+                            prev.copy(entry = entry)
+                        } else {
+                            val parsed = parseWorldInfoContentDecorators(entry.content)
+                            ActivatedLoreEntry(
+                                entry = entry,
+                                cleanContent = parsed.cleanContent,
+                                anchoredChatInsertIndex = prev?.anchoredChatInsertIndex,
+                            )
+                        }
+                    }
+                }
+            } else null
+
+        val assembled = transformMessages(
             messages = messages,
             assistant = ctx.assistant,
             modeInjections = ctx.settings.modeInjections,
@@ -62,7 +120,15 @@ object PromptInjectionTransformer : InputMessageTransformer {
             enableAdvancedPrompt = ctx.settings.enableAdvancedPrompt,
             memoryPrompt = ctx.memoryPrompt,
             workspacePrompt = combinedWorkspacePrompt,
+            chatHistoryTransform = chatHistoryHook,
+            presetBeforeAssembleTransform = presetHook,
+            lorebookActivatedTransform = lorebookHook,
         )
+        return if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.PROMPT_ASSEMBLED, ctx.assistant)) {
+            pluginBridge.promptAssembled(assembled, ctx.assistant, ctx.pluginCtx)
+        } else {
+            assembled
+        }
     }
 }
 
@@ -98,6 +164,9 @@ internal fun transformMessages(
     enableAdvancedPrompt: Boolean = true,
     memoryPrompt: String = "",
     workspacePrompt: String = "",
+    chatHistoryTransform: ((List<UIMessage>) -> List<UIMessage>)? = null,
+    presetBeforeAssembleTransform: ((PromptPreset) -> PromptPreset)? = null,
+    lorebookActivatedTransform: ((List<ActivatedLoreEntry>) -> List<ActivatedLoreEntry>)? = null,
 ): List<UIMessage> {
     if (!enableAdvancedPrompt) return messages
     // 1. 提取顶层系统消息（代表 📌 助手系统提示词）
@@ -116,18 +185,24 @@ internal fun transformMessages(
     val isTrailingActiveToolChain = lastNonSys != null &&
         lastNonSys.role == MessageRole.ASSISTANT &&
         lastNonSys.getTools().isNotEmpty()
-    val chatHistoryMessages: List<UIMessage> = if (isTrailingActiveToolChain) {
+    val rawChatHistoryMessages: List<UIMessage> = if (isTrailingActiveToolChain) {
         nonSystemMessages.dropLast(1)
     } else {
         nonSystemMessages
     }
+    val chatHistoryMessages: List<UIMessage> = chatHistoryTransform?.invoke(rawChatHistoryMessages) ?: rawChatHistoryMessages
     val activeToolChainMessage: UIMessage? = if (isTrailingActiveToolChain) lastNonSys else null
 
     // 3. 解析当前生效的提示词预设（PromptPreset）
-    val activePreset: PromptPreset? = resolveActivePromptPreset(
+    val resolvedPreset: PromptPreset? = resolveActivePromptPreset(
         assistant = assistant,
         promptPresets = promptPresets,
     )
+    val activePreset: PromptPreset? = if (presetBeforeAssembleTransform != null) {
+        presetBeforeAssembleTransform(resolvedPreset ?: PromptPreset(blocks = defaultPromptBlocks())).ensureRequiredMarkers()
+    } else {
+        resolvedPreset
+    }
 
     // 4. 获取启用的世界书并执行扫描（支持三档绿灯模式、递归扫描、首次触发位置锚定）
     val enabledLorebooks = resolveEnabledLorebooks(assistant, lorebooks)
@@ -141,9 +216,11 @@ internal fun transformMessages(
         )
     }
 
+    val effectiveLoreEntries = lorebookActivatedTransform?.invoke(activatedLoreEntries) ?: activatedLoreEntries
+
     // 4.1 世界书正则（作用范围勾选「世界书」）：激活后、汇聚锚点前对条目正文执行，不影响关键字扫描与递归（与酒馆一致）。
     // 深度取条目的 @D 深度，非 @D 条目（角色定义前/后、锚点）不做深度限制
-    val regexedLoreEntries = applyLorebookRegexes(activatedLoreEntries, assistant)
+    val regexedLoreEntries = applyLorebookRegexes(effectiveLoreEntries, assistant)
 
     // 5. 收集 ➡️ 锚点（OUTLET）条目，按 Order（priority）从小到大排序后汇聚，供 {{outlet::name}} 展开
     val outletMap: Map<String, String> = regexedLoreEntries
@@ -168,14 +245,15 @@ internal fun transformMessages(
         it.enabled && assistant.modeInjectionIds.contains(it.id)
     }
 
-    // 如果既没有启用预设、也没有触发任何世界书或旧版注入、也没有待注入的记忆/工作区提示词，原样返回
+    // 如果既没有启用预设、也没有触发任何世界书或旧版注入、也没有待注入的记忆/工作区提示词，原样返回（若 chatHistoryTransform 已改写对话历史，则应用改写后的对话历史）
     val hasActivePresetBlocks = activePreset != null && activePreset.blocks.any {
         it.enabled && (!it.isMarker && it.hasAnyPayload)
     }
     val hasCustomMarkerOrder = activePreset != null && !isStandardDefaultMarkerOrder(activePreset)
     val hasMemoryOrWorkspace = memoryPrompt.isNotBlank() || workspacePrompt.isNotBlank()
     if (resolvedLoreEntries.isEmpty() && legacyModeInjections.isEmpty() && !hasActivePresetBlocks && !hasCustomMarkerOrder && !hasMemoryOrWorkspace) {
-        return messages
+        if (chatHistoryTransform == null) return messages
+        return listOfNotNull(charSystemMessage) + chatHistoryMessages + listOfNotNull(activeToolChainMessage)
     }
 
     val presetToUse = (activePreset ?: PromptPreset(blocks = defaultPromptBlocks())).ensureRequiredMarkers()
@@ -211,7 +289,11 @@ private fun applyLorebookRegexes(
     if (entries.isEmpty()) return entries
     val hasLorebookRegex = assistant.regexes.any {
         it.enabled && it.findRegex.isNotEmpty() && AssistantAffectScope.LOREBOOK in it.affectingScope
-    }
+    } || runCatching {
+        val bridge = org.koin.mp.KoinPlatformTools.defaultContext().getOrNull()?.getOrNull<PluginBridge>()
+        bridge?.hasPluginRegex(me.rerere.rikkahub.data.model.AssistantRegexPhase.REQUEST, AssistantAffectScope.LOREBOOK) == true ||
+            bridge?.hasPluginRegex(me.rerere.rikkahub.data.model.AssistantRegexPhase.PERSIST, AssistantAffectScope.LOREBOOK) == true
+    }.getOrDefault(false)
     if (!hasLorebookRegex) return entries
     return entries.map { item ->
         val replaced = item.cleanContent.replaceLorebookRegexes(
@@ -263,7 +345,12 @@ private fun isStandardDefaultMarkerOrder(preset: PromptPreset): Boolean {
         PromptMarkerType.CHAR_SYSTEM_PROMPT,
         PromptMarkerType.WORLD_INFO_AFTER,
         PromptMarkerType.CHAT_HISTORY,
-    )) && enabledBlocks.all { (it.isMarker || !it.hasAnyPayload) && !it.blankRole }
+    )) && enabledBlocks.all {
+        (it.isMarker || !it.hasAnyPayload) &&
+            !it.blankRole &&
+            it.role == MessageRole.SYSTEM &&
+            it.effectivePosition == PromptBlockPosition.RELATIVE
+    }
 }
 
 /**
@@ -568,8 +655,12 @@ private fun assembleWithPresetAndLorebooks(
         }
     }
 
-    // 4. 将轨道最开头的连续 SYSTEM 消息合并为第 0 条顶层 SYSTEM 消息（保护 Prompt Cache 并兼容 Claude/Gemini systemInstruction）
-    val result = mergeLeadingSystemMessages(trackMessages).toMutableList()
+    // 4. 保留轨道上的每个 SYSTEM 块各自独立（各 Provider 按自身协议决定：
+    //    - OpenAI Chat Completions: 原样发送多条独立 role="system" 消息
+    //    - Claude Messages: 顶部连续 SYSTEM 块转为顶层 system: [{"type":"text",...}, ...] 多块数组
+    //    - Google generateContent: 顶部连续 SYSTEM 块转为顶层 systemInstruction.parts: [{"text":...}, ...] 多部件数组
+    //    - Google Interactions / OpenAI Responses: 仅支持单字符串，由 Provider 自动将顶部连续 SYSTEM 块用 "\n\n" 合并）
+    val result = trackMessages.toMutableList()
 
     // 5. 若当前回合存在正在执行的连续工具链消息，将其压在底部提示词之后；
     // 开启「按预设发送工具调用」的块随后按预设顺序排在它后面
@@ -926,10 +1017,10 @@ internal fun createRawJsonMessage(
 ): UIMessage? {
     val clean = rawJsonString.trim()
     if (clean.isEmpty()) return null
-    val parsedElement: JsonElement = runCatching {
+    val parsedElement: JsonElement = try {
         RawBlockJson.parseToJsonElement(clean)
-    }.getOrElse {
-        return null
+    } catch (e: Exception) {
+        throw IllegalArgumentException("提示词预设 JSON 模式块解析失败: ${e.message}", e)
     }
     val meta = RawJsonMessageMetadata(rawJson = parsedElement).toMetadata()
     return UIMessage(
@@ -1040,12 +1131,12 @@ private fun createRoleMessage(role: MessageRole, content: String): UIMessage {
 }
 
 /**
- * 合并位于列表最开头的连续 SYSTEM 消息为单条顶层 SYSTEM 消息（用 "\n\n" 连接），
- * 位于第一条非 SYSTEM 消息之后的 SYSTEM 消息保持原位独立。
+ * 合并位于列表最开头的连续普通 SYSTEM 消息为单条顶层 SYSTEM 消息（用 "\n\n" 连接），
+ * 位于第一条非 SYSTEM 消息（或 JSON 模式块）之后的 SYSTEM 消息保持原位独立。
  */
 private fun mergeLeadingSystemMessages(messages: List<UIMessage>): List<UIMessage> {
     if (messages.size <= 1) return messages
-    val firstNonSysIdx = messages.indexOfFirst { it.role != MessageRole.SYSTEM }
+    val firstNonSysIdx = messages.indexOfFirst { it.role != MessageRole.SYSTEM || it.rawJsonElementOrNull() != null }
     val leadingCount = if (firstNonSysIdx == -1) messages.size else firstNonSysIdx
     if (leadingCount <= 1) return messages
 

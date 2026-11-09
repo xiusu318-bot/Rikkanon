@@ -79,6 +79,11 @@ fun MediaGenerationProviderSetting.capabilities(kind: MediaKind): MediaGeneratio
             MediaKind.IMAGE -> OPENROUTER_IMAGE
             MediaKind.VIDEO -> OPENROUTER_VIDEO
         }
+
+        is MediaGenerationProviderSetting.Plugin -> when (kind) {
+            MediaKind.IMAGE -> OPENROUTER_IMAGE
+            MediaKind.VIDEO -> OPENROUTER_VIDEO
+        }
     }
 
 // 图像接口不区分图片角色，统一当作参考图

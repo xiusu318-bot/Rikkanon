@@ -361,6 +361,13 @@ private fun SettingProviderConfigPage(
                     .padding(vertical = 16.dp)
             )
         }
+
+        me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPageSlotMounts(
+            slot = "provider.detail",
+            contextArgs = kotlinx.serialization.json.buildJsonObject {
+                put("providerId", kotlinx.serialization.json.JsonPrimitive(provider.id.toString()))
+            },
+        )
     }
 
     // Delete confirmation dialog

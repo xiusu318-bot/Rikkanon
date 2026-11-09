@@ -36,6 +36,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEachIndexed
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.datetime.toJavaLocalDateTime
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
@@ -272,6 +273,10 @@ fun ChatMessageActionsSheet(
         onDismissRequest = onDismissRequest,
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
     ) {
+        val host = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
+        val menuMounts = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginUiMounts("message.menu")
+        val pluginScope = androidx.compose.runtime.rememberCoroutineScope()
+        val toaster = me.rerere.rikkahub.ui.context.LocalToaster.current
         // WebView Preview (only show if message has text content)
         val hasTextContent = message.parts.filterIsInstance<UIMessagePart.Text>()
             .any { it.text.isNotBlank() }
@@ -292,6 +297,34 @@ fun ChatMessageActionsSheet(
                             else R.string.chat_message_add_favorite
                         ),
                         onClick = onToggleFavorite,
+                    )
+                )
+            }
+            menuMounts.forEach { (rt, reg) ->
+                val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject ?: return@forEach
+                val title = (spec["title"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (spec["text"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: rt.manifest.name
+                add(
+                    MessageSheetAction(
+                        icon = HugeIcons.WebDesign01,
+                        label = title,
+                        onClick = {
+                            pluginScope.launch {
+                                runCatching {
+                                    val payload = kotlinx.serialization.json.buildJsonObject {
+                                        put("messageId", kotlinx.serialization.json.JsonPrimitive(message.id.toString()))
+                                        put("role", kotlinx.serialization.json.JsonPrimitive(message.role.name.lowercase()))
+                                        put("text", kotlinx.serialization.json.JsonPrimitive(message.toText()))
+                                        put("message", me.rerere.rikkahub.utils.JsonInstant.encodeToJsonElement(UIMessage.serializer(), message))
+                                    }
+                                    host.callUiHandler(rt.id, reg.handlerId, payload)
+                                }.onFailure { e ->
+                                    host.recordError(rt.id, e)
+                                    toaster.show(e.message ?: e.javaClass.name, type = me.rerere.ui.toast.ToastType.Error)
+                                }
+                            }
+                        },
                     )
                 )
             }

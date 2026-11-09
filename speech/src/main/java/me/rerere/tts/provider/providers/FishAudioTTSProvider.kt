@@ -19,8 +19,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "FishAudioTTSProvider"
 
-class FishAudioTTSProvider : TTSProvider<TTSProviderSetting.FishAudio> {
-    private val httpClient = OkHttpClient.Builder()
+class FishAudioTTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.FishAudio> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

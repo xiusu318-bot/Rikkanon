@@ -36,6 +36,7 @@ class ChatToolFactory(
     private val mcpManager: McpManager,
     private val skillManager: SkillManager,
     private val workspaceRepository: WorkspaceRepository,
+    private val pluginBridge: me.rerere.rikkahub.data.plugin.PluginBridge,
 ) {
     suspend fun createTools(
         settings: Settings,
@@ -45,6 +46,8 @@ class ChatToolFactory(
         conversationId: Uuid? = null,
         chatService: ChatService? = null,
         isSubConversation: Boolean = false,
+        parentConversationId: Uuid? = null,
+        subAgentCode: String? = null,
     ): List<Tool> {
         val rawTools = buildList {
             if (assistant.enableMemory) {
@@ -117,6 +120,20 @@ class ChatToolFactory(
                     )
                 )
             }
+        }.let { builtIn ->
+            // 插件通过 rikka.registerTool 注册的工具：名字原样，与内置 / MCP 重名直接报错
+            val pluginCtx = me.rerere.rikkahub.data.plugin.PluginCtx(
+                task = "chat",
+                assistantId = assistant.id,
+                conversationId = conversationId,
+                isSubAgent = isSubConversation,
+                parentConversationId = parentConversationId,
+                subAgentCode = subAgentCode,
+                model = model,
+                workspaceId = assistant.workspaceId,
+            )
+            val withPluginTools = builtIn + pluginBridge.createTools(pluginCtx, builtIn.map { it.name }.toSet())
+            pluginBridge.filterToolsList(withPluginTools, pluginCtx)
         }
 
         if (!isSubConversation) return rawTools

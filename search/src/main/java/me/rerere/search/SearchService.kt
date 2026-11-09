@@ -72,8 +72,12 @@ interface SearchService<T : SearchServiceOptions> {
                 is SearchServiceOptions.SerperOptions -> SerperSearchService
                 is SearchServiceOptions.DeepSeekOptions -> DeepSeekSearchService
                 is SearchServiceOptions.CustomJsOptions -> CustomJsSearchService
+                is SearchServiceOptions.PluginOptions -> PluginSearchService
             } as SearchService<T>
         }
+
+        @Volatile
+        var pluginExecutor: (suspend (pluginId: String, name: String, method: String, args: List<kotlinx.serialization.json.JsonElement>) -> kotlinx.serialization.json.JsonElement)? = null
 
         @Volatile
         internal var httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -397,6 +401,19 @@ function search(query, resultSize) {
   };
 }"""
         }
+    }
+
+    @Serializable
+    @SerialName("plugin")
+    data class PluginOptions(
+        override val id: Uuid = Uuid.random(),
+        val name: String = "",
+        val pluginId: String = "",
+        val serviceName: String = "",
+        val enableScrape: Boolean = false,
+    ) : SearchServiceOptions() {
+        override val displayName: String
+            get() = name.ifBlank { serviceName.ifBlank { "Plugin" } }
     }
 }
 

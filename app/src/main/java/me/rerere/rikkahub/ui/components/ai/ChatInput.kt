@@ -330,6 +330,11 @@ fun ChatInput(
                                 )
                             }
 
+                            me.rerere.rikkahub.ui.pages.extensions.plugin.PluginChatInputMounts(
+                                conversationId = null,
+                                assistantId = assistant.id.toString(),
+                            )
+
                         }
 
                         ActionIconButton(
@@ -584,6 +589,7 @@ private fun TextInputRow(
                 completionList = list,
                 onItemClick = { item ->
                     state.applyCompletion(list.replacementRange, item)
+                    item.onSelect?.invoke(state)
                     completionList = null
                 },
             )

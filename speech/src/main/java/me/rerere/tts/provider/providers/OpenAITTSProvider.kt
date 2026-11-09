@@ -20,8 +20,10 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "OpenAITTSProvider"
 
-class OpenAITTSProvider : TTSProvider<TTSProviderSetting.OpenAI> {
-    private val httpClient = OkHttpClient.Builder()
+class OpenAITTSProvider(
+    baseClient: OkHttpClient = OkHttpClient(),
+) : TTSProvider<TTSProviderSetting.OpenAI> {
+    private val httpClient = baseClient.newBuilder()
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 

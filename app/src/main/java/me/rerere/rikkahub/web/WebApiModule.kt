@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.web
 
 import android.content.Context
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -12,11 +13,25 @@ import io.ktor.server.auth.UserIdPrincipal
 import io.ktor.server.auth.authenticate
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveText
+import io.ktor.server.request.uri
+import io.ktor.server.response.header
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import me.rerere.plugin.host.PluginHost
+import me.rerere.plugin.manifest.PluginHookKind
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.repository.ConversationRepository
@@ -33,6 +48,7 @@ import me.rerere.rikkahub.web.routes.eventsRoutes
 import me.rerere.rikkahub.web.routes.filesRoutes
 import me.rerere.rikkahub.web.routes.folderRoutes
 import me.rerere.rikkahub.web.routes.settingsRoutes
+import org.koin.mp.KoinPlatformTools
 import java.security.MessageDigest
 
 private const val WEB_JWT_ISSUER = "rikkahub-web"
@@ -168,6 +184,69 @@ fun Application.configureWebApi(
                 settingsRoutes(settingsStore)
                 filesRoutes(filesManager, context)
                 assetsRoutes(context)
+            }
+        }
+
+        // 插件通过 rikka.web.route(path, fn) 注册的路由：/plugin/{id}/{path...}
+        route("/plugin/{id}/{path...}") {
+            handle {
+                val pluginId = call.parameters["id"].orEmpty()
+                val subPath = call.parameters.getAll("path")?.joinToString("/").orEmpty()
+                val host = KoinPlatformTools.defaultContext().getOrNull()?.getOrNull<PluginHost>()
+                val found = host?.findNamed(PluginHookKind.WEB, pluginId, subPath)
+                    ?: host?.findNamed(PluginHookKind.WEB, pluginId, "*")
+                if (found == null) {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Plugin route not found: /plugin/$pluginId/$subPath", 404))
+                    return@handle
+                }
+                val (rt, reg) = found
+                val reqJson = buildJsonObject {
+                    put("method", call.request.httpMethod.value)
+                    put("path", subPath)
+                    put("uri", call.request.uri)
+                    put("query", buildJsonObject {
+                        call.request.queryParameters.entries().forEach { (k, v) ->
+                            put(k, v.joinToString(","))
+                        }
+                    })
+                    put("headers", buildJsonObject {
+                        call.request.headers.entries().forEach { (k, v) ->
+                            put(k, v.joinToString(", "))
+                        }
+                    })
+                    val bodyText = runCatching { call.receiveText() }.getOrDefault("")
+                    put("body", bodyText)
+                }
+                val resEl = rt.invoke(PluginHookKind.WEB, reg.handlerId, listOf(reqJson))
+                when (resEl) {
+                    is JsonNull -> call.respondText("", status = HttpStatusCode.NoContent)
+                    is JsonPrimitive -> call.respondText(resEl.content, ContentType.Text.Plain)
+                    is JsonObject -> {
+                        val status = HttpStatusCode.fromValue(resEl["status"]?.jsonPrimitive?.intOrNull ?: 200)
+                        val headers = resEl["headers"] as? JsonObject
+                        var contentType = ContentType.Application.Json
+                        headers?.forEach { (k, v) ->
+                            val hv = (v as? JsonPrimitive)?.content ?: v.toString()
+                            if (k.equals("content-type", ignoreCase = true)) {
+                                contentType = runCatching { ContentType.parse(hv) }.getOrDefault(ContentType.Text.Plain)
+                            } else {
+                                call.response.header(k, hv)
+                            }
+                        }
+                        val body = when (val b = resEl["body"]) {
+                            null, is JsonNull -> ""
+                            is JsonPrimitive -> {
+                                if (headers?.keys?.none { it.equals("content-type", true) } != false) {
+                                    contentType = ContentType.Text.Plain
+                                }
+                                b.content
+                            }
+                            else -> b.toString()
+                        }
+                        call.respondText(body, contentType = contentType, status = status)
+                    }
+                    else -> call.respondText(resEl.toString(), ContentType.Application.Json)
+                }
             }
         }
     }

@@ -202,6 +202,15 @@ fun AssistantDetailPage(id: String) {
                     )
                 }
             }
+
+            item {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPageSlotMounts(
+                    slot = "assistant.detail",
+                    contextArgs = kotlinx.serialization.json.buildJsonObject {
+                        put("assistantId", kotlinx.serialization.json.JsonPrimitive(assistant.id.toString()))
+                    },
+                )
+            }
         }
     }
 }

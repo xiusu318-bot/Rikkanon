@@ -106,9 +106,19 @@ fun HighlightCodeBlock(
     val context = LocalContext.current
     val settings = LocalSettings.current
     val normalizedLanguage = remember(language) { language.lowercase() }
-    val canInlinePreview = completeCodeBlock && normalizedLanguage in PREVIEWABLE_LANGUAGES
-    var previewMode by remember(canInlinePreview, code, normalizedLanguage) {
-        mutableStateOf(false)
+    val codeblockMounts = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginUiMounts("markdown.codeblock")
+    val pluginRenderer = remember(codeblockMounts, normalizedLanguage) {
+        codeblockMounts.find { (_, reg) ->
+            val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
+            val langs = (spec?.get("languages") as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.lowercase() }
+                .orEmpty()
+            normalizedLanguage in langs || "*" in langs
+        }
+    }
+    val canInlinePreview = completeCodeBlock && (normalizedLanguage in PREVIEWABLE_LANGUAGES || pluginRenderer != null)
+    var previewMode by remember(canInlinePreview, code, normalizedLanguage, pluginRenderer) {
+        mutableStateOf(pluginRenderer != null)
     }
 
     var isExpanded by remember(settings.displaySetting.codeBlockAutoCollapse) {
@@ -164,6 +174,14 @@ fun HighlightCodeBlock(
             modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
         ) {
             when {
+                completeCodeBlock && pluginRenderer != null && previewMode -> {
+                    PluginCodeBlockPreview(
+                        runtime = pluginRenderer.first,
+                        reg = pluginRenderer.second,
+                        language = normalizedLanguage,
+                        code = code,
+                    )
+                }
                 canInlinePreview && previewMode -> {
                     CodeBlockPreview(
                         code = code,
@@ -503,6 +521,75 @@ private fun buildCodePreviewHtml(code: String, language: String): String {
         """<!DOCTYPE html><html><body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;">$code</body></html>"""
     } else {
         code
+    }
+}
+
+@Composable
+private fun PluginCodeBlockPreview(
+    runtime: me.rerere.plugin.runtime.PluginRuntime,
+    reg: me.rerere.plugin.registry.PluginRegistration,
+    language: String,
+    code: String,
+) {
+    val host = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
+    val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
+    val path = (spec?.get("path") as? kotlinx.serialization.json.JsonPrimitive)?.content
+    val heightDp = ((spec?.get("height") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 220).coerceIn(80, 800)
+    val argsJson = remember(language, code) {
+        kotlinx.serialization.json.buildJsonObject {
+            put("language", kotlinx.serialization.json.JsonPrimitive(language))
+            put("code", kotlinx.serialization.json.JsonPrimitive(code))
+        }.toString()
+    }
+    if (!path.isNullOrBlank()) {
+        me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
+            pluginId = runtime.id,
+            path = path,
+            argsJson = argsJson,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(heightDp.dp),
+        )
+    } else {
+        val rendered by androidx.compose.runtime.produceState<String?>(initialValue = null, runtime.id, reg.handlerId, language, code) {
+            value = runCatching {
+                val res = host.callUiHandler(
+                    runtime.id,
+                    reg.handlerId,
+                    kotlinx.serialization.json.buildJsonObject {
+                        put("language", kotlinx.serialization.json.JsonPrimitive(language))
+                        put("code", kotlinx.serialization.json.JsonPrimitive(code))
+                    },
+                )
+                when (res) {
+                    is kotlinx.serialization.json.JsonPrimitive -> res.content
+                    is kotlinx.serialization.json.JsonObject ->
+                        (res["html"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            ?: (res["text"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    else -> null
+                }
+            }.getOrNull()
+        }
+        val htmlOrText = rendered
+        if (htmlOrText != null) {
+            if (htmlOrText.trimStart().startsWith("<")) {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
+                    pluginId = runtime.id,
+                    path = "",
+                    argsJson = argsJson,
+                    inlineHtml = htmlOrText,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(heightDp.dp),
+                )
+            } else {
+                Text(
+                    text = htmlOrText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
     }
 }
 

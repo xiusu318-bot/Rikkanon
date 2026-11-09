@@ -185,6 +185,19 @@ internal fun MediaGenerationProviderSetting.presets(kind: MediaKind): MediaCreat
             durations = listOf(4, 5, 6, 8, 10),
         )
     }
+
+    is MediaGenerationProviderSetting.Plugin -> when (kind) {
+        MediaKind.IMAGE -> MediaCreationPresets(
+            resolutions = listOf("1024x1024", "1K", "2K"),
+            aspectRatios = listOf("1:1", "16:9", "9:16", "4:3", "3:4"),
+            counts = IMAGE_COUNTS,
+        )
+        MediaKind.VIDEO -> MediaCreationPresets(
+            resolutions = listOf("720p", "1080p"),
+            aspectRatios = VIDEO_ASPECT_RATIOS,
+            durations = VIDEO_DURATIONS,
+        )
+    }
 }
 
 private val IMAGE_COUNTS = listOf(1, 2, 3, 4)

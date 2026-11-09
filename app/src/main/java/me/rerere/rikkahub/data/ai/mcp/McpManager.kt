@@ -28,8 +28,13 @@ import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.files.saveUploadFromBytes
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.utils.JsonInstant
+import me.rerere.rikkahub.data.datastore.ProxyProfile
+import me.rerere.rikkahub.data.remote.OutboundTarget
+import me.rerere.rikkahub.data.remote.configureOutboundProxy
+import me.rerere.rikkahub.data.remote.resolveProxy
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.encoding.Base64
 import kotlin.uuid.Uuid
 
@@ -44,13 +49,30 @@ class McpManager(
     private val appScope: AppScope,
     private val filesManager: FilesManager,
 ) {
-    private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.MINUTES)
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .followSslRedirects(true)
-        .followRedirects(true)
-        .build()
+    private val appliedMcpProxy = AtomicReference<ProxyProfile?>(
+        settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.MCP)
+    )
+    private lateinit var okHttpClient: OkHttpClient
+
+    init {
+        okHttpClient = OkHttpClient.Builder()
+            .configureOutboundProxy {
+                settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.MCP)
+            }
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.MINUTES)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .followSslRedirects(true)
+            .followRedirects(true)
+            .addInterceptor { chain ->
+                val current = settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.MCP)
+                if (appliedMcpProxy.getAndSet(current) != current) {
+                    okHttpClient.connectionPool.evictAll()
+                }
+                chain.proceed(chain.request())
+            }
+            .build()
+    }
 
     private val httpClient = HttpClient(OkHttp) {
         engine {

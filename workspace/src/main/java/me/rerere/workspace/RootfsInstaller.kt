@@ -15,6 +15,7 @@ import org.tukaani.xz.XZInputStream
 class RootfsInstaller(
     private val manager: WorkspaceManager,
     private val patcher: RootfsPatcher = RootfsPatcher(),
+    private val openUrlStream: ((url: String, connectTimeoutMs: Int, readTimeoutMs: Int) -> Pair<Long?, InputStream>)? = null,
 ) {
     fun install(
         root: String,
@@ -51,6 +52,45 @@ class RootfsInstaller(
         target: File,
         onProgress: (RootfsInstallProgress) -> Unit,
     ) {
+        if (openUrlStream != null) {
+            val (totalBytes, stream) = openUrlStream.invoke(url, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
+            target.parentFile?.mkdirs()
+            stream.use { input ->
+                target.outputStream().use { output ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    var bytesRead = 0L
+                    var lastReportBytes = 0L
+                    while (true) {
+                        checkInterrupted()
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        bytesRead += read
+                        if (bytesRead - lastReportBytes >= PROGRESS_STEP_BYTES || bytesRead == totalBytes) {
+                            lastReportBytes = bytesRead
+                            onProgress(
+                                RootfsInstallProgress(
+                                    stage = RootfsInstallStage.DOWNLOADING,
+                                    bytesRead = bytesRead,
+                                    totalBytes = totalBytes,
+                                )
+                            )
+                        }
+                    }
+                    if (bytesRead == 0L) {
+                        onProgress(
+                            RootfsInstallProgress(
+                                stage = RootfsInstallStage.DOWNLOADING,
+                                bytesRead = 0,
+                                totalBytes = totalBytes,
+                            )
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = CONNECT_TIMEOUT_MS
         connection.readTimeout = READ_TIMEOUT_MS

@@ -391,6 +391,10 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                     )
                 }
             }
+
+            item("pluginSettings") {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPageSlotMounts(slot = "settings.group")
+            }
         }
     }
 }

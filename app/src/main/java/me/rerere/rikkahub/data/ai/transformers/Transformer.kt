@@ -6,6 +6,7 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.plugin.PluginCtx
 
 class TransformerContext(
     val context: Context,
@@ -17,6 +18,11 @@ class TransformerContext(
     val memoryPrompt: String = "",
     val toolSystemPrompt: String = "",
     var workspacePrompt: String = "",
+    val pluginCtx: PluginCtx = PluginCtx(
+        assistantId = assistant.id,
+        model = model,
+        workspaceId = assistant.workspaceId,
+    ),
 )
 
 interface MessageTransformer {
@@ -71,6 +77,11 @@ suspend fun List<UIMessage>.transforms(
     workspaceCwd: String? = null,
     memoryPrompt: String = "",
     toolSystemPrompt: String = "",
+    pluginCtx: PluginCtx = PluginCtx(
+        assistantId = assistant.id,
+        model = model,
+        workspaceId = assistant.workspaceId,
+    ),
 ): List<UIMessage> {
     val ctx = TransformerContext(
         context = context,
@@ -81,6 +92,7 @@ suspend fun List<UIMessage>.transforms(
         workspaceCwd = workspaceCwd,
         memoryPrompt = memoryPrompt,
         toolSystemPrompt = toolSystemPrompt,
+        pluginCtx = pluginCtx,
     )
     return transformers.fold(this) { acc, transformer ->
         transformer.transform(ctx, acc)
@@ -93,8 +105,13 @@ suspend fun List<UIMessage>.visualTransforms(
     model: Model,
     assistant: Assistant,
     settings: Settings,
+    pluginCtx: PluginCtx = PluginCtx(
+        assistantId = assistant.id,
+        model = model,
+        workspaceId = assistant.workspaceId,
+    ),
 ): List<UIMessage> {
-    val ctx = TransformerContext(context, model, assistant, settings)
+    val ctx = TransformerContext(context, model, assistant, settings, pluginCtx = pluginCtx)
     return transformers.fold(this) { acc, transformer ->
         if (transformer is OutputMessageTransformer) {
             transformer.visualTransform(ctx, acc)
@@ -110,8 +127,13 @@ suspend fun List<UIMessage>.onGenerationFinish(
     model: Model,
     assistant: Assistant,
     settings: Settings,
+    pluginCtx: PluginCtx = PluginCtx(
+        assistantId = assistant.id,
+        model = model,
+        workspaceId = assistant.workspaceId,
+    ),
 ): List<UIMessage> {
-    val ctx = TransformerContext(context, model, assistant, settings)
+    val ctx = TransformerContext(context, model, assistant, settings, pluginCtx = pluginCtx)
     return transformers.fold(this) { acc, transformer ->
         if (transformer is OutputMessageTransformer) {
             transformer.onGenerationFinish(ctx, acc)

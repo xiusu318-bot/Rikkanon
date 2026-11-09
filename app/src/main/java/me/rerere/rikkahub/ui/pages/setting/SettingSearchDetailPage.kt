@@ -229,6 +229,9 @@ private fun SearchServiceOptionsEditor(
         is SearchServiceOptions.CustomJsOptions -> {
             CustomJsOptions(options) { onUpdateOptions(it) }
         }
+        is SearchServiceOptions.PluginOptions -> {
+            PluginSearchOptionsEditor(options) { onUpdateOptions(it) }
+        }
     }
 }
 
@@ -1064,4 +1067,16 @@ internal fun CustomJsOptions(
             textStyle = MaterialTheme.typography.bodySmall.merge(fontFamily = JetbrainsMono),
         )
     }
+}
+
+@Composable
+private fun PluginSearchOptionsEditor(
+    options: SearchServiceOptions.PluginOptions,
+    onUpdateOptions: (SearchServiceOptions.PluginOptions) -> Unit
+) {
+    Text(
+        text = "由插件 ${options.pluginId} (${options.serviceName}) 自动提供",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }

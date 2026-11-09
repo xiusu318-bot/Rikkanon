@@ -80,14 +80,14 @@ fun AssistantExtensionsPage(id: String) {
                     .fillMaxWidth()
                     .weight(1f),
             ) { page ->
-                when (page) {
-                    0 -> {
+                when (val tab = ExtensionTab.entries[page]) {
+                    ExtensionTab.QUICK_MESSAGES -> {
                         if (settings.quickMessages.isEmpty()) {
                             ExtensionEmptyState(
                                 message = stringResource(R.string.assistant_extensions_page_empty_quick_messages),
                                 buttonText = stringResource(R.string.assistant_extensions_page_goto_extensions),
-                                onAction = { navController.navigate(Screen.QuickMessages) },
-                                icon = ExtensionTab.QUICK_MESSAGES.icon,
+                                onAction = { navController.navigate(Screen.QuickMessages()) },
+                                icon = tab.icon,
                             )
                         } else {
                             QuickMessagesContent(
@@ -100,18 +100,23 @@ fun AssistantExtensionsPage(id: String) {
                                     else assistant.quickMessageIds - quickMessageId
                                     vm.update(assistant.copy(quickMessageIds = newIds))
                                 },
-                                onManage = { navController.navigate(Screen.QuickMessages) },
+                                onItemClick = { quickMessage ->
+                                    navController.navigate(
+                                        Screen.QuickMessages(quickMessageId = quickMessage.id.toString())
+                                    )
+                                },
+                                onManage = { navController.navigate(Screen.QuickMessages()) },
                             )
                         }
                     }
 
-                    1 -> {
+                    ExtensionTab.MODE_INJECTIONS -> {
                         if (settings.promptPresets.isEmpty()) {
                             ExtensionEmptyState(
                                 message = "暂无提示词预设",
                                 buttonText = stringResource(R.string.assistant_extensions_page_goto_prompts),
-                                onAction = { navController.navigate(Screen.Prompts) },
-                                icon = ExtensionTab.MODE_INJECTIONS.icon,
+                                onAction = { navController.navigate(Screen.Prompts(initialTab = 0)) },
+                                icon = tab.icon,
                             )
                         } else {
                             PromptPresetsContent(
@@ -127,18 +132,26 @@ fun AssistantExtensionsPage(id: String) {
                                     }
                                     vm.update(assistant.copy(modeInjectionIds = newIds))
                                 },
-                                onManage = { navController.navigate(Screen.Prompts) },
+                                onItemClick = { preset ->
+                                    navController.navigate(
+                                        Screen.Prompts(
+                                            initialTab = 0,
+                                            presetId = preset.id.toString(),
+                                        )
+                                    )
+                                },
+                                onManage = { navController.navigate(Screen.Prompts(initialTab = 0)) },
                             )
                         }
                     }
 
-                    2 -> {
+                    ExtensionTab.LOREBOOKS -> {
                         if (settings.lorebooks.isEmpty()) {
                             ExtensionEmptyState(
                                 message = stringResource(R.string.assistant_extensions_page_empty_lorebooks),
                                 buttonText = stringResource(R.string.assistant_extensions_page_goto_prompts),
-                                onAction = { navController.navigate(Screen.Prompts) },
-                                icon = ExtensionTab.LOREBOOKS.icon,
+                                onAction = { navController.navigate(Screen.Prompts(initialTab = 1)) },
+                                icon = tab.icon,
                             )
                         } else {
                             LorebooksContent(
@@ -151,18 +164,26 @@ fun AssistantExtensionsPage(id: String) {
                                     else assistant.lorebookIds - injId
                                     vm.update(assistant.copy(lorebookIds = newIds))
                                 },
-                                onManage = { navController.navigate(Screen.Prompts) },
+                                onItemClick = { lorebook ->
+                                    navController.navigate(
+                                        Screen.Prompts(
+                                            initialTab = 1,
+                                            lorebookId = lorebook.id.toString(),
+                                        )
+                                    )
+                                },
+                                onManage = { navController.navigate(Screen.Prompts(initialTab = 1)) },
                             )
                         }
                     }
 
-                    3 -> {
+                    ExtensionTab.SKILLS -> {
                         if (skills.isEmpty()) {
                             ExtensionEmptyState(
                                 message = stringResource(R.string.assistant_extensions_page_empty_skills),
                                 buttonText = stringResource(R.string.assistant_extensions_page_goto_extensions),
                                 onAction = { navController.navigate(Screen.Skills) },
-                                icon = ExtensionTab.SKILLS.icon,
+                                icon = tab.icon,
                             )
                         } else {
                             SkillsContent(
@@ -174,6 +195,9 @@ fun AssistantExtensionsPage(id: String) {
                                     val newSkills = if (checked) assistant.enabledSkills + name
                                     else assistant.enabledSkills - name
                                     vm.update(assistant.copy(enabledSkills = newSkills))
+                                },
+                                onItemClick = { skill ->
+                                    navController.navigate(Screen.SkillDetail(skill.name))
                                 },
                                 onManage = { navController.navigate(Screen.Skills) },
                             )

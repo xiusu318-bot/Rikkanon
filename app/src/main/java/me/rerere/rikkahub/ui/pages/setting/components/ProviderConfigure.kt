@@ -55,17 +55,19 @@ fun ProviderConfigure(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = modifier
     ) {
-        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-            ProviderSetting.Types.forEachIndexed { index, type ->
-                SegmentedButton(
-                    shape = SegmentedButtonDefaults.itemShape(
-                        index = index,
-                        count = ProviderSetting.Types.size
-                    ),
-                    label = { Text(type.simpleName ?: "") },
-                    selected = provider::class == type,
-                    onClick = { onEdit(provider.convertTo(type)) }
-                )
+        if (provider !is ProviderSetting.Plugin) {
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                ProviderSetting.Types.forEachIndexed { index, type ->
+                    SegmentedButton(
+                        shape = SegmentedButtonDefaults.itemShape(
+                            index = index,
+                            count = ProviderSetting.Types.size
+                        ),
+                        label = { Text(type.simpleName ?: "") },
+                        selected = provider::class == type,
+                        onClick = { onEdit(provider.convertTo(type)) }
+                    )
+                }
             }
         }
 
@@ -73,6 +75,7 @@ fun ProviderConfigure(
             is ProviderSetting.OpenAI -> ProviderConfigureOpenAI(provider, onEdit)
             is ProviderSetting.Google -> ProviderConfigureGoogle(provider, onEdit)
             is ProviderSetting.Claude -> ProviderConfigureClaude(provider, onEdit)
+            is ProviderSetting.Plugin -> ProviderConfigurePlugin(provider, onEdit)
         }
     }
 }
@@ -84,11 +87,13 @@ fun ProviderSetting.convertTo(type: KClass<out ProviderSetting>): ProviderSettin
         is ProviderSetting.OpenAI -> this.apiKey
         is ProviderSetting.Google -> this.apiKey
         is ProviderSetting.Claude -> this.apiKey
+        is ProviderSetting.Plugin -> this.apiKey
     }
     val sourceBaseUrl = when (this) {
         is ProviderSetting.OpenAI -> this.baseUrl
         is ProviderSetting.Google -> this.baseUrl
         is ProviderSetting.Claude -> this.baseUrl
+        is ProviderSetting.Plugin -> this.baseUrl
     }
     val targetDefaultBaseUrl = when (type) {
         ProviderSetting.OpenAI::class -> ProviderSetting.OpenAI().baseUrl
@@ -96,7 +101,7 @@ fun ProviderSetting.convertTo(type: KClass<out ProviderSetting>): ProviderSettin
         ProviderSetting.Claude::class -> ProviderSetting.Claude().baseUrl
         else -> error("Unsupported provider type: $type")
     }
-    val convertedBaseUrl = sourceBaseUrl.convertToTargetBaseUrl(targetDefaultBaseUrl)
+    val convertedBaseUrl = if (sourceBaseUrl.isBlank()) targetDefaultBaseUrl else sourceBaseUrl.convertToTargetBaseUrl(targetDefaultBaseUrl)
 
     return when (type) {
         ProviderSetting.OpenAI::class -> ProviderSetting.OpenAI(
@@ -128,12 +133,14 @@ internal fun ProviderSetting.defaultBaseUrlForReset(): String {
             is ProviderSetting.OpenAI -> if (defaultProvider is ProviderSetting.OpenAI) return defaultProvider.baseUrl
             is ProviderSetting.Google -> if (defaultProvider is ProviderSetting.Google) return defaultProvider.baseUrl
             is ProviderSetting.Claude -> if (defaultProvider is ProviderSetting.Claude) return defaultProvider.baseUrl
+            is ProviderSetting.Plugin -> if (defaultProvider is ProviderSetting.Plugin) return defaultProvider.baseUrl
         }
     }
     return when (this) {
         is ProviderSetting.OpenAI -> ProviderSetting.OpenAI().baseUrl
         is ProviderSetting.Google -> ProviderSetting.Google().baseUrl
         is ProviderSetting.Claude -> ProviderSetting.Claude().baseUrl
+        is ProviderSetting.Plugin -> ""
     }
 }
 
@@ -143,6 +150,7 @@ internal fun ProviderSetting.resetBaseUrlToDefault(): ProviderSetting {
         is ProviderSetting.OpenAI -> this.copy(baseUrl = defaultBaseUrl)
         is ProviderSetting.Google -> this.copy(baseUrl = defaultBaseUrl)
         is ProviderSetting.Claude -> this.copy(baseUrl = defaultBaseUrl)
+        is ProviderSetting.Plugin -> this.copy(baseUrl = defaultBaseUrl)
     }
 }
 
@@ -151,6 +159,7 @@ internal fun ProviderSetting.isUsingDefaultBaseUrl(): Boolean {
         is ProviderSetting.OpenAI -> this.baseUrl
         is ProviderSetting.Google -> this.baseUrl
         is ProviderSetting.Claude -> this.baseUrl
+        is ProviderSetting.Plugin -> this.baseUrl
     }
     return baseUrl == defaultBaseUrlForReset()
 }
@@ -547,6 +556,44 @@ private fun ProviderConfigureGoogle(
             onValueChange = { onEdit(provider.copy(projectId = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_project_id)) },
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * 由插件通过 `rikka.registerProvider` 自动注册生成的提供商：只展示插件来源信息与启用开关，
+ * 不允许手动编辑 pluginId / providerName，插件自身需要的配置由插件详情页的表单或自有面板管理。
+ */
+@Composable
+private fun ProviderConfigurePlugin(
+    provider: ProviderSetting.Plugin,
+    onEdit: (ProviderSetting.Plugin) -> Unit
+) {
+    provider.description()
+
+    OutlinedTextField(
+        value = provider.name,
+        onValueChange = { onEdit(provider.copy(name = it)) },
+        label = { Text(stringResource(R.string.setting_provider_page_name)) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+    )
+
+    Text(
+        text = "由插件 ${provider.pluginId} (${provider.providerName}) 提供",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(stringResource(R.string.setting_provider_page_enable))
+        Switch(
+            checked = provider.enabled,
+            onCheckedChange = { onEdit(provider.copy(enabled = it)) }
         )
     }
 }

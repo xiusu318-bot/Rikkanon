@@ -15,7 +15,11 @@ data class Tool(
     val parameters: () -> InputSchema? = { null },
     val systemPrompt: (model: Model, messages: List<UIMessage>) -> String = { _, _ -> "" },
     val needsApproval: (JsonElement) -> Boolean = { false },
-    val execute: suspend (JsonElement) -> List<UIMessagePart>
+    val execute: suspend (JsonElement) -> List<UIMessagePart>,
+    /** 显示声明（见 me.rerere.ai.ui.ToolDisplay），调用出现时写入工具调用部件 metadata。 */
+    val display: JsonObject? = null,
+    /** 本步已执行工具全部声明 endTurn 且无插话时结束本轮。 */
+    val endTurn: Boolean = false,
 )
 
 @Serializable
