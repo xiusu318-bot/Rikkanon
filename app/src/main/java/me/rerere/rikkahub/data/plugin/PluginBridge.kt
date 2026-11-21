@@ -11,6 +11,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
@@ -47,6 +48,31 @@ import kotlin.uuid.Uuid
 
 /** 工具部件 metadata：插件 approval.decide 决定该工具由主代理审批时写入。 */
 const val PLUGIN_MAIN_AGENT_APPROVAL_KEY = "rikka.mainAgentApproval"
+
+/** 工具部件 metadata：插件工具在 execute 期间调用 ctx.askUser(spec) 时写入的待回答问题描述。 */
+const val PLUGIN_ASK_USER_SPEC_KEY = "rikka.askUser"
+
+/** 运行中插件工具通过 ctx.askUser(spec) 发起的实时交互等待表（按 toolCallId）。 */
+object PluginToolLiveAskRegistry {
+    private val map = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<String>>()
+
+    /** 登记一次提问。同一工具调用同时只能有一个未回答的提问（工具卡片只显示一个），重复提问直接报错。 */
+    fun register(toolCallId: String): kotlinx.coroutines.CompletableDeferred<String> {
+        val deferred = kotlinx.coroutines.CompletableDeferred<String>()
+        check(map.putIfAbsent(toolCallId, deferred) == null) { "该工具已有未回答的提问，请等上一个回答后再提问" }
+        return deferred
+    }
+
+    fun complete(toolCallId: String, answer: String): Boolean {
+        val deferred = map.remove(toolCallId) ?: return false
+        return deferred.complete(answer)
+    }
+
+    /** 移除提问；仍在等待的一方收到异常（插件 JS 中 `ctx.askUser` 抛错）。 */
+    fun remove(toolCallId: String) {
+        map.remove(toolCallId)?.completeExceptionally(IllegalStateException("工具调用已结束，提问已失效"))
+    }
+}
 
 /** 传给插件的统一上下文。 */
 data class PluginCtx(
@@ -96,9 +122,11 @@ sealed interface TaskBeforeResult<T> {
  * 插件只有全局开关；没有可用 hook 时所有方法都是零开销直通。
  */
 class PluginBridge(val host: PluginHost) {
-    /** 当前运行中的进度汇报协程上下文元素。 */
-    class ToolProgressElement(val onProgress: (List<UIMessagePart>) -> Unit) :
-        kotlin.coroutines.AbstractCoroutineContextElement(ToolProgressElement) {
+    /** 当前运行中的进度汇报与交互式提问协程上下文元素。 */
+    class ToolProgressElement(
+        val onProgress: (List<UIMessagePart>) -> Unit,
+        val onAskUser: suspend (JsonObject) -> String,
+    ) : kotlin.coroutines.AbstractCoroutineContextElement(ToolProgressElement) {
         companion object Key : kotlin.coroutines.CoroutineContext.Key<ToolProgressElement>
     }
 
@@ -107,11 +135,14 @@ class PluginBridge(val host: PluginHost) {
 
     fun hasHook(kind: String, assistant: Assistant? = null): Boolean = chain(kind).isNotEmpty()
 
+    fun hasMacros(): Boolean =
+        host.chain(PluginHookKind.MACRO).isNotEmpty() || host.chain(PluginHookKind.PROMPT_BLOCK).isNotEmpty()
+
     // ---------- 工具 ----------
 
     /**
      * 插件注册的工具。[existingNames] 为内置 / MCP 工具名，重名直接报错。
-     * 声明了 `when(ctx)` 的工具按当前上下文筛选。
+     * 声明了 `when(ctx)` 的工具按当前上下文筛选；支持动态 `parameters(ctx)` 与 `systemPrompt(ctx)`。
      */
     suspend fun createTools(ctx: PluginCtx, existingNames: Set<String>): List<Tool> {
         val registered = host.tools()
@@ -132,20 +163,55 @@ class PluginBridge(val host: PluginHost) {
             if (name in existingNames) {
                 throw PluginException(runtime.id, "tool", "工具名 \"$name\" 与内置或 MCP 工具冲突")
             }
-            val schema = meta["parameters"] as? JsonObject
+            val schemaObj = if (meta.getValue("hasDynamicParameters").jsonPrimitive.boolean) {
+                val dyn = runtime.invokeInternal(
+                    "tool.parameters", "__tool_params",
+                    buildJsonObject {
+                        put("handler", reg.handlerId)
+                        put("ctx", ctx.toJson())
+                    },
+                )
+                dyn as? JsonObject
+                    ?: throw PluginException(runtime.id, "tool.parameters", "工具 $name 的 parameters(ctx) 必须返回 JSON Schema 对象")
+            } else {
+                meta["parameters"] as? JsonObject
+            }
+            val resolvedSysPrompt = if (meta.getValue("hasDynamicSystemPrompt").jsonPrimitive.boolean) {
+                val dyn = runtime.invokeInternal(
+                    "tool.systemPrompt", "__tool_sysprompt",
+                    buildJsonObject {
+                        put("handler", reg.handlerId)
+                        put("ctx", ctx.toJson())
+                    },
+                )
+                dyn.jsonPrimitive.content
+            } else {
+                meta["systemPrompt"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            }
             val approval = meta["approval"]?.jsonPrimitive?.contentOrNull ?: "auto"
             Tool(
                 name = name,
                 description = meta["description"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-                parameters = { schema?.let(::toInputSchema) },
-                systemPrompt = { _, _ -> meta["systemPrompt"]?.jsonPrimitive?.contentOrNull.orEmpty() },
+                parameters = { schemaObj?.let(::toInputSchema) },
+                systemPrompt = { _, _ -> resolvedSysPrompt },
                 needsApproval = { approval == "user" },
                 display = meta["display"] as? JsonObject,
                 endTurn = meta["endTurn"]?.jsonPrimitive?.contentOrNull == "true",
                 execute = { args ->
-                    val progressElement = kotlinx.coroutines.currentCoroutineContext()[ToolProgressElement]
+                    // 插件工具只由 GenerationLoop 执行，执行时一定带有 ToolProgressElement
+                    val progressElement = kotlinx.coroutines.currentCoroutineContext()[ToolProgressElement]!!
                     val token = PluginToolProgress.register { rawParts ->
-                        progressElement?.onProgress?.invoke(partsOf(runtime, "tool.progress", rawParts))
+                        progressElement.onProgress(partsOf(runtime, "tool.progress", rawParts))
+                    }
+                    // 等待用户回答 ctx.askUser 的时间不计入插件调用超时
+                    val callPause = me.rerere.plugin.runtime.PluginCallPause()
+                    val askToken = me.rerere.plugin.host.PluginToolAskUser.register { spec ->
+                        callPause.pause()
+                        try {
+                            progressElement.onAskUser(spec)
+                        } finally {
+                            callPause.resume()
+                        }
                     }
                     try {
                         val result = runtime.invokeInternal(
@@ -153,13 +219,16 @@ class PluginBridge(val host: PluginHost) {
                             buildJsonObject {
                                 put("handler", reg.handlerId)
                                 put("token", token)
+                                put("askToken", askToken)
                                 put("args", args)
                                 put("ctx", ctx.toJson())
                             },
+                            pause = callPause,
                         )
                         toolResultToParts(runtime, result)
                     } finally {
                         PluginToolProgress.remove(token)
+                        me.rerere.plugin.host.PluginToolAskUser.remove(askToken)
                     }
                 },
             )
@@ -223,7 +292,7 @@ class PluginBridge(val host: PluginHost) {
         required = (schema["required"] as? JsonArray)?.map { it.jsonPrimitive.content },
     )
 
-    /** 工具返回：字符串、Part 数组，或 `{ model, display }`；display 部件标记为仅展示。 */
+    /** 工具返回：字符串、Part 数组，或 `{ model, display }`；display 部件标记为仅展示（支持 Text / Image / Audio / Video / Document 等任意部件）。 */
     private fun toolResultToParts(runtime: PluginRuntime, result: JsonElement): List<UIMessagePart> {
         val (model, display) = when {
             result is JsonObject && ("model" in result || "display" in result) -> result["model"] to result["display"]
@@ -234,7 +303,12 @@ class PluginBridge(val host: PluginHost) {
             val metadata = JsonObject((part.metadata ?: JsonObject(emptyMap())) + (DISPLAY_ONLY_PART_KEY to JsonPrimitive(true)))
             when (part) {
                 is UIMessagePart.Text -> part.copy(metadata = metadata)
-                else -> throw PluginException(runtime.id, "tool", "display 目前只支持 text 部件")
+                is UIMessagePart.Image -> part.copy(metadata = metadata)
+                is UIMessagePart.Video -> part.copy(metadata = metadata)
+                is UIMessagePart.Audio -> part.copy(metadata = metadata)
+                is UIMessagePart.Document -> part.copy(metadata = metadata)
+                is UIMessagePart.Reasoning -> part.copy(metadata = metadata)
+                else -> throw PluginException(runtime.id, "tool", "display 不支持 ${part::class.simpleName} 部件")
             }
         }
         return modelParts + displayParts

@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -94,7 +96,8 @@ private class StreamChunkHandlingException(cause: Throwable) : RuntimeException(
 @Serializable
 sealed interface GenerationChunk {
     data class Messages(
-        val messages: List<UIMessage>
+        val messages: List<UIMessage>,
+        val checkpoint: Boolean = false,
     ) : GenerationChunk
 }
 
@@ -257,7 +260,7 @@ class GenerationLoop(
                     val steered = pollQueuedUserMessages?.invoke().orEmpty()
                     if (steered.isNotEmpty()) {
                         messages = messages + steered
-                        emit(GenerationChunk.Messages(messages))
+                        emit(GenerationChunk.Messages(messages, checkpoint = true))
                         continue
                     }
                     // no tool calls, break
@@ -364,15 +367,18 @@ class GenerationLoop(
                     }
                 }
                 messages = messages.dropLast(1) + lastMessage.copy(parts = startedParts)
-                emit(GenerationChunk.Messages(messages))
+                emit(GenerationChunk.Messages(messages, checkpoint = true))
             }
 
             // Handle tools concurrently (supports parallel sub-agents & parallel workspace tools)
             // Use CoroutineStart.UNDISPATCHED so concurrent tool calls (e.g. multiple conversation_send)
             // enter their initial synchronous registration/reservation block strictly in list order.
             val progressMutex = Mutex()
+            // 工具执行期间的中间状态（插件 ctx.progress / ctx.askUser）只写入这里，由下方循环在
+            // 生成流程自身的协程里 emit：flow {} 不允许从其他协程（工具的 async / launch、插件运行时）发射
+            val liveUpdates = Channel<List<UIMessage>>(Channel.CONFLATED)
             val executedTools = coroutineScope {
-                toolsToProcess.map { tool ->
+                val toolJobs = toolsToProcess.map { tool ->
                     async(start = CoroutineStart.UNDISPATCHED) {
                         when (tool.approvalState) {
                             is ToolApprovalState.Denied -> {
@@ -405,7 +411,7 @@ class GenerationLoop(
                             is ToolApprovalState.Pending -> null
 
                             else -> {
-                                val useSecretAlias = settings.enableSecretKeyAlias
+                                val useSecretAlias = settings.enableSecretKeyAlias || assistant.enableSecretKeyAlias
                                 val toolScope = this
                                 runCatching {
                                     val toolDef = tools.find { toolDef -> toolDef.name == tool.toolName }
@@ -419,23 +425,76 @@ class GenerationLoop(
                                     // tool.before 看到的是代名词形式的参数，替换真实密钥在插件之后进行
                                     val before = pluginBridge.toolBefore(tool, rawArgs, assistant, toolCtx)
                                     Log.i(TAG, "generateText: executing tool ${toolDef.name}")
-                                    val progressElement = PluginBridge.ToolProgressElement { progressParts ->
-                                        toolScope.launch {
-                                            progressMutex.withLock {
-                                                val lastMsg = messages.lastOrNull() ?: return@withLock
-                                                val newParts = lastMsg.parts.map { p ->
-                                                    if (p is UIMessagePart.Tool && p.toolCallId == tool.toolCallId && p.finishedAt == null) {
-                                                        p.copy(output = progressParts)
-                                                    } else p
+                                    val progressElement = PluginBridge.ToolProgressElement(
+                                        onProgress = { progressParts ->
+                                            val safeProgress = if (useSecretAlias) {
+                                                progressParts.map {
+                                                    me.rerere.rikkahub.data.secret.SecretKeySanitizer.redactMessagePart(it, settings.secretKeys)
                                                 }
-                                                messages = messages.dropLast(1) + lastMsg.copy(parts = newParts)
-                                                emit(GenerationChunk.Messages(messages))
+                                            } else {
+                                                progressParts
                                             }
-                                        }
-                                    }
+                                            toolScope.launch {
+                                                progressMutex.withLock {
+                                                    // 执行工具时 messages 最后一条一定是带工具调用的助手消息
+                                                    val lastMsg = messages.last()
+                                                    val newParts = lastMsg.parts.map { p ->
+                                                        if (p is UIMessagePart.Tool && p.toolCallId == tool.toolCallId && p.finishedAt == null) {
+                                                            p.copy(output = safeProgress)
+                                                        } else p
+                                                    }
+                                                    messages = messages.dropLast(1) + lastMsg.copy(parts = newParts)
+                                                    liveUpdates.trySend(messages)
+                                                }
+                                            }
+                                        },
+                                        // 由插件运行时的协程调用（不在生成流程内），只改 messages 并交给 liveUpdates
+                                        onAskUser = { askSpec ->
+                                            val askRegistry = me.rerere.rikkahub.data.plugin.PluginToolLiveAskRegistry
+                                            val deferred = askRegistry.register(tool.toolCallId)
+                                            try {
+                                                progressMutex.withLock {
+                                                    val lastMsg = messages.last()
+                                                    val newParts = lastMsg.parts.map { p ->
+                                                        if (p is UIMessagePart.Tool && p.toolCallId == tool.toolCallId && p.finishedAt == null) {
+                                                            val meta = JsonObject(
+                                                                (p.metadata ?: JsonObject(emptyMap())) +
+                                                                    (me.rerere.rikkahub.data.plugin.PLUGIN_ASK_USER_SPEC_KEY to askSpec)
+                                                            )
+                                                            p.copy(metadata = meta)
+                                                        } else p
+                                                    }
+                                                    messages = messages.dropLast(1) + lastMsg.copy(parts = newParts)
+                                                    liveUpdates.trySend(messages)
+                                                }
+                                                deferred.await()
+                                            } finally {
+                                                askRegistry.remove(tool.toolCallId)
+                                                progressMutex.withLock {
+                                                    val lastMsg = messages.last()
+                                                    val newParts = lastMsg.parts.map { p ->
+                                                        if (p is UIMessagePart.Tool && p.toolCallId == tool.toolCallId) {
+                                                            val cleaned = (p.metadata ?: JsonObject(emptyMap())) -
+                                                                me.rerere.rikkahub.data.plugin.PLUGIN_ASK_USER_SPEC_KEY
+                                                            p.copy(metadata = if (cleaned.isEmpty()) null else JsonObject(cleaned))
+                                                        } else p
+                                                    }
+                                                    messages = messages.dropLast(1) + lastMsg.copy(parts = newParts)
+                                                    liveUpdates.trySend(messages)
+                                                }
+                                            }
+                                        },
+                                    )
                                     val rawResult = when (before) {
-                                        is ToolBeforeResult.Proceed -> withContext(progressElement) {
-                                            toolDef.execute(before.args.replaceSecretKeyAliases(settings, useSecretAlias))
+                                        is ToolBeforeResult.Proceed -> try {
+                                            val expandInput = useSecretAlias &&
+                                                me.rerere.rikkahub.data.secret.SecretKeySanitizer.shouldExpandToolInput(toolDef.name)
+                                            withContext(progressElement) {
+                                                toolDef.execute(before.args.replaceSecretKeyAliases(settings, expandInput))
+                                            }
+                                        } finally {
+                                            // 工具已结束（完成 / 出错 / 生成被停止）：仍在等待回答的提问以错误结束，插件不会一直挂着
+                                            me.rerere.rikkahub.data.plugin.PluginToolLiveAskRegistry.remove(tool.toolCallId)
                                         }
                                         is ToolBeforeResult.Result -> before.parts
                                         is ToolBeforeResult.Deny -> listOf(
@@ -448,14 +507,19 @@ class GenerationLoop(
                                     }
                                     val redacted = if (useSecretAlias) {
                                         rawResult.map { part ->
-                                            if (part is UIMessagePart.Text) {
-                                                part.copy(text = settings.redactSecretKeyValues(part.text, true))
-                                            } else part
+                                            me.rerere.rikkahub.data.secret.SecretKeySanitizer.redactMessagePart(part, settings.secretKeys)
                                         }
                                     } else {
                                         rawResult
                                     }
-                                    val afterHook = pluginBridge.toolAfter(tool, rawArgs, redacted, assistant, toolCtx)
+                                    val afterHookRaw = pluginBridge.toolAfter(tool, rawArgs, redacted, assistant, toolCtx)
+                                    val afterHook = if (useSecretAlias) {
+                                        afterHookRaw.map { part ->
+                                            me.rerere.rikkahub.data.secret.SecretKeySanitizer.redactMessagePart(part, settings.secretKeys)
+                                        }
+                                    } else {
+                                        afterHookRaw
+                                    }
                                     // 仅展示部件（插件 display / MCP _meta.rikka/display）移入 metadata，不发给模型
                                     val (displayOnly, result) = afterHook.partition {
                                         (it.metadata?.get(DISPLAY_ONLY_PART_KEY) as? JsonPrimitive)?.content == "true"
@@ -495,7 +559,16 @@ class GenerationLoop(
                             }
                         }
                     }
-                }.awaitAll().filterNotNull()
+                }
+                val allToolsDone = async { toolJobs.awaitAll() }
+                // 在生成流程自身协程里转发工具执行期间的中间状态，直到全部工具结束
+                while (!allToolsDone.isCompleted) {
+                    select<Unit> {
+                        allToolsDone.onAwait { }
+                        liveUpdates.onReceive { snapshot -> emit(GenerationChunk.Messages(snapshot)) }
+                    }
+                }
+                allToolsDone.await().filterNotNull()
             }
 
             if (executedTools.isEmpty()) {
@@ -539,7 +612,7 @@ class GenerationLoop(
                 messages = messages + steeredMessages
             }
 
-            emit(GenerationChunk.Messages(messages))
+            emit(GenerationChunk.Messages(messages, checkpoint = true))
 
             // 本步执行的工具全部声明 endTurn（插件 / MCP）且没有插话：结束本轮，不再请求模型
             val endTurn = steeredMessages.isEmpty() && executedTools.all { executed ->

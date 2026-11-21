@@ -54,6 +54,16 @@ data class MarkdownTheme(
     val dividerColor: Color,
     /** 正文里引号（"…"、“…”、「…」、『…』）括起来的文字的样式，为 null 时不高亮 */
     val quotedText: SpanStyle? = null,
+    /** 正文里粗体文字的额外叠加样式，为 null 时仅加粗 */
+    val boldText: SpanStyle? = null,
+    /** 正文里斜体文字的额外叠加样式，为 null 时仅斜体 */
+    val italicText: SpanStyle? = null,
+    /** 段落首行缩进（单位 sp，0f 表示不缩进） */
+    val firstLineIndentSp: Float = 0f,
+    /** 引用块容器背景色 */
+    val quoteBackgroundColor: Color = Color.Unspecified,
+    /** 带 padding / border / border-radius 的 HTML 块画成整块盒子（界面自定义开启正文定制时为 true；默认与原版一致） */
+    val htmlBoxStyle: Boolean = false,
 )
 
 /** 嵌在文本流里的自定义内容，按 [placeholder] 的尺寸占位 */

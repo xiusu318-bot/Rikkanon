@@ -1035,9 +1035,8 @@ private fun PresetButton(
         modifier = Modifier.semantics { role = Role.RadioButton },
         buttonSize = ToggleButtonSize.ExtraSmall,
         icon = icon,
-        colors = ToggleButtonDefaults.colors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-        ),
+        shapes = me.rerere.rikkahub.ui.custom.uiToggleButtonShapes("pager_tab", ToggleButtonSize.ExtraSmall),
+        colors = me.rerere.rikkahub.ui.custom.uiToggleButtonColors("pager_tab", MaterialTheme.colorScheme.surfaceContainerHighest),
     ) {
         Text(text)
     }
@@ -1170,11 +1169,15 @@ private fun ToggleParam(
     )
     FormItem(label = { Text(label) }) {
         // 连接式按钮组
+        val btnColors = me.rerere.rikkahub.ui.custom.uiToggleButtonColors("connected_button", MaterialTheme.colorScheme.surfaceContainerHighest)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .selectableGroup(),
-            horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
+            horizontalArrangement = Arrangement.spacedBy(
+                me.rerere.rikkahub.ui.custom.uiComponentStyle("connected_button")?.spacingDp?.coerceAtLeast(0f)?.dp
+                    ?: ButtonGroupDefaults.ConnectedSpaceBetween
+            ),
         ) {
             options.forEachIndexed { index, (option, text) ->
                 ToggleButton(
@@ -1183,14 +1186,8 @@ private fun ToggleParam(
                     modifier = Modifier
                         .weight(1f)
                         .semantics { role = Role.RadioButton },
-                    shapes = when (index) {
-                        0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                        options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                        else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                    },
-                    colors = ToggleButtonDefaults.colors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    ),
+                    shapes = me.rerere.rikkahub.ui.custom.uiConnectedButtonShapes(index = index, count = options.size),
+                    colors = btnColors,
                 ) {
                     Text(text = text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -1208,10 +1205,9 @@ private fun ComposerSheet(
         initialValue = SheetValue.Hidden,
         enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)
     )
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        dragHandle = { BottomSheetDefaults.DragHandle() },
     ) {
         Column(
             modifier = Modifier

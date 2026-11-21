@@ -79,6 +79,7 @@ import me.rerere.ui.toast.ToastType
 import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collectLatest
+import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ModelType
@@ -92,6 +93,7 @@ import me.rerere.hugeicons.stroke.Fullscreen
 import me.rerere.hugeicons.stroke.Zap
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getQuickMessagesOfAssistant
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
@@ -125,6 +127,7 @@ fun ChatInput(
     // 会话视角下的助手和模型：会话开始后以会话上固定的配置为准
     assistant: Assistant,
     chatModel: Model?,
+    conversationId: String? = null,
     hazeState: HazeState,
     onUpdateSearchMode: (SearchMode) -> Unit,
     modifier: Modifier = Modifier,
@@ -144,6 +147,7 @@ fun ChatInput(
     onStartVoiceMode: (() -> Unit)? = null,
     voiceState: VoiceSessionState = VoiceSessionState(),
     onStopVoiceMode: () -> Unit = {},
+    inCustomLayout: Boolean = false,
 ) {
     val toaster = LocalToaster.current
     val containerColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -207,190 +211,386 @@ fun ChatInput(
         }
     }
 
-    // 底部渐变遮罩：从输入区顶部一直过渡到屏幕底部（键盘弹出时到键盘上沿），避免消息透到系统导航栏
-    val scrimColor = MaterialTheme.colorScheme.background
-    val imeInsets = WindowInsets.ime
-    Surface(
-        color = Color.Transparent,
-        modifier = Modifier.drawWithCache {
-            val brush = Brush.verticalGradient(
-                colors = listOf(scrimColor.copy(alpha = 0f), scrimColor),
-                startY = 0f,
-                endY = (size.height - imeInsets.getBottom(this)).coerceAtLeast(1f),
-            )
-            onDrawBehind { drawRect(brush) }
-        },
-    ) {
-        Column(
-            modifier = modifier
-                .imePadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 8.dp)
-                .padding(bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            MessageQueuePanel(
-                state = messageQueue,
-                onRemove = onRemoveQueuedMessage,
-                onBeginEdit = onBeginEditQueuedMessage,
-                onFinishEdit = onFinishEditQueuedMessage,
-                onResume = onResumeMessageQueue,
-            )
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(containerShape)
-                    .chatInputHaze(
-                        hazeState = hazeState,
-                        displaySetting = settings.displaySetting,
-                        containerColor = containerColor,
-                        shape = containerShape,
-                    ),
-                shape = containerShape,
-                tonalElevation = 0.dp,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                color = if (settings.displaySetting.enableBlurEffect) Color.Transparent else containerColor,
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    if (voiceState.phase != VoicePhase.Off) {
+    // 界面自定义：主题可用 ui.slot("chat.input", ...) 接管输入栏；没写时绘制下面的原版
+    val inputSlotActive = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot("chat.input") == true
+    val onAsrClick: () -> Unit = {
+        when (asrState.status) {
+            ASRStatus.Listening -> asr.stop()
+            ASRStatus.Idle, ASRStatus.Error -> {
+                if (!asrPermission.allRequiredPermissionsGranted) {
+                    asrPermission.requestPermissions()
+                } else {
+                    asrBaseText = state.textContent.text.toString()
+                    asr.start { transcript ->
+                        val spacer = if (asrBaseText.isBlank() || transcript.isBlank()) "" else " "
+                        state.setMessageText(asrBaseText + spacer + transcript)
+                    }
+                }
+            }
+            ASRStatus.Connecting, ASRStatus.Stopping -> {}
+        }
+    }
+    val slotEnableSearchMsg = stringResource(R.string.web_search_enabled)
+    val slotDisableSearchMsg = stringResource(R.string.web_search_disabled)
+    var slotShowSearchSheet by remember { mutableStateOf(false) }
+    var slotShowReasoningSheet by remember { mutableStateOf(false) }
+    val slotHandleSearchMode: (SearchMode) -> Unit = { mode ->
+        onUpdateSearchMode(mode)
+        val enabled = mode != SearchMode.OFF
+        toaster.show(
+            message = if (enabled) slotEnableSearchMsg else slotDisableSearchMsg,
+            duration = 1.seconds,
+            type = if (enabled) ToastType.Success else ToastType.Normal,
+        )
+    }
+    val inputParts: Map<String, @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit> = if (inputSlotActive) mapOf(
+            "queue_panel" to { info ->
+                Box(info.modifier) {
+                    MessageQueuePanel(
+                        state = messageQueue,
+                        onRemove = onRemoveQueuedMessage,
+                        onBeginEdit = onBeginEditQueuedMessage,
+                        onFinishEdit = onFinishEditQueuedMessage,
+                        onResume = onResumeMessageQueue,
+                    )
+                }
+            },
+            "voice_row" to { info ->
+                if (voiceState.phase != VoicePhase.Off) {
+                    Box(info.modifier) {
                         VoiceModeRow(
                             state = voiceState,
                             onStop = onStopVoiceMode,
                             onRetry = { onStartVoiceMode?.invoke() },
                         )
-                        androidx.compose.material3.HorizontalDivider(
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                        )
                     }
-                    if (state.messageContent.isNotEmpty()) {
-                        MediaFileInputRow(state = state)
-                    }
-
+                }
+            },
+            "attachments" to { info ->
+                if (state.messageContent.isNotEmpty()) Box(info.modifier) { MediaFileInputRow(state = state) }
+            },
+            "text_field" to { info ->
+                Box(info.modifier) {
                     TextInputRow(
                         state = state,
                         assistant = assistant,
                         completionProviders = completionProviders,
                         onSendMessage = { sendMessage() },
+                        customPlaceholder = info.node.customText,
                     )
+                }
+            },
+            "model_selector" to { info ->
+                ModelSelectorButton(state = modelListState, onlyIcon = true, modifier = info.modifier)
+            },
+            "search_button" to { info ->
+                Box(info.modifier) {
+                    SearchPickerButton(
+                        enableSearch = assistant.enableWebSearch,
+                        settings = settings,
+                        onUpdateSearchMode = slotHandleSearchMode,
+                        onUpdateSearchService = onUpdateSearchService,
+                        model = chatModel,
+                    )
+                }
+            },
+            "reasoning_button" to { info ->
+                if (chatModel?.abilities?.contains(ModelAbility.REASONING) == true) {
+                    Box(info.modifier) {
+                        ReasoningButton(
+                            reasoningLevel = assistant.reasoningLevel,
+                            onUpdateReasoningLevel = { onUpdateAssistant(assistant.copy(reasoningLevel = it)) },
+                            onlyIcon = true,
+                        )
+                    }
+                }
+            },
+            "plugin_buttons" to { info ->
+                Row(info.modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    me.rerere.rikkahub.ui.pages.extensions.plugin.PluginChatInputMounts(
+                        conversationId = conversationId,
+                        assistantId = assistant.id.toString(),
+                    )
+                }
+            },
+            "more_button" to { info ->
+                Box(info.modifier) {
+                    ActionIconButton(onClick = onMoreClick) {
+                        Icon(imageVector = HugeIcons.Add01, contentDescription = stringResource(R.string.more_options))
+                    }
+                }
+            },
+            "asr_button" to { info ->
+                if (!voiceState.isActive && (asrState.isAvailable || asrState.isRecording)) {
+                    Box(info.modifier) { AsrButton(state = asrState, onClick = onAsrClick) }
+                }
+            },
+            "send_button" to { info ->
+                AnimatedVisibility(
+                    visible = !asrState.isRecording,
+                    enter = fadeIn() + scaleIn(),
+                    exit = fadeOut() + scaleOut(),
+                    modifier = info.modifier,
+                ) {
+                    SendButton(
+                        loading = loading,
+                        empty = state.isEmpty(),
+                        customColorHex = info.node.textColorHex,
+                        onClick = { sendMessage() },
+                        onLongClick = { sendMessageWithoutAnswer() },
+                    )
+                }
+            },
+    ) else emptyMap()
 
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    val slotProvider = if (inputSlotActive) chatModel?.findProvider(providers = settings.providers, checkOverwrite = false) else null
+    val slotBuiltInSearch = chatModel?.tools?.contains(BuiltInTools.Search) == true
+    val slotCanReason = chatModel?.abilities?.contains(ModelAbility.REASONING) == true
+
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = "chat.input",
+        data = if (inputSlotActive) mapOf(
+            "loading" to loading,
+            "empty" to state.isEmpty(),
+            "hasAttachments" to state.messageContent.isNotEmpty(),
+            "voice" to (voiceState.phase != VoicePhase.Off),
+            "recording" to asrState.isRecording,
+            "asrAvailable" to (!voiceState.isActive && (asrState.isAvailable || asrState.isRecording)),
+            "model" to (chatModel?.displayName?.ifBlank { chatModel.modelId } ?: ""),
+            "modelId" to (chatModel?.modelId ?: ""),
+            "provider" to (slotProvider?.name ?: ""),
+            "searchEnabled" to (assistant.enableWebSearch || slotBuiltInSearch),
+            "searchMode" to when {
+                slotBuiltInSearch -> "BUILT_IN"
+                assistant.enableWebSearch -> "LOCAL"
+                else -> "OFF"
+            },
+            "canReason" to slotCanReason,
+            "reasoningLevel" to assistant.reasoningLevel.name,
+        ) else emptyMap(),
+        parts = inputParts,
+        actions = mapOf(
+            "send" to { sendMessage() },
+            "send_without_answer" to { sendMessageWithoutAnswer() },
+            "stop" to { onCancelClick() },
+            "more" to onMoreClick,
+            "asr" to onAsrClick,
+            "pick_model" to { modelListState.open() },
+            "pick_search" to { slotShowSearchSheet = true },
+            "pick_reasoning" to { if (slotCanReason) slotShowReasoningSheet = true },
+        ),
+        // 主题内容避开键盘与导航栏（在 chat.layout 自定义骨架内时由节点自身 insets 决定，不写死底部假设）
+        modifier = if (inCustomLayout) modifier else modifier.imePadding().navigationBarsPadding(),
+        whenReplaced = {
+            if (loading) KeepScreenOn()
+            if (slotShowSearchSheet) {
+                SearchPickerSheet(
+                    enableSearch = assistant.enableWebSearch,
+                    settings = settings,
+                    onUpdateSearchMode = slotHandleSearchMode,
+                    onUpdateSearchService = onUpdateSearchService,
+                    model = chatModel,
+                    onDismissRequest = { slotShowSearchSheet = false },
+                )
+            }
+            if (slotShowReasoningSheet) {
+                ReasoningPicker(
+                    reasoningLevel = assistant.reasoningLevel,
+                    onDismissRequest = { slotShowReasoningSheet = false },
+                    onUpdateReasoningLevel = { onUpdateAssistant(assistant.copy(reasoningLevel = it)) },
+                )
+            }
+        },
+    ) {
+        // 底部渐变遮罩：默认贴底时从输入区顶部过渡到屏幕底部；在 chat.layout 自由摆放（如挪到顶部/浮层）时不强加底部遮罩与底部导航栏留白
+        val scrimColor = MaterialTheme.colorScheme.background
+        val imeInsets = WindowInsets.ime
+        Surface(
+            color = Color.Transparent,
+            modifier = if (inCustomLayout) Modifier else Modifier.drawWithCache {
+                val brush = Brush.verticalGradient(
+                    colors = listOf(scrimColor.copy(alpha = 0f), scrimColor),
+                    startY = 0f,
+                    endY = (size.height - imeInsets.getBottom(this)).coerceAtLeast(1f),
+                )
+                onDrawBehind { drawRect(brush) }
+            },
+        ) {
+            Column(
+                modifier = if (inCustomLayout) {
+                    modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                } else {
+                    modifier
+                        .imePadding()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 8.dp)
+                        .padding(bottom = 8.dp)
+                },
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                MessageQueuePanel(
+                    state = messageQueue,
+                    onRemove = onRemoveQueuedMessage,
+                    onBeginEdit = onBeginEditQueuedMessage,
+                    onFinishEdit = onFinishEditQueuedMessage,
+                    onResume = onResumeMessageQueue,
+                )
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(containerShape)
+                        .chatInputHaze(
+                            hazeState = hazeState,
+                            displaySetting = settings.displaySetting,
+                            containerColor = containerColor,
+                            shape = containerShape,
+                        ),
+                    shape = containerShape,
+                    tonalElevation = 0.dp,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    color = if (settings.displaySetting.enableBlurEffect) Color.Transparent else containerColor,
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
+                        if (voiceState.phase != VoicePhase.Off) {
+                            VoiceModeRow(
+                                state = voiceState,
+                                onStop = onStopVoiceMode,
+                                onRetry = { onStartVoiceMode?.invoke() },
+                            )
+                            androidx.compose.material3.HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                            )
+                        }
+                        if (state.messageContent.isNotEmpty()) {
+                            MediaFileInputRow(state = state)
+                        }
+
+                        TextInputRow(
+                            state = state,
+                            assistant = assistant,
+                            completionProviders = completionProviders,
+                            onSendMessage = { sendMessage() },
+                        )
+
                         Row(
                             modifier = Modifier
-                                .weight(1f)
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            // Model Picker
-                            ModelSelectorButton(
-                                state = modelListState,
-                                onlyIcon = true,
-                                modifier = Modifier,
-                            )
-
-                            // Search
-                            val enableSearchMsg = stringResource(R.string.web_search_enabled)
-                            val disableSearchMsg = stringResource(R.string.web_search_disabled)
-                            SearchPickerButton(
-                                enableSearch = assistant.enableWebSearch,
-                                settings = settings,
-                                onUpdateSearchMode = { mode ->
-                                    onUpdateSearchMode(mode)
-                                    val enabled = mode != SearchMode.OFF
-                                    toaster.show(
-                                        message = if (enabled) enableSearchMsg else disableSearchMsg,
-                                        duration = 1.seconds,
-                                        type = if (enabled) {
-                                            ToastType.Success
-                                        } else {
-                                            ToastType.Normal
-                                        }
-                                    )
-                                },
-                                onUpdateSearchService = onUpdateSearchService,
-                                model = chatModel,
-                            )
-
-                            // Reasoning
-                            if (chatModel?.abilities?.contains(ModelAbility.REASONING) == true) {
-                                ReasoningButton(
-                                    reasoningLevel = assistant.reasoningLevel,
-                                    onUpdateReasoningLevel = {
-                                        onUpdateAssistant(assistant.copy(reasoningLevel = it))
-                                    },
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                // Model Picker
+                                ModelSelectorButton(
+                                    state = modelListState,
                                     onlyIcon = true,
+                                    modifier = Modifier,
+                                )
+
+                                // Search
+                                val enableSearchMsg = stringResource(R.string.web_search_enabled)
+                                val disableSearchMsg = stringResource(R.string.web_search_disabled)
+                                SearchPickerButton(
+                                    enableSearch = assistant.enableWebSearch,
+                                    settings = settings,
+                                    onUpdateSearchMode = { mode ->
+                                        onUpdateSearchMode(mode)
+                                        val enabled = mode != SearchMode.OFF
+                                        toaster.show(
+                                            message = if (enabled) enableSearchMsg else disableSearchMsg,
+                                            duration = 1.seconds,
+                                            type = if (enabled) {
+                                                ToastType.Success
+                                            } else {
+                                                ToastType.Normal
+                                            }
+                                        )
+                                    },
+                                    onUpdateSearchService = onUpdateSearchService,
+                                    model = chatModel,
+                                )
+
+                                // Reasoning
+                                if (chatModel?.abilities?.contains(ModelAbility.REASONING) == true) {
+                                    ReasoningButton(
+                                        reasoningLevel = assistant.reasoningLevel,
+                                        onUpdateReasoningLevel = {
+                                            onUpdateAssistant(assistant.copy(reasoningLevel = it))
+                                        },
+                                        onlyIcon = true,
+                                    )
+                                }
+
+                                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginChatInputMounts(
+                                    conversationId = conversationId,
+                                    assistantId = assistant.id.toString(),
+                                )
+
+                            }
+
+                            ActionIconButton(
+                                onClick = onMoreClick
+                            ) {
+                                Icon(
+                                    imageVector = HugeIcons.Add01,
+                                    contentDescription = stringResource(R.string.more_options)
                                 )
                             }
 
-                            me.rerere.rikkahub.ui.pages.extensions.plugin.PluginChatInputMounts(
-                                conversationId = null,
-                                assistantId = assistant.id.toString(),
-                            )
-
-                        }
-
-                        ActionIconButton(
-                            onClick = onMoreClick
-                        ) {
-                            Icon(
-                                imageVector = HugeIcons.Add01,
-                                contentDescription = stringResource(R.string.more_options)
-                            )
-                        }
-
-                        if (!voiceState.isActive && (asrState.isAvailable || asrState.isRecording)) {
-                            AsrButton(
-                                state = asrState,
-                                onClick = {
-                                    when (asrState.status) {
-                                        ASRStatus.Listening -> asr.stop()
-                                        ASRStatus.Idle, ASRStatus.Error -> {
-                                            if (!asrPermission.allRequiredPermissionsGranted) {
-                                                asrPermission.requestPermissions()
-                                            } else {
-                                                asrBaseText = state.textContent.text.toString()
-                                                asr.start { transcript ->
-                                                    val spacer =
-                                                        if (asrBaseText.isBlank() || transcript.isBlank()) "" else " "
-                                                    state.setMessageText(asrBaseText + spacer + transcript)
+                            if (!voiceState.isActive && (asrState.isAvailable || asrState.isRecording)) {
+                                AsrButton(
+                                    state = asrState,
+                                    onClick = {
+                                        when (asrState.status) {
+                                            ASRStatus.Listening -> asr.stop()
+                                            ASRStatus.Idle, ASRStatus.Error -> {
+                                                if (!asrPermission.allRequiredPermissionsGranted) {
+                                                    asrPermission.requestPermissions()
+                                                } else {
+                                                    asrBaseText = state.textContent.text.toString()
+                                                    asr.start { transcript ->
+                                                        val spacer =
+                                                            if (asrBaseText.isBlank() || transcript.isBlank()) "" else " "
+                                                        state.setMessageText(asrBaseText + spacer + transcript)
+                                                    }
                                                 }
                                             }
+
+                                            ASRStatus.Connecting, ASRStatus.Stopping -> {}
                                         }
-
-                                        ASRStatus.Connecting, ASRStatus.Stopping -> {}
                                     }
-                                }
-                            )
-                        }
+                                )
+                            }
 
-                        if (loading) {
-                            KeepScreenOn()
-                        }
+                            if (loading) {
+                                KeepScreenOn()
+                            }
 
-                        AnimatedVisibility(
-                            visible = !asrState.isRecording,
-                            enter = fadeIn() + scaleIn(),
-                            exit = fadeOut() + scaleOut(),
-                        ) {
-                            SendButton(
-                                loading = loading,
-                                empty = state.isEmpty(),
-                                onClick = { sendMessage() },
-                                onLongClick = { sendMessageWithoutAnswer() },
-                            )
+                            AnimatedVisibility(
+                                visible = !asrState.isRecording,
+                                enter = fadeIn() + scaleIn(),
+                                exit = fadeOut() + scaleOut(),
+                            ) {
+                                SendButton(
+                                    loading = loading,
+                                    empty = state.isEmpty(),
+                                    onClick = { sendMessage() },
+                                    onLongClick = { sendMessageWithoutAnswer() },
+                                )
+                            }
                         }
                     }
                 }
-            }
 
+            }
         }
     }
 
@@ -406,13 +606,17 @@ private fun SendButton(
     empty: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    customColorHex: String = "",
     modifier: Modifier = Modifier,
 ) {
     val showStop = loading && empty
+    val colorScheme = MaterialTheme.colorScheme
+    val customPrimary = me.rerere.rikkahub.ui.custom.resolveUIColor(customColorHex, colorScheme)
     val containerColor = when {
-        showStop -> MaterialTheme.colorScheme.errorContainer
-        empty -> MaterialTheme.colorScheme.surfaceContainerHigh
-        else -> MaterialTheme.colorScheme.primary
+        showStop -> colorScheme.errorContainer
+        empty -> colorScheme.surfaceContainerHigh
+        customPrimary != Color.Unspecified -> customPrimary
+        else -> colorScheme.primary
     }
     val contentColor = when {
         showStop -> MaterialTheme.colorScheme.onErrorContainer
@@ -472,6 +676,7 @@ private fun TextInputRow(
     assistant: Assistant,
     completionProviders: List<ChatCompletionProvider>,
     onSendMessage: () -> Unit,
+    customPlaceholder: String = "",
 ) {
     val settings = LocalSettings.current
     val filesManager: FilesManager = koinInject()
@@ -606,7 +811,7 @@ private fun TextInputRow(
                 },
             shape = MaterialTheme.shapes.largeIncreased,
             placeholder = {
-                Text(stringResource(R.string.chat_input_placeholder))
+                Text(customPlaceholder.ifBlank { stringResource(R.string.chat_input_placeholder) })
             },
             lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
             keyboardOptions = KeyboardOptions(

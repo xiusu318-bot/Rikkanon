@@ -448,7 +448,7 @@ private fun SkillImportSheet(
     onImportFromFile: () -> Unit,
     onImportFromGitHub: () -> Unit,
 ) {
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
     ) {

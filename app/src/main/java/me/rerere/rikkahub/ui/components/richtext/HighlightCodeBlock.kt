@@ -1,5 +1,10 @@
 package me.rerere.rikkahub.ui.components.richtext
 
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.uiSafeClip
+import me.rerere.rikkahub.ui.pages.extensions.plugin.uiSpec
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import android.content.ClipData
 import android.net.Uri
 import androidx.activity.compose.ManagedActivityResultLauncher
@@ -40,6 +45,7 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
@@ -109,10 +115,8 @@ fun HighlightCodeBlock(
     val codeblockMounts = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginUiMounts("markdown.codeblock")
     val pluginRenderer = remember(codeblockMounts, normalizedLanguage) {
         codeblockMounts.find { (_, reg) ->
-            val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
-            val langs = (spec?.get("languages") as? kotlinx.serialization.json.JsonArray)
-                ?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.lowercase() }
-                .orEmpty()
+            val spec = reg.uiSpec
+            val langs = spec.getValue("languages").jsonArray.map { it.jsonPrimitive.content.lowercase() }
             normalizedLanguage in langs || "*" in langs
         }
     }
@@ -143,32 +147,57 @@ fun HighlightCodeBlock(
         }
     }
 
+    // 界面自定义 ui.style("code_block")；未设置时为 null，各值与原版相同
+    val codeStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("code_block")
+    val colorScheme = MaterialTheme.colorScheme
+    val codeShape = codeStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) } ?: MaterialTheme.shapes.large
+    val codeContainerBg = codeStyle.colorOr({ it.background }, colorScheme, colorScheme.surfaceContainer)
+    val codeHeaderBg = colorScheme.surfaceContainerHighest
+
     Column(
         modifier = modifier
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.large)
-            .clip(MaterialTheme.shapes.large)
-            .background(MaterialTheme.colorScheme.surfaceContainer),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            HighlightCodeActions(
-                language = language,
-                scope = scope,
-                clipboardManager = clipboardManager,
-                code = code,
-                createDocumentLauncher = createDocumentLauncher,
-                navController = navController,
-                completeCodeBlock = completeCodeBlock,
-                previewMode = previewMode,
-                canInlinePreview = canInlinePreview,
-                onTogglePreviewMode = {
-                    previewMode = !previewMode
-                },
+            .border(
+                (codeStyle?.borderWidthDp ?: 1f).dp,
+                codeStyle.colorOr({ it.borderColor }, colorScheme, MaterialTheme.colorScheme.outlineVariant),
+                codeShape,
             )
+            .uiSafeClip(codeShape)
+            .background(codeContainerBg),
+    ) {
+        // 界面自定义：主题可用 ui.slot("code_block.header", ...) 接管代码块顶栏；没写时绘制下面的原版
+        CodeBlockHeaderSlot(
+                    language = language,
+                    scope = scope,
+                    clipboardManager = clipboardManager,
+                    code = code,
+                    createDocumentLauncher = createDocumentLauncher,
+                    navController = navController,
+                    completeCodeBlock = completeCodeBlock,
+                    previewMode = previewMode,
+                    canInlinePreview = canInlinePreview,
+                    onTogglePreviewMode = { previewMode = !previewMode },
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(codeHeaderBg)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                HighlightCodeActions(
+                    language = language,
+                    scope = scope,
+                    clipboardManager = clipboardManager,
+                    code = code,
+                    createDocumentLauncher = createDocumentLauncher,
+                    navController = navController,
+                    completeCodeBlock = completeCodeBlock,
+                    previewMode = previewMode,
+                    canInlinePreview = canInlinePreview,
+                    onTogglePreviewMode = {
+                        previewMode = !previewMode
+                    },
+                )
+            }
         }
         Column(
             modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
@@ -384,112 +413,210 @@ private fun HighlightCodeActions(
     canInlinePreview: Boolean = false,
     onTogglePreviewMode: () -> Unit = {},
 ) {
-    val context = LocalContext.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = language,
-            fontSize = 12.sp,
-            lineHeight = 12.sp,
-            fontFamily = JetbrainsMono,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-                .copy(alpha = 0.5f),
-        )
+        CodeLanguageLabel(language)
         Spacer(Modifier.weight(1f))
         Row(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val iconSize = 16.dp
-            val iconTint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-
-            Icon(
-                imageVector = HugeIcons.Download04,
-                contentDescription = stringResource(id = R.string.chat_page_save),
-                tint = iconTint,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .onClick {
-                        val extension = when (language.lowercase()) {
-                            "kotlin" -> "kt"
-                            "java" -> "java"
-                            "python" -> "py"
-                            "javascript" -> "js"
-                            "typescript" -> "ts"
-                            "cpp", "c++" -> "cpp"
-                            "c" -> "c"
-                            "html" -> "html"
-                            "css" -> "css"
-                            "xml" -> "xml"
-                            "json" -> "json"
-                            "yaml", "yml" -> "yml"
-                            "markdown", "md" -> "md"
-                            "sql" -> "sql"
-                            "sh", "bash" -> "sh"
-                            "svg" -> "svg"
-                            else -> "txt"
-                        }
-                        createDocumentLauncher.launch(
-                            "code_${
-                                Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
-                            }.$extension"
-                        )
-                    }
-                    .padding(4.dp)
-                    .size(iconSize)
-            )
-
-            Icon(
-                imageVector = HugeIcons.Copy01,
-                contentDescription = stringResource(id = R.string.code_block_copy),
-                tint = iconTint,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .onClick {
-                        scope.launch {
-                            clipboardManager.setClipEntry(ClipEntry(ClipData.newPlainText("code", code)))
-                        }
-                    }
-                    .padding(4.dp)
-                    .size(iconSize)
-            )
-
-            val normalizedLanguage = language.lowercase()
+            CodeSaveButton(language, createDocumentLauncher)
+            CodeCopyButton(scope, clipboardManager, code)
             if (canInlinePreview) {
-                Icon(
-                    imageVector = if (previewMode) HugeIcons.Code else HugeIcons.View,
-                    contentDescription = if (previewMode) "Code" else stringResource(id = R.string.code_block_preview),
-                    tint = iconTint,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .onClick {
-                            onTogglePreviewMode()
-                        }
-                        .padding(4.dp)
-                        .size(iconSize)
-                )
+                CodePreviewToggle(previewMode, onTogglePreviewMode)
             }
-
-            if (completeCodeBlock && normalizedLanguage in PREVIEWABLE_LANGUAGES) {
-                Icon(
-                    imageVector = HugeIcons.Eye,
-                    contentDescription = stringResource(id = R.string.code_block_preview),
-                    tint = iconTint,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .onClick {
-                            val content = buildCodePreviewHtml(code = code, language = normalizedLanguage)
-                            val contentId = WebViewContentCache.store(context.cacheDir, content)
-                            navController.navigate(Screen.WebView(contentId = contentId))
-                        }
-                        .padding(4.dp)
-                        .size(iconSize)
-                )
+            if (completeCodeBlock && language.lowercase() in PREVIEWABLE_LANGUAGES) {
+                CodeWebPreviewButton(code, language, navController)
             }
         }
     }
+}
+
+@Composable
+private fun CodeLanguageLabel(language: String, modifier: Modifier = Modifier, color: Color = Color.Unspecified) {
+    Text(
+        text = language,
+        fontSize = 12.sp,
+        lineHeight = 12.sp,
+        fontFamily = JetbrainsMono,
+        color = if (color != Color.Unspecified) color else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun CodeActionIcon(
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = Color.Unspecified,
+) {
+    Icon(
+        imageVector = imageVector,
+        contentDescription = contentDescription,
+        tint = if (tint != Color.Unspecified) tint else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .onClick { onClick() }
+            .padding(4.dp)
+            .size(16.dp)
+    )
+}
+
+private fun codeFileExtension(language: String): String = when (language.lowercase()) {
+    "kotlin" -> "kt"
+    "java" -> "java"
+    "python" -> "py"
+    "javascript" -> "js"
+    "typescript" -> "ts"
+    "cpp", "c++" -> "cpp"
+    "c" -> "c"
+    "html" -> "html"
+    "css" -> "css"
+    "xml" -> "xml"
+    "json" -> "json"
+    "yaml", "yml" -> "yml"
+    "markdown", "md" -> "md"
+    "sql" -> "sql"
+    "sh", "bash" -> "sh"
+    "svg" -> "svg"
+    else -> "txt"
+}
+
+@Composable
+private fun CodeSaveButton(
+    language: String,
+    createDocumentLauncher: ManagedActivityResultLauncher<String, Uri?>,
+    modifier: Modifier = Modifier,
+    tint: Color = Color.Unspecified,
+) {
+    CodeActionIcon(
+        imageVector = HugeIcons.Download04,
+        contentDescription = stringResource(id = R.string.chat_page_save),
+        onClick = {
+            createDocumentLauncher.launch(
+                "code_${
+                    Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
+                }.${codeFileExtension(language)}"
+            )
+        },
+        modifier = modifier,
+        tint = tint,
+    )
+}
+
+@Composable
+private fun CodeCopyButton(
+    scope: CoroutineScope,
+    clipboardManager: Clipboard,
+    code: String,
+    modifier: Modifier = Modifier,
+    tint: Color = Color.Unspecified,
+) {
+    CodeActionIcon(
+        imageVector = HugeIcons.Copy01,
+        contentDescription = stringResource(id = R.string.code_block_copy),
+        onClick = {
+            scope.launch {
+                clipboardManager.setClipEntry(ClipEntry(ClipData.newPlainText("code", code)))
+            }
+        },
+        modifier = modifier,
+        tint = tint,
+    )
+}
+
+@Composable
+private fun CodePreviewToggle(
+    previewMode: Boolean,
+    onTogglePreviewMode: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = Color.Unspecified,
+) {
+    CodeActionIcon(
+        imageVector = if (previewMode) HugeIcons.Code else HugeIcons.View,
+        contentDescription = if (previewMode) "Code" else stringResource(id = R.string.code_block_preview),
+        onClick = onTogglePreviewMode,
+        modifier = modifier,
+        tint = tint,
+    )
+}
+
+@Composable
+private fun CodeWebPreviewButton(
+    code: String,
+    language: String,
+    navController: Navigator,
+    modifier: Modifier = Modifier,
+    tint: Color = Color.Unspecified,
+) {
+    val context = LocalContext.current
+    CodeActionIcon(
+        imageVector = HugeIcons.Eye,
+        contentDescription = stringResource(id = R.string.code_block_preview),
+        onClick = {
+            val content = buildCodePreviewHtml(code = code, language = language.lowercase())
+            val contentId = WebViewContentCache.store(context.cacheDir, content)
+            navController.navigate(Screen.WebView(contentId = contentId))
+        },
+        modifier = modifier,
+        tint = tint,
+    )
+}
+
+/**
+ * 代码块顶栏接入点 `code_block.header`。
+ * 数据：language / lines / previewMode / canPreview；原版部件：language / save_button / copy_button / preview_toggle / web_preview_button / original；
+ * 动作：copy / save / toggle_preview。
+ */
+@Composable
+private fun CodeBlockHeaderSlot(
+    language: String,
+    scope: CoroutineScope,
+    clipboardManager: Clipboard,
+    code: String,
+    createDocumentLauncher: ManagedActivityResultLauncher<String, Uri?>,
+    navController: Navigator,
+    completeCodeBlock: Boolean,
+    previewMode: Boolean,
+    canInlinePreview: Boolean,
+    onTogglePreviewMode: () -> Unit,
+    original: @Composable () -> Unit,
+) {
+    val slotActive = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot("code_block.header") == true
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = "code_block.header",
+        data = if (slotActive) mapOf(
+            "language" to language,
+            "lines" to code.lines().size,
+            "previewMode" to previewMode,
+            "canPreview" to canInlinePreview,
+        ) else emptyMap(),
+        parts = if (slotActive) mapOf(
+            "language" to { info -> CodeLanguageLabel(language, info.modifier, info.textColor) },
+            "save_button" to { info -> CodeSaveButton(language, createDocumentLauncher, info.modifier, info.textColor) },
+            "copy_button" to { info -> CodeCopyButton(scope, clipboardManager, code, info.modifier, info.textColor) },
+            "preview_toggle" to { info ->
+                if (canInlinePreview) CodePreviewToggle(previewMode, onTogglePreviewMode, info.modifier, info.textColor)
+            },
+            "web_preview_button" to { info ->
+                if (completeCodeBlock && language.lowercase() in PREVIEWABLE_LANGUAGES) {
+                    CodeWebPreviewButton(code, language, navController, info.modifier, info.textColor)
+                }
+            },
+        ) else emptyMap(),
+        actions = mapOf(
+            "copy" to { scope.launch { clipboardManager.setClipEntry(ClipEntry(ClipData.newPlainText("code", code))) } },
+            "save" to { createDocumentLauncher.launch("code_${Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())}.${codeFileExtension(language)}") },
+            "toggle_preview" to onTogglePreviewMode,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+        original = original,
+    )
 }
 
 @Composable
@@ -532,9 +659,10 @@ private fun PluginCodeBlockPreview(
     code: String,
 ) {
     val host = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
-    val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
-    val path = (spec?.get("path") as? kotlinx.serialization.json.JsonPrimitive)?.content
-    val heightDp = ((spec?.get("height") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 220).coerceIn(80, 800)
+    val spec = reg.uiSpec
+    val path = (spec["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+    val explicitHeight = (spec["height"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()
+    val heightDp = (explicitHeight ?: 220).coerceIn(48, 800)
     val argsJson = remember(language, code) {
         kotlinx.serialization.json.buildJsonObject {
             put("language", kotlinx.serialization.json.JsonPrimitive(language))
@@ -546,38 +674,34 @@ private fun PluginCodeBlockPreview(
             pluginId = runtime.id,
             path = path,
             argsJson = argsJson,
+            autoHeight = explicitHeight == null,
+            initialHeightDp = heightDp,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(heightDp.dp),
         )
     } else {
-        val rendered by androidx.compose.runtime.produceState<String?>(initialValue = null, runtime.id, reg.handlerId, language, code) {
-            value = runCatching {
-                val res = host.callUiHandler(
-                    runtime.id,
-                    reg.handlerId,
-                    kotlinx.serialization.json.buildJsonObject {
-                        put("language", kotlinx.serialization.json.JsonPrimitive(language))
-                        put("code", kotlinx.serialization.json.JsonPrimitive(code))
-                    },
-                )
-                when (res) {
-                    is kotlinx.serialization.json.JsonPrimitive -> res.content
-                    is kotlinx.serialization.json.JsonObject ->
-                        (res["html"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-                            ?: (res["text"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    else -> null
-                }
-            }.getOrNull()
-        }
-        val htmlOrText = rendered
-        if (htmlOrText != null) {
+        val rendered = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginRendered(
+            runtime.id,
+            reg.handlerId,
+            kotlinx.serialization.json.buildJsonObject {
+                put("language", kotlinx.serialization.json.JsonPrimitive(language))
+                put("code", kotlinx.serialization.json.JsonPrimitive(code))
+            },
+            language,
+            code,
+        )
+        rendered?.exceptionOrNull()?.let { me.rerere.rikkahub.ui.pages.extensions.plugin.PluginRenderError(it) }
+        val htmlOrText = rendered?.getOrNull()
+        if (!htmlOrText.isNullOrEmpty()) {
             if (htmlOrText.trimStart().startsWith("<")) {
                 me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
                     pluginId = runtime.id,
                     path = "",
                     argsJson = argsJson,
                     inlineHtml = htmlOrText,
+                    autoHeight = explicitHeight == null,
+                    initialHeightDp = heightDp,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(heightDp.dp),

@@ -120,7 +120,7 @@ internal fun EditedFilesList(
     if (selectedPath != null) {
         val path = selectedPath!!
         val fileName = remember(path) { path.substringAfterLast('/') }
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { selectedPath = null },
             sheetState = rememberBottomSheetState(
                 initialValue = SheetValue.Hidden,

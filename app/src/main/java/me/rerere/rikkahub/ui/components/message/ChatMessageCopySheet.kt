@@ -42,7 +42,7 @@ fun ChatMessageCopySheet(
     onDismissRequest: () -> Unit
 ) {
     val context = LocalContext.current
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismissRequest,
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
         sheetGesturesEnabled = false,

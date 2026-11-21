@@ -225,7 +225,11 @@ val dataSourceModule = module {
                 }
             }
             .addNetworkInterceptor(RequestLoggingInterceptor())
-            .addInterceptor(PluginInterceptor(get()))
+            .addInterceptor(
+                PluginInterceptor(get()) { proxySpec ->
+                    me.rerere.rikkahub.data.remote.resolvePluginProxyClient(client, settingsStore, proxySpec)
+                }
+            )
             .addInterceptor(HttpLoggingInterceptor().apply {
                 redactHeader("Proxy-Authorization")
                 level = HttpLoggingInterceptor.Level.HEADERS

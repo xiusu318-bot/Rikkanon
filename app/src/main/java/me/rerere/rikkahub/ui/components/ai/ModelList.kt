@@ -80,9 +80,16 @@ import me.rerere.hugeicons.stroke.Image03
 import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Text
 import me.rerere.hugeicons.stroke.Tools
+import androidx.compose.foundation.BorderStroke
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.hasUICustomShapes
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiCornerShape
+import me.rerere.rikkahub.ui.custom.uiSearchBarShape
 import me.rerere.rikkahub.data.datastore.findModelById
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.ui.components.ui.AutoAIIcon
@@ -244,6 +251,7 @@ internal fun ModelSelectorButton(
             onClick = {
                 state.open()
             },
+            modifier = modifier,
         ) {
             if (model != null) {
                 AutoAIIcon(
@@ -272,10 +280,12 @@ internal fun ModelField(
     placeholder: String = stringResource(R.string.model_list_select_model),
     onClear: (() -> Unit)? = null,
 ) {
+    val fieldShape = uiComponentStyle("search_bar")?.cornerDp?.let { uiCornerShape(it.dp) }
+        ?: if (hasUICustomShapes()) MaterialTheme.shapes.medium else CircleShape
     Surface(
         onClick = onClick,
         tonalElevation = 4.dp,
-        shape = CircleShape,
+        shape = fieldShape,
         modifier = modifier.fillMaxWidth(),
     ) {
         Row(
@@ -302,7 +312,7 @@ internal fun ModelField(
                     imageVector = HugeIcons.Cancel01,
                     contentDescription = "Clear",
                     modifier = Modifier
-                        .clip(CircleShape)
+                        .clip(if (hasUICustomShapes()) MaterialTheme.shapes.extraSmall else CircleShape)
                         .clickable(onClick = onClear),
                 )
             } else {
@@ -335,7 +345,7 @@ fun ModelListSheet(
         }
     }
 
-    ModalBottomSheet(
+    UIModalBottomSheet(
         onDismissRequest = {
             state.close()
         },
@@ -502,8 +512,9 @@ private fun ColumnScope.ModelList(
         }.toMap()
     }
 
+    val searchShape = uiSearchBarShape(RoundedCornerShape(50))
     Surface(
-        shape = RoundedCornerShape(50),
+        shape = searchShape,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp),
@@ -517,7 +528,7 @@ private fun ColumnScope.ModelList(
                     text = stringResource(R.string.model_list_search_placeholder),
                 )
             },
-            shape = RoundedCornerShape(50),
+            shape = searchShape,
             colors = TextFieldDefaults.colors(
                 unfocusedIndicatorColor = Color.Transparent,
                 focusedIndicatorColor = Color.Transparent,
@@ -779,11 +790,17 @@ private fun ModelItem(
 ) {
     val navController = LocalNavController.current
     val interactionSource = remember { MutableInteractionSource() }
+    val cardStyle = uiComponentStyle("card")
+    val scheme = MaterialTheme.colorScheme
     Card(
         modifier = modifier,
+        shape = cardStyle?.cornerDp?.let { uiCornerShape(it.dp) } ?: CardDefaults.shape,
+        border = cardStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+            BorderStroke(it.dp, cardStyle.colorOr({ s -> s.borderColor }, scheme, scheme.outlineVariant))
+        },
         colors = CardDefaults.cardColors(
-            containerColor = if (select) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-            contentColor = if (select) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+            containerColor = if (select) scheme.primaryContainer else cardStyle.colorOr({ it.background }, scheme, scheme.surface),
+            contentColor = if (select) scheme.onPrimaryContainer else scheme.onSurface,
         )
     ) {
         Row(

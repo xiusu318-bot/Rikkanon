@@ -28,7 +28,8 @@ internal fun buildAskKeyTool(settings: Settings): Tool {
         description = """
             Request a secret key alias (password, token, API key, passphrase, etc.) from the user without exposing the raw secret in chat history.
             $availableAliasesDesc
-            - If one of the available secret key aliases above already matches what you need, you do NOT need to call `ask_key`; simply write its `key_name` directly in your tool arguments (e.g. in `workspace_terminal` or `workspace_shell`), and the runtime will substitute the real secret automatically.
+            - If one of the available secret key aliases above already matches what you need, you do NOT need to call `ask_key`; simply write its `key_name` directly in your tool arguments (e.g. in `workspace_terminal`, `workspace_shell`, or `workspace_write_file`), and the runtime will substitute the real secret automatically (for sub-agents via `conversation_send` or `memory_*`, pass the `key_name` alias directly as well).
+            - Never attempt to inspect, decode, slice, or dump the underlying secret bytes (e.g. via `od`, `xxd`, `hexdump`, `base64`, `ord`, or substring slicing); the host security layer blocks all raw/encoded secret outputs.
             - If the required secret is not listed above, or you are unsure which alias to use, call `ask_key` with `reason` and an optional `suggested_key_name`. The user will select an existing alias or create a new one, and this tool will return the `key_name` alias for you to use directly in subsequent tool calls.
         """.trimIndent().replace("\n", " "),
         parameters = {

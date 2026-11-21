@@ -35,20 +35,33 @@ val appModule = module {
         val context: android.content.Context = get()
         val appScope: AppScope = get()
         val settingsStore: me.rerere.rikkahub.data.datastore.SettingsStore = get()
+        val initialProxy = settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+        val appliedProxy = java.util.concurrent.atomic.AtomicReference(initialProxy)
+        lateinit var defaultFetchClient: okhttp3.OkHttpClient
+        defaultFetchClient = okhttp3.OkHttpClient.Builder()
+            .configureOutboundProxy {
+                settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+            }
+            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+            .addInterceptor { chain ->
+                val cur = settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
+                if (appliedProxy.getAndSet(cur) != cur) {
+                    defaultFetchClient.connectionPool.evictAll()
+                }
+                chain.proceed(chain.request())
+            }
+            .build()
         me.rerere.plugin.host.PluginHost(
             store = me.rerere.plugin.store.PluginStore(java.io.File(context.filesDir, "plugins")),
         ) { host ->
             me.rerere.plugin.host.DefaultPluginServices(
                 host = host,
-                // 插件 fetch 使用独立客户端，不挂载插件 intercept，默认跟随 LLM 出站代理设置
-                fetchClient = okhttp3.OkHttpClient.Builder()
-                    .configureOutboundProxy {
-                        settingsStore.settingsFlow.value.networkSetting.resolveProxy(OutboundTarget.LLM)
-                    }
-                    .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
-                    .build(),
+                fetchClient = defaultFetchClient,
                 hostApi = me.rerere.rikkahub.data.plugin.AppPluginHostApi(context),
+                clientResolver = { proxySpec ->
+                    me.rerere.rikkahub.data.remote.resolvePluginProxyClient(defaultFetchClient, settingsStore, proxySpec)
+                },
             )
         }.also { host ->
             host.onChanged = {

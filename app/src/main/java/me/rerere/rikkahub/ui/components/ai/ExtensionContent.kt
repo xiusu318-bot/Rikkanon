@@ -44,6 +44,13 @@ import me.rerere.rikkahub.data.model.Lorebook
 import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.QuickMessage
+import me.rerere.rikkahub.ui.custom.UISwitch
+import me.rerere.rikkahub.ui.custom.hasUICustomShapes
+import me.rerere.rikkahub.ui.custom.uiButtonShape
+import me.rerere.rikkahub.ui.custom.uiSegmentedItemBorder
+import me.rerere.rikkahub.ui.custom.uiSegmentedListGap
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemColors
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemShapes
 
 @Composable
 fun PromptPresetsContent(
@@ -52,7 +59,7 @@ fun PromptPresetsContent(
     onToggle: (Uuid, Boolean) -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    colors: ListItemColors = uiSegmentedListItemColors(),
     onItemClick: ((PromptPreset) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
@@ -62,7 +69,7 @@ fun PromptPresetsContent(
         contentPadding = contentPadding,
         onManage = onManage,
         key = { it.id },
-    ) { preset, shapes ->
+    ) { index, count, preset, shapes ->
         val enabledBlocksCount = preset.blocks.count { it.enabled }
         ExtensionListItem(
             title = preset.name.ifBlank { stringResource(R.string.extension_content_unnamed) },
@@ -72,6 +79,7 @@ fun PromptPresetsContent(
             onClick = onItemClick?.let { click -> { click(preset) } },
             shapes = shapes,
             colors = colors,
+            modifier = Modifier.uiSegmentedItemBorder(index, count),
         )
     }
 }
@@ -83,7 +91,7 @@ fun ModeInjectionsContent(
     onToggle: (Uuid, Boolean) -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    colors: ListItemColors = uiSegmentedListItemColors(),
     onItemClick: ((PromptInjection.ModeInjection) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
@@ -93,7 +101,7 @@ fun ModeInjectionsContent(
         contentPadding = contentPadding,
         onManage = onManage,
         key = { it.id },
-    ) { injection, shapes ->
+    ) { index, count, injection, shapes ->
         ExtensionListItem(
             title = injection.name.ifBlank { stringResource(R.string.extension_content_unnamed) },
             checked = selectedIds.contains(injection.id),
@@ -101,6 +109,7 @@ fun ModeInjectionsContent(
             onClick = onItemClick?.let { click -> { click(injection) } },
             shapes = shapes,
             colors = colors,
+            modifier = Modifier.uiSegmentedItemBorder(index, count),
         )
     }
 }
@@ -112,7 +121,7 @@ fun LorebooksContent(
     onToggle: (Uuid, Boolean) -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    colors: ListItemColors = uiSegmentedListItemColors(),
     onItemClick: ((Lorebook) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
@@ -122,7 +131,7 @@ fun LorebooksContent(
         contentPadding = contentPadding,
         onManage = onManage,
         key = { it.id },
-    ) { lorebook, shapes ->
+    ) { index, count, lorebook, shapes ->
         ExtensionListItem(
             title = lorebook.name.ifBlank { stringResource(R.string.extension_content_unnamed_lorebook) },
             description = lorebook.description,
@@ -131,6 +140,7 @@ fun LorebooksContent(
             onClick = onItemClick?.let { click -> { click(lorebook) } },
             shapes = shapes,
             colors = colors,
+            modifier = Modifier.uiSegmentedItemBorder(index, count),
         )
     }
 }
@@ -142,7 +152,7 @@ fun SkillsContent(
     onToggle: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    colors: ListItemColors = uiSegmentedListItemColors(),
     onItemClick: ((SkillMetadata) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
@@ -152,7 +162,7 @@ fun SkillsContent(
         contentPadding = contentPadding,
         onManage = onManage,
         key = { it.skillDir.absolutePath },
-    ) { skill, shapes ->
+    ) { index, count, skill, shapes ->
         ExtensionListItem(
             title = skill.name,
             description = skill.description,
@@ -161,6 +171,7 @@ fun SkillsContent(
             onClick = onItemClick?.let { click -> { click(skill) } },
             shapes = shapes,
             colors = colors,
+            modifier = Modifier.uiSegmentedItemBorder(index, count),
         )
     }
 }
@@ -172,7 +183,7 @@ fun QuickMessagesContent(
     onToggle: (Uuid, Boolean) -> Unit,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(0.dp),
-    colors: ListItemColors = ListItemDefaults.segmentedColors(),
+    colors: ListItemColors = uiSegmentedListItemColors(),
     onItemClick: ((QuickMessage) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
 ) {
@@ -182,7 +193,7 @@ fun QuickMessagesContent(
         contentPadding = contentPadding,
         onManage = onManage,
         key = { it.id },
-    ) { quickMessage, shapes ->
+    ) { index, count, quickMessage, shapes ->
         ExtensionListItem(
             title = quickMessage.title.ifBlank { stringResource(R.string.extension_content_unnamed) },
             description = quickMessage.content,
@@ -192,6 +203,7 @@ fun QuickMessagesContent(
             onClick = onItemClick?.let { click -> { click(quickMessage) } },
             shapes = shapes,
             colors = colors,
+            modifier = Modifier.uiSegmentedItemBorder(index, count),
         )
     }
 }
@@ -204,16 +216,16 @@ private fun <T> ExtensionList(
     contentPadding: PaddingValues,
     onManage: (() -> Unit)?,
     key: ((T) -> Any)? = null,
-    itemContent: @Composable (item: T, shapes: ListItemShapes) -> Unit,
+    itemContent: @Composable (index: Int, count: Int, item: T, shapes: ListItemShapes) -> Unit,
 ) {
     val itemKey: ((Int, T) -> Any)? = key?.let { keyOf -> { _, item -> keyOf(item) } }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = contentPadding,
-        verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
+        verticalArrangement = Arrangement.spacedBy(uiSegmentedListGap()),
     ) {
         itemsIndexed(items = items, key = itemKey) { index, item ->
-            itemContent(item, ListItemDefaults.segmentedShapes(index = index, count = items.size))
+            itemContent(index, items.size, item, uiSegmentedListItemShapes(index = index, count = items.size))
         }
         if (onManage != null) {
             item {
@@ -230,6 +242,7 @@ private fun ExtensionListItem(
     onCheckedChange: (Boolean) -> Unit,
     shapes: ListItemShapes,
     colors: ListItemColors,
+    modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     description: String = "",
     // 技能等的描述可能很长，完整内容在管理页看
@@ -248,12 +261,13 @@ private fun ExtensionListItem(
     if (onClick != null) {
         SegmentedListItem(
             onClick = onClick,
+            modifier = modifier,
             shapes = shapes,
             colors = colors,
             supportingContent = supporting,
             trailingContent = {
                 // 点击开关以外区域进入管理，只有点击开关才切换启用状态
-                Switch(checked = checked, onCheckedChange = onCheckedChange)
+                UISwitch(checked = checked, onCheckedChange = onCheckedChange)
             },
         ) {
             Text(title)
@@ -262,11 +276,12 @@ private fun ExtensionListItem(
         SegmentedListItem(
             checked = checked,
             onCheckedChange = onCheckedChange,
+            modifier = modifier,
             shapes = shapes,
             colors = colors,
             supportingContent = supporting,
             trailingContent = {
-                Switch(checked = checked, onCheckedChange = onCheckedChange)
+                UISwitch(checked = checked, onCheckedChange = onCheckedChange)
             },
         ) {
             Text(title)
@@ -282,7 +297,7 @@ private fun ManageButton(onClick: () -> Unit) {
             .padding(top = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
-        FilledTonalButton(onClick = onClick) {
+        FilledTonalButton(onClick = onClick, shape = uiButtonShape()) {
             Icon(
                 imageVector = HugeIcons.Settings03,
                 contentDescription = null,
@@ -302,6 +317,7 @@ fun ExtensionEmptyState(
     onAction: (() -> Unit)? = null,
     icon: ImageVector = HugeIcons.Package,
 ) {
+    val heroShape = if (hasUICustomShapes()) MaterialTheme.shapes.extraLarge else MaterialShapes.Cookie9Sided.toShape()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -314,7 +330,7 @@ fun ExtensionEmptyState(
                 .size(96.dp)
                 .background(
                     color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = MaterialShapes.Cookie9Sided.toShape(),
+                    shape = heroShape,
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -345,7 +361,7 @@ fun ExtensionEmptyState(
             }
         }
         if (buttonText != null && onAction != null) {
-            FilledTonalButton(onClick = onAction) {
+            FilledTonalButton(onClick = onAction, shape = uiButtonShape()) {
                 Icon(
                     imageVector = HugeIcons.Link01,
                     contentDescription = null,

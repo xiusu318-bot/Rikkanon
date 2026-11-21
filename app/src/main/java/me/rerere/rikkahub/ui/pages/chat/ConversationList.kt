@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.pages.chat
 
+import me.rerere.rikkahub.ui.pages.extensions.plugin.uiSpec
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Folder01
 import me.rerere.hugeicons.stroke.Forward02
@@ -24,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import kotlinx.coroutines.launch
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -48,6 +50,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import me.rerere.rikkahub.ui.custom.colorOr
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.itemKey
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -130,19 +134,38 @@ fun ColumnScope.ConversationList(
     ) {
         if (conversations.itemCount == 0) {
             item {
+                // 界面自定义的接入点：ui.slot("conversation_empty", ...)；没写时绘制原版（样式可用 ui.style("conversation_empty")）
+                me.rerere.rikkahub.ui.custom.UISlot(name = "conversation_empty") {
+                val uiStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("conversation_empty")
+                val scheme = MaterialTheme.colorScheme
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                        .padding(
+                            horizontal = (uiStyle?.marginHorizontalDp ?: 16f).dp,
+                            vertical = (uiStyle?.marginVerticalDp ?: 16f).dp,
+                        ),
+                    shape = me.rerere.rikkahub.ui.custom.uiCornerShape((uiStyle?.cornerDp ?: 8f).dp),
+                    color = uiStyle.colorOr({ it.background }, scheme, scheme.surfaceContainerLow),
+                    border = uiStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+                        androidx.compose.foundation.BorderStroke(
+                            it.dp,
+                            uiStyle.colorOr({ s -> s.borderColor }, scheme, scheme.outlineVariant),
+                        )
+                    },
                 ) {
                     Text(
                         text = stringResource(id = R.string.chat_page_no_conversations),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(16.dp)
+                        style = MaterialTheme.typography.bodyLarge.let { st ->
+                            uiStyle?.fontSizeSp?.let { st.copy(fontSize = it.sp) } ?: st
+                        },
+                        color = uiStyle.colorOr({ it.color }, scheme, scheme.onSurface),
+                        modifier = Modifier.padding(
+                            horizontal = (uiStyle?.paddingHorizontalDp ?: 16f).dp,
+                            vertical = (uiStyle?.paddingVerticalDp ?: 16f).dp,
+                        )
                     )
+                }
                 }
             }
         }
@@ -376,154 +399,289 @@ private fun ConversationItem(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val focusManager = LocalFocusManager.current
+    // 界面自定义 ui.style("conversation_item")；未设置时为 null，各值与原版相同
+    val uiStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("conversation_item")
+    val scheme = MaterialTheme.colorScheme
+    val itemShape = uiStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+        ?: if (me.rerere.rikkahub.ui.custom.hasUICustomShapes()) MaterialTheme.shapes.medium else RoundedCornerShape(50f)
     val backgroundColor = if (selected) {
-        MaterialTheme.colorScheme.surfaceColorAtElevation(8.dp)
+        scheme.surfaceColorAtElevation(8.dp)
     } else {
-        Color.Transparent
+        uiStyle.colorOr({ it.background }, scheme, Color.Transparent)
     }
     var showDropdownMenu by remember {
         mutableStateOf(false)
     }
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(50f))
-            .combinedClickable(
-                interactionSource = interactionSource,
-                indication = LocalIndication.current,
-                onClick = { onClick(conversation) },
-                onLongClick = {
-                    // Also clear chat input focus when the drawer is permanently visible.
-                    focusManager.clearFocus(force = true)
-                    showDropdownMenu = true
-                }
+    val newMessageTitle = stringResource(id = R.string.chat_page_new_message)
+    // 界面自定义的接入点：主题可用 ui.slot("conversation_item", ...) 接管整个条目；没写时绘制下面的原版
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = "conversation_item",
+        data = mapOf(
+            "id" to conversation.id,
+            "title" to conversation.title.ifBlank { newMessageTitle },
+            "pinned" to conversation.isPinned,
+            "selected" to selected,
+            "loading" to loading,
+            "updatedAt" to conversation.updateAt.toEpochMilli(),
+            "children" to childCount,
+            "childrenExpanded" to childrenExpanded,
+        ),
+        actions = mapOf(
+            "open" to { onClick(conversation) },
+            "menu" to {
+                focusManager.clearFocus(force = true)
+                showDropdownMenu = true
+            },
+            "toggle_children" to onToggleChildren,
+        ),
+        modifier = modifier,
+        whenReplaced = {
+            ConversationItemMenu(
+                expanded = showDropdownMenu,
+                onDismiss = { showDropdownMenu = false },
+                conversation = conversation,
+                onPin = onPin,
+                onRegenerateTitle = onRegenerateTitle,
+                onMoveToAssistant = onMoveToAssistant,
+                onMoveToFolder = onMoveToFolder,
+                onDelete = onDelete,
             )
-            .background(backgroundColor),
+        },
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Box(
+            modifier = modifier
+                .clip(itemShape)
+                .combinedClickable(
+                    interactionSource = interactionSource,
+                    indication = LocalIndication.current,
+                    onClick = { onClick(conversation) },
+                    onLongClick = {
+                        // Also clear chat input focus when the drawer is permanently visible.
+                        focusManager.clearFocus(force = true)
+                        showDropdownMenu = true
+                    }
+                )
+                .background(backgroundColor),
         ) {
-            Text(
-                text = conversation.title.ifBlank { stringResource(id = R.string.chat_page_new_message) },
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        horizontal = (uiStyle?.paddingHorizontalDp ?: 12f).dp,
+                        vertical = (uiStyle?.paddingVerticalDp ?: 6f).dp,
+                    ),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = conversation.title.ifBlank { stringResource(id = R.string.chat_page_new_message) },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                    color = uiStyle?.color?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme) } ?: Color.Unspecified,
+                    fontSize = uiStyle?.fontSizeSp?.sp ?: androidx.compose.ui.unit.TextUnit.Unspecified,
+                )
 
-            if (childCount > 0) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier
-                        .padding(end = 4.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable { onToggleChildren() },
-                ) {
-                    Text(
-                        text = "${if (childrenExpanded) "▾" else "▸"} $childCount",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                if (childCount > 0) {
+                    ConversationChildrenToggle(
+                        childCount = childCount,
+                        expanded = childrenExpanded,
+                        onToggle = onToggleChildren,
+                        modifier = Modifier.padding(end = 4.dp),
                     )
                 }
-            }
 
-            // 置顶图标
-            AnimatedVisibility(conversation.isPinned) {
-                Icon(
-                    imageVector = HugeIcons.Pin,
-                    contentDescription = "Pinned",
-                    modifier = Modifier.size(12.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-            AnimatedVisibility(loading) {
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.extendColors.green6)
-                        .size(4.dp)
-                        .semantics {
-                            contentDescription = "Loading"
-                        }
-                )
-            }
-            DropdownMenu(
-                expanded = showDropdownMenu,
-                onDismissRequest = { showDropdownMenu = false },
-            ) {
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            if (conversation.isPinned) stringResource(R.string.unpin_chat) else stringResource(R.string.pin_chat)
-                        )
-                    },
-                    onClick = {
-                        onPin(conversation)
-                        showDropdownMenu = false
-                    },
-                    leadingIcon = {
-                        Icon(
-                            if (conversation.isPinned) HugeIcons.PinOff else HugeIcons.Pin,
-                            null
-                        )
-                    }
-                )
-
-                DropdownMenuItem(
-                    text = {
-                        Text(stringResource(id = R.string.chat_page_regenerate_title))
-                    },
-                    onClick = {
-                        onRegenerateTitle(conversation)
-                        showDropdownMenu = false
-                    },
-                    leadingIcon = {
-                        Icon(HugeIcons.Refresh01, null)
-                    }
-                )
-
-                DropdownMenuItem(
-                    text = {
-                        Text(stringResource(R.string.chat_page_move_to_assistant))
-                    },
-                    onClick = {
-                        onMoveToAssistant(conversation)
-                        showDropdownMenu = false
-                    },
-                    leadingIcon = {
-                        Icon(HugeIcons.Forward02, null, modifier = Modifier.mirrorForRtl())
-                    }
-                )
-
-                DropdownMenuItem(
-                    text = {
-                        Text(stringResource(R.string.chat_page_move_to_folder))
-                    },
-                    onClick = {
-                        onMoveToFolder(conversation)
-                        showDropdownMenu = false
-                    },
-                    leadingIcon = {
-                        Icon(HugeIcons.Folder01, null)
-                    }
-                )
-
-                DropdownMenuItem(
-                    text = {
-                        Text(stringResource(id = R.string.chat_page_delete))
-                    },
-                    onClick = {
-                        onDelete(conversation)
-                        showDropdownMenu = false
-                    },
-                    leadingIcon = {
-                        Icon(HugeIcons.Delete01, null)
-                    }
+                // 置顶图标
+                AnimatedVisibility(conversation.isPinned) {
+                    Icon(
+                        imageVector = HugeIcons.Pin,
+                        contentDescription = "Pinned",
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                AnimatedVisibility(loading) {
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(MaterialTheme.extendColors.green6)
+                            .size(4.dp)
+                            .semantics {
+                                contentDescription = "Loading"
+                            }
+                    )
+                }
+                ConversationItemMenu(
+                    expanded = showDropdownMenu,
+                    onDismiss = { showDropdownMenu = false },
+                    conversation = conversation,
+                    onPin = onPin,
+                    onRegenerateTitle = onRegenerateTitle,
+                    onMoveToAssistant = onMoveToAssistant,
+                    onMoveToFolder = onMoveToFolder,
+                    onDelete = onDelete,
                 )
             }
         }
     }
 }
+
+@Composable
+private fun ConversationChildrenToggle(
+    childCount: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .clickable { onToggle() },
+    ) {
+        Text(
+            text = "${if (expanded) "▾" else "▸"} $childCount",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+        )
+    }
+}
+
+@Composable
+private fun ConversationItemMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    conversation: Conversation,
+    onPin: (Conversation) -> Unit,
+    onRegenerateTitle: (Conversation) -> Unit,
+    onMoveToAssistant: (Conversation) -> Unit,
+    onMoveToFolder: (Conversation) -> Unit,
+    onDelete: (Conversation) -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+    ) {
+        DropdownMenuItem(
+            text = {
+                Text(
+                    if (conversation.isPinned) stringResource(R.string.unpin_chat) else stringResource(R.string.pin_chat)
+                )
+            },
+            onClick = {
+                onPin(conversation)
+                onDismiss()
+            },
+            leadingIcon = {
+                Icon(
+                    if (conversation.isPinned) HugeIcons.PinOff else HugeIcons.Pin,
+                    null
+                )
+            }
+        )
+
+        DropdownMenuItem(
+            text = {
+                Text(stringResource(id = R.string.chat_page_regenerate_title))
+            },
+            onClick = {
+                onRegenerateTitle(conversation)
+                onDismiss()
+            },
+            leadingIcon = {
+                Icon(HugeIcons.Refresh01, null)
+            }
+        )
+
+        DropdownMenuItem(
+            text = {
+                Text(stringResource(R.string.chat_page_move_to_assistant))
+            },
+            onClick = {
+                onMoveToAssistant(conversation)
+                onDismiss()
+            },
+            leadingIcon = {
+                Icon(HugeIcons.Forward02, null, modifier = Modifier.mirrorForRtl())
+            }
+        )
+
+        DropdownMenuItem(
+            text = {
+                Text(stringResource(R.string.chat_page_move_to_folder))
+            },
+            onClick = {
+                onMoveToFolder(conversation)
+                onDismiss()
+            },
+            leadingIcon = {
+                Icon(HugeIcons.Folder01, null)
+            }
+        )
+
+        DropdownMenuItem(
+            text = {
+                Text(stringResource(id = R.string.chat_page_delete))
+            },
+            onClick = {
+                onDelete(conversation)
+                onDismiss()
+            },
+            leadingIcon = {
+                Icon(HugeIcons.Delete01, null)
+            }
+        )
+
+        val pluginHost = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
+        val convMenuMounts = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginUiMounts("conversation.menu")
+        val pluginScope = androidx.compose.runtime.rememberCoroutineScope()
+        val toaster = me.rerere.rikkahub.ui.context.LocalToaster.current
+        convMenuMounts.forEach { (rt, reg) ->
+            val spec = reg.uiSpec
+            val title = (spec["title"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                ?: (spec["text"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                ?: rt.manifest.name
+            val iconName = (spec["icon"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            val openPath = (spec["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            DropdownMenuItem(
+                text = { Text(title) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = me.rerere.rikkahub.ui.pages.extensions.plugin.resolvePluginIcon(iconName),
+                        contentDescription = null,
+                    )
+                },
+                onClick = {
+                    onDismiss()
+                    val payload = kotlinx.serialization.json.buildJsonObject {
+                        put("conversationId", kotlinx.serialization.json.JsonPrimitive(conversation.id.toString()))
+                        put("assistantId", kotlinx.serialization.json.JsonPrimitive(conversation.assistantId.toString()))
+                        put("title", kotlinx.serialization.json.JsonPrimitive(conversation.title))
+                    }
+                    if (!openPath.isNullOrBlank()) {
+                        me.rerere.rikkahub.data.plugin.PluginUiEvents.emit(
+                            me.rerere.rikkahub.data.plugin.PluginUiEvent.OpenPanel(
+                                pluginId = rt.id,
+                                path = openPath,
+                                presentation = (spec["presentation"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "sheet",
+                                argsJson = payload.toString(),
+                                title = title,
+                            )
+                        )
+                    } else {
+                        pluginScope.launch {
+                            runCatching {
+                                pluginHost.callUiHandler(rt.id, reg.handlerId, payload)
+                            }.onFailure { e ->
+                                pluginHost.recordError(rt.id, e)
+                                toaster.show(e.message ?: e.javaClass.name, type = me.rerere.ui.toast.ToastType.Error)
+                            }
+                        }
+                    }
+                },
+            )
+        }
+    }
+}
+

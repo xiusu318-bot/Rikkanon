@@ -1,236 +1,143 @@
 # 消息生成链路文档
 
-本文档描述从用户发送消息到 AI 回复完成的完整数据流，涉及的核心类与处理阶段。
+本文档描述从用户发送消息到 AI 回复与连续工具调用完成的完整数据流、核心类职责及扩展介入点。
 
 ## 核心类概览
 
-| 类                          | 职责                          |
-|----------------------------|-----------------------------|
-| `ChatService`              | 入口与编排层，管理所有会话，对外暴露操作接口      |
-| `ConversationSession`      | 单个会话的状态容器（引用计数、生成 Job、处理状态） |
-| `GenerationHandler`        | 核心生成逻辑，驱动 Step 循环与工具调用      |
-| `InputMessageTransformer`  | 发送给 API 前对消息列表的变换管道         |
-| `OutputMessageTransformer` | 接收到流式 chunk 后对消息列表的变换管道     |
+| 类 | 职责 |
+|---|---|
+| `ChatService` | 编排入口，管理活跃会话、中途插话（Steer）、审批恢复、子代理唤醒与增量落库 |
+| `ConversationSession` | 单个会话的运行时状态容器（引用计数、生成 `Job`、待注入插话队列、中断收尾） |
+| `GenerationLoop` | 核心多步生成引擎（`Flow<GenerationChunk>`），驱动请求组装、流式解码与并发工具执行 |
+| `PromptInjectionTransformer` / `LorebookScanEngine` | 高级提示词预设轨道编排、JSON 块直通、`@D` 深度注入与世界书增量扫描 |
+| `SecretKeySanitizer` | 密钥代名词出入站安全阀门（外部工具明文展开、内部工具隔离、多编码与拆字节探测脱敏） |
+| `PluginBridge` / `PluginInterceptor` | JS 插件工具桥接（含 `ctx.progress` / `ctx.askUser` 与暂停计时）及分层请求/响应 Hook |
 
 ---
 
 ## 完整生成链路
 
-```
-用户发送消息
+```text
+用户发送消息（或 Steer 免暂停插话）
     │
     ▼
 ChatService.sendMessage()
-    ├── 取消上一个 Job（cancel + join）
-    ├── finishInterruptedPendingTools()  // 补全上次被打断的 Tool 输出
-    ├── preprocessUserInputParts()       // 对用户文本执行助手 regex 替换
-    ├── 将 UIMessage(USER) 追加到 Conversation.messageNodes
-    └── handleMessageComplete()
+    ├── [若当前正在执行工具且支持 Steer] 入队待注入插话，下一 Step 自动合入上下文
+    ├── 否则取消上一个 Job（cancel + join）并收尾未完成部件（finalizeInterruptedParts）
+    ├── 用户文本预处理：input.beforeSave 插件 Hook + 助手正则（scope=USER）
+    ├── 追加 UIMessage(USER) 到 Conversation.messageNodes 并保存初始检查点
+    └── 启动 GenerationLoop.generateText()  ← Flow<GenerationChunk>
             │
-            ▼
-        GenerationHandler.generateText()   ← Flow<GenerationChunk>
-            │  (最多 maxSteps=256 轮循环)
+            ├─ Step 循环（支持单轮步数上限与连续工具链）
             │
-            ├─ [若无待处理 Tool] generateInternal()
-            │       ├── 构建 internalMessages
-            │       │       ├── System message（系统提示 + 记忆 + tool.systemPrompt）
-            │       │       ├── limitContext() 按 contextMessageLimit 阶梯式裁剪历史
-            │       │       └── InputTransformers 管道
-            │       ├── 构建 TextGenerationParams
-            │       └── 调用 Provider
-            │               ├── stream=true → providerImpl.streamText() 逐 chunk emit
-            │               └── stream=false → providerImpl.generateText() 一次返回
+            ├─ 1. 组装请求消息与参数
+            │       ├── chat.history 插件 Hook（纯真实对话历史）
+            │       ├── limitContext() 上下文窗口裁剪
+            │       ├── 世界书扫描（LorebookScanEngine 链式哈希增量扫描 + lorebook.activated Hook）
+            │       ├── 高级提示词预设轨道组装（preset.beforeAssemble Hook + @D 注入 + JSON 块直通）
+            │       ├── prompt.assembled 插件 Hook
+            │       ├── InputMessageTransformer 管道（宏展开、文档转文本、OCR、工作区提示、请求期正则）
+            │       └── messages.beforeSend & params.beforeSend 插件 Hook
             │
-            ├─ 每次收到 chunk → OutputTransformers.transforms() (实时)
-            │                  → OutputTransformers.visualTransforms() → emit GenerationChunk
+            ├─ 2. 调用 Provider（经 PluginInterceptor 原始 HTTP/SSE 中间件）
+            │       ├── 流式分片 → onStream 插件流处理器 → StreamChunkHandler 合并进 UIMessage
+            │       ├── OutputTransformers.transforms() + response.visual Hook + visualTransforms()
+            │       └── 单步输出完毕 → onGenerationFinish() + response.finish Hook
             │
-            ├─ 生成完毕 → OutputTransformers.visualTransforms()
-            │           → OutputTransformers.onGenerationFinish()
-            │           → 设置 message.finishedAt
+            ├─ 3. 检查待执行工具调用（ToolCall）
+            │       ├── 无未执行工具且无 Steer 插话 → 结束本轮循环
+            │       ├── 需人工或主代理审批（approval.decide Hook / 双轨审批策略）
+            │       │       → 标记 Pending，发出 checkpoint = true 增量落库（若为子代理则通知主代理）并挂起等待审批
+            │       └── 免审批或已批准 → 进入并发工具执行阶段
             │
-            ├─ 检查最新消息中是否有未执行 Tool
-            │       ├── 无 Tool → break（生成结束）
-            │       ├── 有 Tool 且需要审批 → 设为 ToolApprovalState.Pending
-            │       │                        → emit → break（等待用户审批）
-            │       └── 有 Tool 且已审批 → 执行工具（见下）
-            │
-            ├─ 工具执行
-            │       ├── Denied  → 输出 {"error": "denied by user"}
-            │       ├── Answered → 直接使用用户提供的答案
-            │       └── Auto / Approved → toolDef.execute(args)
-            │               ├── 若输出超 32KB 且有 shell 权限 → 截断并写入文件
-            │               └── CancellationException 必须向上传播（不能吞掉）
-            │
-            └─ 将执行结果写回 messages → emit → 继续下一 Step
-                    (Tool 结果内联在 ASSISTANT 消息的 parts 中，不创建 TOOL 角色消息)
+            └─ 4. 并发工具执行与单步检查点落库
+                    ├── Step 启动边界发出 GenerationChunk.Messages(checkpoint = true) 增量写入尾部节点
+                    ├── 同批工具 async 并发执行（通过 Channel.CONFLATED liveUpdates 安全转发 ctx.progress / ctx.askUser）
+                    │       ├── tool.before 插件 Hook
+                    │       ├── SecretKeySanitizer 入站代名词展开（仅限外部/工作区工具，排除 conversation_* / memory_* / ask_*）
+                    │       ├── 执行工具（等待 ctx.askUser 期间通过 PluginCallPause 暂停插件调用超时计时）
+                    │       ├── SecretKeySanitizer 出站逐字段解包脱敏（含拆字节/编码探测抹除与零泄密格式诊断）
+                    │       ├── 超 32KB 输出截断并转存 filesDir/tool_outputs/{toolCallId}.txt（search_web 除外）
+                    │       └── tool.after 插件 Hook
+                    ├── 写回工具结果（内联在 ASSISTANT 消息 parts 中）并发出 checkpoint = true 单事务增量更新尾部节点
+                    ├── 若工具均声明 endTurn = true 且无 Steer 插话 → 结束本轮循环
+                    └── 合入期间收到的 Steer 用户插话 → 继续下一 Step
 
     ▼
-onCompletion（Flow 结束或取消）
-    ├── cancelLiveUpdateNotification()
-    ├── 对所有消息 finishReasoning()（兜底）
-    └── 若 App 不在前台 → sendGenerationDoneNotification()
-
-    ▼
-onSuccess
-    ├── saveConversation()
-    ├── generateTitle()    （异步，使用 titleModel）
-    └── generateSuggestion()（异步，使用 suggestionModel）
+onCompletion（正常完成 / 手动停止 / 异常中断）
+    ├── 清理未决的 PluginToolLiveAskRegistry 提问与后台通知
+    ├── finalizeInterruptedParts()：仅对末尾未执行完的工具补写 cancelled/interrupted 或剥离流式残片（绝不连坐删除整条已完成前置步骤的消息）
+    ├── 兜底转存残留 data: Base64 图片部件（避免落库校验失败）并执行最终 saveConversation()
+    └── 按设置触发异步标题生成（titleModel）、建议词生成（suggestionModel）与可选记忆整理
 ```
 
 ---
 
-## 阶段一：用户消息预处理
+## 阶段一：InputMessage 变换与高级提示词组装
 
-**入口**：`ChatService.preprocessUserInputParts()`
-
-对用户输入的 `UIMessagePart.Text` 执行 `Assistant.replaceRegexes(scope=USER)`，即助手配置中 `AffectScope.USER`
-的正则替换规则，用于规范化或脱敏输入文本。非文本 Part（图片、文档等）不参与处理。
-
----
-
-## 阶段二：InputMessage 变换管道
-
-**时机**：`generateInternal()` 构建 `internalMessages` 后，发送给 API 前调用。
-
-变换器按顺序执行（`fold`），每个变换器接收上一个的输出：
-
-| 顺序 | 变换器                            | 说明                                       |
-|----|--------------------------------|------------------------------------------|
-| 1  | `TimeReminderTransformer`      | 在系统消息中注入当前时间/日期                          |
-| 2  | `PromptInjectionTransformer`   | 注入 ModeInjection 和 Lorebook 触发的提示词       |
-| 3  | `PlaceholderTransformer`       | 替换消息中的 `{{placeholder}}` 占位符             |
-| 4  | `DocumentAsPromptTransformer`  | 将文档附件转换为文本内容注入消息                         |
-| 5  | `OcrTransformer`               | 对图片 Part 执行 OCR，将识别结果附加为文本               |
-| 6  | `TemplateTransformer`          | 用 Pebble 模板引擎渲染消息（可访问 time/date/role 变量） |
-| 7  | `WorkspaceReminderTransformer` | 若对话关联 Workspace，注入工作区路径提示                |
-
-`PromptInjectionTransformer` 支持四种注入位置：
-
-- `BEFORE_SYSTEM_PROMPT` / `AFTER_SYSTEM_PROMPT` — 插入到系统消息前后
-- `TOP_OF_CHAT` — 插入到第一条用户消息前
-- `BOTTOM_OF_CHAT` — 插入到最后一条消息前
-- `AT_DEPTH` — 从最新消息往前数第 N 条处插入
+1. **高级提示词预设与世界书（`PromptInjectionTransformer` & `LorebookScanEngine`）**：
+   - 开启高级提示词模式时，系统提示词、长期记忆、工作区/工具提示、世界书（前后置、`@D` 深度、`{{outlet::}}` 锚点）与对话历史作为平权模块按预设轨道排列；
+   - 自定义 JSON 模式块保持 `rawJson` 与 `isSynthetic = true` 独立边界，Provider 层仅合并真实对话历史的相邻同角色消息，保护显式 `cache_control` 缓存断点。
+2. **常规 InputTransformers**：
+   - `TimeReminderTransformer`、`PlaceholderTransformer`（含插件 `registerMacro` / `registerPromptBlock` 展开）、`DocumentAsPromptTransformer`、`OcrTransformer`、`TemplateTransformer`、`WorkspaceReminderTransformer`，以及「仅修改发出」阶段的深度过滤正则。
 
 ---
 
-## 阶段三：OutputMessage 变换管道
+## 阶段二：OutputMessage 变换管道
 
-分三个时机调用：
-
-| 时机                  | 方法                     | 说明                             |
-|---------------------|------------------------|--------------------------------|
-| 流式 chunk 到达时（实时）    | `transforms()`         | 真实变换，用于内部消息存储                  |
-| 流式 chunk 到达时（UI 展示） | `visualTransforms()`   | 视觉变换，不影响实际存储（如流式 think tag 转换） |
-| 生成完全结束后             | `onGenerationFinish()` | 最终后处理，如 base64 图片落盘            |
-
-当前 Output 变换器：
-
-| 变换器                                 | transforms            | visualTransform               | onGenerationFinish |
-|-------------------------------------|-----------------------|-------------------------------|--------------------|
-| `ThinkTagTransformer`               | —                     | ✓（`<think>` → Reasoning Part） | ✓（最终提取）            |
-| `Base64ImageToLocalFileTransformer` | —                     | —                             | ✓（base64 → 本地文件）   |
-| `RegexOutputTransformer`            | ✓（助手 regex OUTPUT 替换） | —                             | —                  |
+| 时机 | 方法 | 说明 |
+|---|---|---|
+| 流式分片到达时（存储态） | `transforms()` | 实时变换内部消息（如请求/输出正则处理） |
+| 流式分片到达时（显示态） | `visualTransforms()` | 仅影响 UI 渲染、不改数据库原文（如 `<think>` 提取、「仅修改显示」正则、插件 `response.visual`） |
+| 单步生成结束时 | `onGenerationFinish()` | 最终落盘处理（如 `Base64ImageToLocalFileTransformer`、「直接修改正文」单次落库正则、插件 `response.finish`） |
 
 ---
 
-## 阶段四：工具系统
+## 阶段三：工具系统与双轨审批
 
-### 工具注册顺序
+### 工具来源（`ChatToolFactory` & `PluginBridge`）
+1. **联网搜索工具**（`SearchTools`：`search_web`、`scrape_web`）
+2. **本地工具**（`LocalTools`：JS 计算、时间、剪贴板、TTS、`ask_user`、`ask_key` 密钥询问、屏幕时间等）
+3. **对话与子代理工具**（`ConversationTools`：历史对话检索，以及子代理 0~4 级派发/查看/追问/打断/审批/销毁工具 `conversation_*`）
+4. **工作区工具**（`WorkspaceTools`：`read_file`、`write_file`、`edit_file`、`shell`、持久化交互式多终端 `terminal`，支持「启用」与「审批」分离配置）
+5. **Agent Skills 工具**（`SkillsTools`，含内置、本地与插件声明的 Skills）
+6. **MCP 工具**（`mcp__{serverName}__{toolName}`）
+7. **插件注册工具**（`PluginBridge.createTools`，支持动态 `parameters(ctx)` / `systemPrompt(ctx)`、`display` 媒体/气泡渲染、`endTurn` 与中途挂起提问 `ctx.askUser`）
+8. **长期记忆工具**（`MemoryTools`）
 
-`handleMessageComplete()` 中按如下顺序构建工具列表：
-
-1. **Search Tools**（`createSearchTools`）— 当 `settings.enableWebSearch = true` 时
-2. **Local Tools**（`localTools.getTools(assistant.localTools)`）— 按助手配置启用：
-  - `JavascriptEngine`：执行 JS 代码片段
-  - `TimeInfo`：获取当前时间
-  - `Clipboard`：读写剪贴板
-  - `Tts`：文字转语音
-  - `AskUser`：向用户提问（需审批）
-  - `ScreenTime`：获取屏幕使用时间
-3. **Conversation Tools**（`createConversationTools`）— `enableRecentChatsReference = true` 时，查询历史对话
-4. **Workspace Tools**（`createWorkspaceToolsIfReady`）— Workspace Shell 就绪时注入，含 `workspace_shell`
-5. **Skill Tools**（`createSkillTools`）— 助手启用的 Skill 列表
-6. **MCP Tools** — 所有已连接 MCP 服务器的工具，命名格式 `mcp__{serverName}__{toolName}`
-7. **Memory Tools**（`buildMemoryTools`，内置于 GenerationHandler）— `enableMemory = true` 时，支持记忆的增删改
-
-### 工具审批状态机
-
-```
-Auto（默认）
-    │ toolDef.needsApproval() == true
-    ▼
-Pending ──── 用户操作 ────► Approved → 执行工具
-                       ──► Denied   → 返回拒绝错误
-                       ──► Answered → 使用用户提供的文本作为结果
-```
-
-审批流程由 `ChatService.handleToolApproval()` 触发，更新状态后重新调用 `handleMessageComplete()`，`GenerationHandler` 检测到
-`canResumeExecution` 的 Tool 后直接跳过本轮生成，进入工具执行阶段。
-
-### 工具输出截断
-
-当 Workspace Shell 工具可用且工具输出超过 **32KB** 时，输出被截断：
-
-- 前 4KB 保留在消息中
-- 完整输出写入 `filesDir/tool_outputs/{toolCallId}.txt`
-- 消息中附带 shell 读取指令提示
-
-`search_web` 不参与截断：结果体积由用户设置的结果数决定，且结果列表 UI 与引用跳转依赖完整的 JSON。
-
----
-
-## 阶段五：会话生命周期管理
-
-`ConversationSession` 使用**原子引用计数**管理内存生命周期：
-
-- `acquire()` / `release()` — UI 页面打开/关闭时调用
-- `refCount == 0 && !isGenerating` — 触发 5 秒空闲超时后，`ChatService.removeSession()` 清理 session
-- `setJob()` — 设置生成 Job，完成后自动置 null 并触发空闲检查
-
----
-
-## 阶段六：后台通知
-
-| 通知类型                 | 触发条件           | Channel                                    |
-|----------------------|----------------|--------------------------------------------|
-| Live Update（ongoing） | 生成过程中且 App 在后台 | `CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID` |
-| 生成完成                 | 生成结束且 App 在后台  | `CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID`   |
-
-Live Update 通知内容根据当前生成状态动态更新：
-
-- 工具执行中 → 显示工具名与输入预览
-- 推理中（Reasoning）→ 显示推理内容片段
-- 写回复中 → 显示文本内容片段
+### 双轨审批与增量持久化
+- 主对话工具支持免审批或人类用户 UI 审批；子代理工具支持逐工具配置 **`[用户]`** 与 **`[主代理]`** 双轨审批（主代理可通过 `conversation_approve` 审批子代理挂起工具）。
+- **单步增量落库（`ConversationRepository.checkpointConversation`）**：每次工具启动与完成时在单事务内仅 `REPLACE` 尾部脏 `MessageNode` 并更新会话 `update_at`；配合 `MessageNodeDAO` 针对超 2MB 节点的 256K `substr` 分片流式读取，确保超长多步工具链既不触发 `SQLiteBlobTooBigException`，也不会因进程被杀丢失已跑完的步骤。
 
 ---
 
 ## 关键文件路径
 
-```
+```text
 app/src/main/java/me/rerere/rikkahub/
 ├── service/
-│   ├── ChatService.kt              # 编排入口
-│   └── ConversationSession.kt      # 会话状态容器
-└── data/ai/
-    ├── GenerationHandler.kt        # 核心生成逻辑
-    ├── transformers/
-    │   ├── Transformer.kt          # 接口定义与扩展函数
-    │   ├── PromptInjectionTransformer.kt
-    │   ├── TemplateTransformer.kt
-    │   ├── TimeReminderTransformer.kt
-    │   ├── ThinkTagTransformer.kt
-    │   ├── RegexOutputTransformer.kt
-    │   ├── DocumentAsPromptTransformer.kt
-    │   ├── OcrTransformer.kt
-    │   ├── Base64ImageToLocalFileTransformer.kt
-    │   ├── PlaceholderTransformer.kt
-    │   └── WorkspaceReminderTransformer.kt
-    └── tools/
-        ├── SearchTools.kt
-        ├── ConversationTools.kt
-        ├── WorkspaceTools.kt
-        ├── SkillsTools.kt
-        ├── MemoryTools.kt
-        └── local/
-            └── LocalTools.kt       # 本地工具注册表
+│   ├── ChatService.kt                    # 会话编排、Steer 插话、子代理联动与保存入口
+│   └── ConversationSession.kt            # 会话状态容器与中断收尾
+├── data/
+│   ├── ai/
+│   │   ├── GenerationLoop.kt             # 多步生成主循环与并发工具执行
+│   │   ├── transformers/
+│   │   │   ├── Transformer.kt
+│   │   │   ├── PromptInjectionTransformer.kt
+│   │   │   ├── LorebookScanEngine.kt
+│   │   │   └── ...
+│   │   └── tools/
+│   │       ├── ChatToolFactory.kt
+│   │       ├── ConversationTools.kt
+│   │       ├── WorkspaceTools.kt
+│   │       ├── SearchTools.kt
+│   │       ├── SkillsTools.kt
+│   │       ├── MemoryTools.kt
+│   │       └── local/
+│   ├── secret/
+│   │   └── SecretKeySanitizer.kt         # 密钥代名词出入站阀门与防拆字节脱敏
+│   ├── plugin/
+│   │   └── PluginBridge.kt               # 插件工具、Hook 与流处理器桥接
+│   └── repository/
+│       └── ConversationRepository.kt     # 单步 checkpoint 落库、冷启动恢复与超 2MB 分片读取
 ```

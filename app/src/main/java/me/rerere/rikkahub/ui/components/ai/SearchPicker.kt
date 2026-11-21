@@ -79,6 +79,14 @@ import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.ui.components.ui.AutoAIIcon
 import me.rerere.rikkahub.ui.context.LocalNavController
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiConnectedButtonShapes
+import me.rerere.rikkahub.ui.custom.uiSegmentedItemBorder
+import me.rerere.rikkahub.ui.custom.uiSegmentedListGap
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemColors
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemShapes
+import me.rerere.rikkahub.ui.custom.uiToggleButtonColors
 import me.rerere.rikkahub.ui.pages.setting.SearchAbilityTagLine
 import me.rerere.ui.components.ToggleSurface
 
@@ -98,8 +106,15 @@ fun SearchPickerButton(
     onUpdateSearchMode: (SearchMode) -> Unit,
     onUpdateSearchService: (Int) -> Unit,
     model: Model?,
+    externalShowSheet: Boolean = false,
+    onExternalDismiss: () -> Unit = {},
 ) {
     var showSearchPicker by remember { mutableStateOf(false) }
+    val sheetOpen = showSearchPicker || externalShowSheet
+    val dismissSheet = {
+        showSearchPicker = false
+        onExternalDismiss()
+    }
     val currentService = settings.searchServices.getOrNull(settings.searchServiceSelected)
 
     ToggleSurface(
@@ -139,48 +154,67 @@ fun SearchPickerButton(
         }
     }
 
-    if (showSearchPicker) {
-        ModalBottomSheet(
-            onDismissRequest = { showSearchPicker = false },
-            sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
-        ) {
-            var selectingProvider by remember { mutableStateOf(false) }
-            // 在服务商选择页时，返回键回到上一页而不是关闭 sheet
-            BackHandler(enabled = selectingProvider) {
-                selectingProvider = false
-            }
-            AnimatedContent(
-                targetState = selectingProvider,
-                transitionSpec = {
-                    if (targetState) {
-                        slideInHorizontally { it } + fadeIn() togetherWith
-                            slideOutHorizontally { -it } + fadeOut()
-                    } else {
-                        slideInHorizontally { -it } + fadeIn() togetherWith
-                            slideOutHorizontally { it } + fadeOut()
-                    }
-                },
-                label = "SearchPickerPage"
-            ) { selecting ->
-                if (selecting) {
-                    SearchProviderPicker(
-                        settings = settings,
-                        onUpdateSearchService = { index ->
-                            onUpdateSearchService(index)
-                            selectingProvider = false
-                        },
-                        onBack = { selectingProvider = false }
-                    )
+    if (sheetOpen) {
+        SearchPickerSheet(
+            enableSearch = enableSearch,
+            settings = settings,
+            onUpdateSearchMode = onUpdateSearchMode,
+            onUpdateSearchService = onUpdateSearchService,
+            model = model,
+            onDismissRequest = dismissSheet,
+        )
+    }
+}
+
+@Composable
+fun SearchPickerSheet(
+    enableSearch: Boolean,
+    settings: Settings,
+    onUpdateSearchMode: (SearchMode) -> Unit,
+    onUpdateSearchService: (Int) -> Unit,
+    model: Model?,
+    onDismissRequest: () -> Unit,
+) {
+    UIModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
+    ) {
+        var selectingProvider by remember { mutableStateOf(false) }
+        // 在服务商选择页时，返回键回到上一页而不是关闭 sheet
+        BackHandler(enabled = selectingProvider) {
+            selectingProvider = false
+        }
+        AnimatedContent(
+            targetState = selectingProvider,
+            transitionSpec = {
+                if (targetState) {
+                    slideInHorizontally { it } + fadeIn() togetherWith
+                        slideOutHorizontally { -it } + fadeOut()
                 } else {
-                    SearchPicker(
-                        enableSearch = enableSearch,
-                        settings = settings,
-                        onUpdateSearchMode = onUpdateSearchMode,
-                        model = model,
-                        onSelectProvider = { selectingProvider = true },
-                        onDismiss = { showSearchPicker = false }
-                    )
+                    slideInHorizontally { -it } + fadeIn() togetherWith
+                        slideOutHorizontally { it } + fadeOut()
                 }
+            },
+            label = "SearchPickerPage"
+        ) { selecting ->
+            if (selecting) {
+                SearchProviderPicker(
+                    settings = settings,
+                    onUpdateSearchService = { index ->
+                        onUpdateSearchService(index)
+                        selectingProvider = false
+                    },
+                    onBack = { selectingProvider = false }
+                )
+            } else {
+                SearchPicker(
+                    enableSearch = enableSearch,
+                    settings = settings,
+                    onUpdateSearchMode = onUpdateSearchMode,
+                    model = model,
+                    onSelectProvider = { selectingProvider = true },
+                    onDismiss = onDismissRequest,
+                )
             }
         }
     }
@@ -260,11 +294,15 @@ private fun SearchPicker(
         }
 
         // 连接式按钮组，选中项更宽并带图标
+        val btnStyle = uiComponentStyle("connected_button")
+        val btnColors = uiToggleButtonColors("connected_button", MaterialTheme.colorScheme.surfaceContainerHighest)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .selectableGroup(),
-            horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
+            horizontalArrangement = Arrangement.spacedBy(
+                btnStyle?.spacingDp?.coerceAtLeast(0f)?.dp ?: ButtonGroupDefaults.ConnectedSpaceBetween
+            ),
         ) {
             modes.fastForEachIndexed { index, mode ->
                 val selected = mode == currentMode
@@ -279,14 +317,8 @@ private fun SearchPicker(
                         .weight(weight)
                         .heightIn(min = 52.dp)
                         .semantics { role = Role.RadioButton },
-                    shapes = when (index) {
-                        0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                        modes.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                        else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                    },
-                    colors = ToggleButtonDefaults.colors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    ),
+                    shapes = uiConnectedButtonShapes(index = index, count = modes.size),
+                    colors = btnColors,
                     contentPadding = PaddingValues(horizontal = 8.dp),
                 ) {
                     AnimatedVisibility(
@@ -326,8 +358,11 @@ private fun SearchPicker(
         ) {
             SegmentedListItem(
                 onClick = onSelectProvider,
-                shapes = ListItemDefaults.segmentedShapes(index = 0, count = 1),
-                modifier = Modifier.padding(top = 12.dp),
+                shapes = uiSegmentedListItemShapes(index = 0, count = 1),
+                colors = uiSegmentedListItemColors(),
+                modifier = Modifier
+                    .padding(top = 12.dp)
+                    .uiSegmentedItemBorder(0, 1),
                 leadingContent = {
                     if (currentService != null) {
                         AutoAIIcon(
@@ -406,14 +441,16 @@ private fun SearchProviderPicker(
                 .fillMaxSize()
                 .selectableGroup(),
             contentPadding = PaddingValues(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
+            verticalArrangement = Arrangement.spacedBy(uiSegmentedListGap()),
         ) {
             itemsIndexed(services) { index, service ->
                 val selected = settings.searchServiceSelected == index
                 SegmentedListItem(
                     selected = selected,
                     onClick = { onUpdateSearchService(index) },
-                    shapes = ListItemDefaults.segmentedShapes(index = index, count = services.size),
+                    modifier = Modifier.uiSegmentedItemBorder(index, services.size),
+                    shapes = uiSegmentedListItemShapes(index = index, count = services.size),
+                    colors = uiSegmentedListItemColors(),
                     leadingContent = {
                         AutoAIIcon(
                             name = service.displayName,

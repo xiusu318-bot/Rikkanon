@@ -59,6 +59,7 @@ import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.canResumeToolExecution
+import me.rerere.ai.ui.finalizeInterruptedParts
 import me.rerere.ai.ui.finishPendingTools
 import me.rerere.ai.ui.isEmptyInputMessage
 import me.rerere.common.android.Logging
@@ -177,6 +178,115 @@ internal fun insertContextCheckpoint(
     return conversation.copy(
         messageNodes = nodes.subList(0, index + 1) + checkpoint + nodes.subList(index + 1, nodes.size),
     )
+}
+
+/**
+ * 清理会话中未执行的悬挂工具部件（用于进入下一轮生成前的校验）：
+ * - 对允许立即恢复执行的末尾目标节点（[messageRange] 终点或最后一条节点），保留 `Approved` / `Denied` / `Answered` 工具以供 `GenerationLoop` 继续执行；
+ * - 对所有其他未执行的悬挂工具，仅收尾该工具部件（完整工具补写 `cancelled` 输出，流式半截残片剥离），绝不连坐删除整条包含已完成工具步骤的助手消息；
+ * - 仅当收尾后某条助手消息完全为空白空壳时才将其移除。
+ */
+internal fun sanitizeConversationInvalidMessages(
+    conversation: Conversation,
+    messageRange: ClosedRange<Int>? = null,
+): Conversation {
+    val nodes = conversation.messageNodes
+    if (nodes.isEmpty()) return conversation
+    val resumableNodeIndex = messageRange?.endInclusive ?: nodes.lastIndex
+    var changed = false
+
+    val updatedNodes = nodes.mapIndexedNotNull { nodeIndex, node ->
+        val safeSelect = if (node.selectIndex in node.messages.indices) node.selectIndex else 0
+        if (safeSelect != node.selectIndex) changed = true
+        val currentMsg = node.messages.getOrNull(safeSelect) ?: return@mapIndexedNotNull null
+        val allowResumable = nodeIndex == resumableNodeIndex
+        val needsFix = currentMsg.getTools().any { tool ->
+            !tool.isExecuted && !(allowResumable && tool.canResumeExecution)
+        }
+        if (!needsFix) {
+            if (safeSelect != node.selectIndex) node.copy(selectIndex = safeSelect) else node
+        } else {
+            val repaired = currentMsg.finalizeInterruptedParts(
+                keepPendingApprovals = false,
+                keepResumableApprovals = allowResumable,
+                status = "cancelled",
+                errorMessage = "Tool execution was not completed before continuing conversation.",
+                stripMetadataKeys = setOf("rikka_ask_user_spec"),
+            )
+            changed = true
+            if (repaired.isEmptyAssistantShell()) {
+                val remaining = node.messages.filterIndexed { idx, _ -> idx != safeSelect }
+                if (remaining.isEmpty()) {
+                    null
+                } else {
+                    node.copy(
+                        messages = remaining,
+                        selectIndex = (safeSelect - 1).coerceIn(0, remaining.lastIndex),
+                    )
+                }
+            } else {
+                val newMessages = node.messages.toMutableList().apply {
+                    set(safeSelect, repaired)
+                }
+                node.copy(messages = newMessages, selectIndex = safeSelect)
+            }
+        }
+    }
+
+    return if (!changed && updatedNodes.size == nodes.size) {
+        conversation
+    } else {
+        conversation.copy(messageNodes = updatedNodes)
+    }
+}
+
+/**
+ * 从数据库冷加载会话（当前无运行中的生成协程）时恢复因划掉后台/进程被杀遗留的中间状态：
+ * - 保留等待用户点击批准的 `Pending` 工具；
+ * - 将执行中途因进程退出中断的 `Auto` / `Approved` 工具补齐 `interrupted` 结果，剥离半截流式碎片，结束未封口的思考计时。
+ */
+internal fun recoverColdLoadedConversation(conversation: Conversation): Conversation {
+    val nodes = conversation.messageNodes
+    if (nodes.isEmpty()) return conversation
+    var changed = false
+    val stripKeys = setOf("rikka_ask_user_spec")
+
+    val updatedNodes = nodes.mapNotNull { node ->
+        var removedBeforeSelected = 0
+        val safeSelect = node.selectIndex.coerceIn(0, (node.messages.size - 1).coerceAtLeast(0))
+        if (safeSelect != node.selectIndex) changed = true
+        val keptMessages = buildList {
+            node.messages.forEachIndexed { idx, msg ->
+                val finalized = msg.finalizeInterruptedParts(
+                    keepPendingApprovals = true,
+                    keepResumableApprovals = false,
+                    status = "interrupted",
+                    errorMessage = "Application exited before tool execution completed.",
+                    stripMetadataKeys = stripKeys,
+                )
+                if (finalized !== msg) changed = true
+                if (finalized.isEmptyAssistantShell()) {
+                    changed = true
+                    if (idx < safeSelect) removedBeforeSelected++
+                } else {
+                    add(finalized)
+                }
+            }
+        }
+        if (keptMessages.isEmpty()) {
+            changed = true
+            null
+        } else {
+            val nextSelect = (safeSelect - removedBeforeSelected).coerceIn(0, keptMessages.lastIndex)
+            if (keptMessages == node.messages && nextSelect == node.selectIndex) {
+                node
+            } else {
+                node.copy(messages = keptMessages, selectIndex = nextSelect)
+            }
+        }
+    }
+
+    return if (!changed) conversation else conversation.copy(messageNodes = updatedNodes)
 }
 
 data class ChatError(
@@ -526,11 +636,18 @@ class ChatService(
     }
 
     // 引入会话配置之前创建的会话没有固定配置，加载时按助手当前的值补上，之后不再随助手变化。
+    // 同时对进程异常退出/划掉后台后遗留的半截未决状态做冷启动恢复，保留所有已完成的连续工具调用步骤。
     private suspend fun loadConversation(conversationId: Uuid): Conversation? {
-        val conversation = conversationRepo.getConversationById(conversationId) ?: return null
-        // settingsFlow 在启动初期还是占位值，固定配置必须基于真实设置
-        val bound = conversation.bindConfig(settingsStore.awaitLoaded())
-        if (bound !== conversation) conversationRepo.updateConversationConfig(bound)
+        val raw = conversationRepo.getConversationById(conversationId) ?: return null
+        val settings = settingsStore.awaitLoaded()
+        val recovered = recoverColdLoadedConversation(raw)
+        val bound = recovered.bindConfig(settings)
+        if (recovered !== raw) {
+            val persistable = sanitizeBase64Images(bound)
+            conversationRepo.updateConversation(persistable)
+            return persistable
+        }
+        if (bound !== recovered) conversationRepo.updateConversationConfig(bound)
         return bound
     }
 
@@ -974,6 +1091,11 @@ class ChatService(
         reason: String = "",
         answer: String? = null,
     ) = synchronized(sessionManager.getOrCreate(conversationId)) {
+        // 若是正在 execute 中挂起等待 ctx.askUser 的插件工具，直接将回答唤醒给该工具协程，不打断当前生成循环
+        val liveValue = if (approved) (answer ?: "") else reason
+        if (me.rerere.rikkahub.data.plugin.PluginToolLiveAskRegistry.complete(toolCallId, liveValue)) {
+            return@synchronized
+        }
         val session = sessionManager.getOrCreate(conversationId)
         val previousJob = session.getJob()
 
@@ -1149,7 +1271,7 @@ class ChatService(
             }
 
             // check invalid messages
-            checkInvalidMessages(conversationId)
+            checkInvalidMessages(conversationId, messageRange)
             val conversation = getConversationFlow(conversationId).value
 
             val isSubConversation = conversation.config?.autoApproveTools == true ||
@@ -1200,6 +1322,8 @@ class ChatService(
                 0
             }
             val steeredReplyDeferreds = mutableListOf<CompletableDeferred<String?>>()
+            val checkpointStartNodeIndex = (messageRange?.endInclusive ?: (conversation.messageNodes.size - 1))
+                .coerceAtLeast(0)
 
             val runGeneration: suspend () -> Unit = {
                 generationLoop.generateText(
@@ -1258,8 +1382,21 @@ class ChatService(
                         steered
                     },
                 ).onCompletion { cause ->
-                    // 可能被取消了，或者意外结束，兜底更新
-                    val updatedConversation = session.finishGeneration { conversation ->
+                    // 无论正常完成、用户按掉还是自然报错，统一收尾未决推理与半截工具，保住已执行的所有步骤并持久化
+                    val interruptedMsg = when {
+                        cause == null -> null
+                        cause is CancellationException -> "Generation cancelled by user before tool execution completed."
+                        else -> {
+                            val curSettings = settingsStore.settingsFlow.value
+                            val rawMsg = cause.message ?: cause.javaClass.simpleName
+                            val safeMsg = curSettings.redactSecretKeyValues(rawMsg, curSettings.enableSecretKeyAlias)
+                            "Generation interrupted before tool execution completed: $safeMsg"
+                        }
+                    }
+                    val updatedConversation = session.finishGeneration(
+                        cause = cause,
+                        interruptedErrorMessage = interruptedMsg,
+                    ) { conversation ->
                         saveConversation(conversationId, conversation)
                     }
                     if (steeredReplyDeferreds.isNotEmpty()) {
@@ -1295,6 +1432,10 @@ class ChatService(
                             updateConversation(conversationId, updatedConversation)
                             sessionManager.getOrCreate(conversationId).replyMessageId.value =
                                 chunk.messages.lastOrNull { it.role == MessageRole.ASSISTANT }?.id
+
+                            if (chunk.checkpoint) {
+                                checkpointConversationStep(conversationId, checkpointStartNodeIndex)
+                            }
 
                             // 通知等边缘副作用由 ChatNotificationManager 消费；
                             // tryEmit 不挂起，事件丢失只影响单次通知更新，不能反压生成链
@@ -1385,52 +1526,21 @@ class ChatService(
 
     // ---- 检查无效消息 ----
 
-    private fun checkInvalidMessages(conversationId: Uuid) {
+    private suspend fun checkInvalidMessages(
+        conversationId: Uuid,
+        messageRange: ClosedRange<Int>? = null,
+    ) {
         val conversation = getConversationFlow(conversationId).value
-        var messagesNodes = conversation.messageNodes
-
-        // 移除无效 tool (未执行的 Tool)
-        messagesNodes = messagesNodes.mapIndexed { _, node ->
-            // Check for Tool type with non-executed tools
-            val hasPendingTools = node.currentMessage.getTools().any { !it.isExecuted }
-
-            if (hasPendingTools) {
-                // Keep messages that are ready to resume, such as approved/denied/answered tools.
-                val hasResumableTool = node.currentMessage.getTools().any {
-                    !it.isExecuted && it.approvalState.canResumeToolExecution()
+        val sanitized = sanitizeConversationInvalidMessages(conversation, messageRange)
+        if (sanitized !== conversation) {
+            updateConversation(conversationId, sanitized)
+            runCatching {
+                val persistable = sanitizeBase64Images(sanitized)
+                if (conversationRepo.existsConversationById(conversationId)) {
+                    conversationRepo.updateConversation(persistable)
                 }
-                if (hasResumableTool) {
-                    return@mapIndexed node
-                }
-
-                // If all tools are executed, it's valid
-                val allToolsExecuted = node.currentMessage.getTools().all { it.isExecuted }
-                if (allToolsExecuted && node.currentMessage.getTools().isNotEmpty()) {
-                    return@mapIndexed node
-                }
-
-                // Remove messages that still have unresolved tool approvals.
-                return@mapIndexed node.copy(
-                    messages = node.messages.filter { it.id != node.currentMessage.id },
-                    selectIndex = node.selectIndex - 1
-                )
-            }
-            node
-        }
-
-        // 更新index
-        messagesNodes = messagesNodes.map { node ->
-            if (node.messages.isNotEmpty() && node.selectIndex !in node.messages.indices) {
-                node.copy(selectIndex = 0)
-            } else {
-                node
             }
         }
-
-        // 移除无效消息
-        messagesNodes = messagesNodes.filter { it.messages.isNotEmpty() }
-
-        updateConversation(conversationId, conversation.copy(messageNodes = messagesNodes))
     }
 
     private fun cancelToolByUser(tool: UIMessagePart.Tool): UIMessagePart.Tool {
@@ -1454,14 +1564,25 @@ class ChatService(
             return
         }
 
-        val updatedConversation = currentConversation.copy(
-            messageNodes = currentConversation.messageNodes.dropLast(1) + lastNode.copy(
+        val updatedNodes = if (updatedMessage.isEmptyAssistantShell()) {
+            val remaining = lastNode.messages.filter { it.id != lastMessage.id }
+            if (remaining.isEmpty()) {
+                currentConversation.messageNodes.dropLast(1)
+            } else {
+                val nextSelect = lastNode.selectIndex.coerceAtMost(remaining.lastIndex)
+                currentConversation.messageNodes.dropLast(1) + lastNode.copy(
+                    messages = remaining,
+                    selectIndex = nextSelect,
+                )
+            }
+        } else {
+            currentConversation.messageNodes.dropLast(1) + lastNode.copy(
                 messages = lastNode.messages.map { message ->
                     if (message.id == lastMessage.id) updatedMessage else message
                 }
             )
-        )
-        saveConversation(conversationId, updatedConversation)
+        }
+        saveConversation(conversationId, currentConversation.copy(messageNodes = updatedNodes))
     }
 
     // ---- 生成标题 ----
@@ -1935,13 +2056,70 @@ class ChatService(
         }
     }
 
+    private suspend fun sanitizeBase64Images(conversation: Conversation): Conversation {
+        val hasAnyBase64 = conversation.messageNodes.any { node ->
+            node.messages.any { it.hasBase64Part() }
+        }
+        if (!hasAnyBase64) return conversation
+
+        val cleanedNodes = conversation.messageNodes.mapNotNull { node ->
+            var removedBeforeSelected = 0
+            val safeSelect = node.selectIndex.coerceIn(0, (node.messages.size - 1).coerceAtLeast(0))
+            val convertedMessages = buildList {
+                node.messages.forEachIndexed { idx, msg ->
+                    val converted = if (msg.hasBase64Part()) {
+                        filesManager.convertBase64ImagePartToLocalFile(msg)
+                    } else {
+                        msg
+                    }
+                    if (converted.isEmptyAssistantShell()) {
+                        if (idx < safeSelect) removedBeforeSelected++
+                    } else {
+                        add(converted)
+                    }
+                }
+            }
+            if (convertedMessages.isEmpty()) {
+                null
+            } else {
+                val nextSelect = (safeSelect - removedBeforeSelected).coerceIn(0, convertedMessages.lastIndex)
+                node.copy(messages = convertedMessages, selectIndex = nextSelect)
+            }
+        }
+        return conversation.copy(messageNodes = cleanedNodes)
+    }
+
+    /**
+     * 连续工具调用的单步增量落库（每个工具步骤启动/完成时触发）：
+     * 即使进程中途被划掉或闪退，已跑完的所有工具步骤也已经在 SQLite 中落盘。
+     */
+    private suspend fun checkpointConversationStep(
+        conversationId: Uuid,
+        dirtyFromNodeIndex: Int,
+    ) {
+        runCatching {
+            val current = getConversationFlow(conversationId).value
+            if (current.messageNodes.isEmpty()) return
+            val settings = settingsStore.awaitLoaded()
+            val prepared = sanitizeBase64Images(
+                current.bindConfig(settings).fillModelSnapshots(settings).copy(updateAt = java.time.Instant.now())
+            )
+            if (prepared !== current) {
+                updateConversation(conversationId, prepared)
+            }
+            conversationRepo.checkpointConversation(prepared, dirtyFromNodeIndex)
+        }.onFailure {
+            Log.w(TAG, "checkpointConversationStep failed for $conversationId", it)
+        }
+    }
+
     suspend fun saveConversation(conversationId: Uuid, conversation: Conversation) {
         val exists = conversationRepo.existsConversationById(conversation.id)
         if (!exists && conversation.title.isBlank() && conversation.messageNodes.isEmpty()) {
             return // 新会话且为空时不保存
         }
 
-        // 会话落库即视为开始，此时把助手的配置固定到会话上
+        // 会话落库即视为开始，此时把助手的配置固定到会话上；同时兜底将未落盘的 Base64 图片转存为本地文件，杜绝中途中断保存崩溃
         val settings = settingsStore.awaitLoaded()
         val saveCtx = PluginCtx(
             task = "other",
@@ -1951,9 +2129,11 @@ class ChatService(
             parentConversationId = conversation.config?.parentConversationId,
             workspaceId = conversation.config?.workspaceId,
         )
-        val updatedConversation = pluginBridge.conversationBeforeSave(
-            conversation.bindConfig(settings).fillModelSnapshots(settings),
-            saveCtx,
+        val updatedConversation = sanitizeBase64Images(
+            pluginBridge.conversationBeforeSave(
+                conversation.bindConfig(settings).fillModelSnapshots(settings),
+                saveCtx,
+            )
         )
         updateConversation(conversationId, updatedConversation)
 

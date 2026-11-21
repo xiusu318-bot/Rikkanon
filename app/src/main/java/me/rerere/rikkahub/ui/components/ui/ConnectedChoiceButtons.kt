@@ -35,6 +35,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.fastForEachIndexed
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiConnectedButtonShapes
+import me.rerere.rikkahub.ui.custom.uiToggleButtonColors
 
 // 连接式单选按钮组，选中项更宽；选项不多（两到四个）时用来代替下拉框
 @Composable
@@ -99,9 +102,13 @@ private fun <T> ConnectedButtons(
     minHeight: Dp,
     content: @Composable (option: T, selected: Boolean) -> Unit,
 ) {
+    val btnStyle = uiComponentStyle("connected_button")
+    val btnColors = uiToggleButtonColors("connected_button", containerColor)
     Row(
         modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
+        horizontalArrangement = Arrangement.spacedBy(
+            btnStyle?.spacingDp?.coerceAtLeast(0f)?.dp ?: ButtonGroupDefaults.ConnectedSpaceBetween
+        ),
     ) {
         options.fastForEachIndexed { index, option ->
             val selected = isSelected(option)
@@ -121,12 +128,8 @@ private fun <T> ConnectedButtons(
                     .weight(weight)
                     .heightIn(min = minHeight)
                     .semantics { this.role = role },
-                shapes = when (index) {
-                    0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                    options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                    else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                },
-                colors = ToggleButtonDefaults.colors(containerColor = containerColor),
+                shapes = uiConnectedButtonShapes(index = index, count = options.size),
+                colors = btnColors,
                 contentPadding = PaddingValues(horizontal = 8.dp),
             ) {
                 content(option, selected)

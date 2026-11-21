@@ -25,6 +25,10 @@ dependencies {
     implementation(project(":ai"))
     implementation(project(":common"))
     implementation(libs.quickjs)
+    // rikka.hook：方法 Hook 引擎（仅在插件调用 rikka.hook 时才加载原生库）
+    implementation(libs.pine.core)
+    // rikka.java：放开隐藏 API 反射限制（仅在插件首次调用 rikka.java 时生效）
+    implementation(libs.hiddenapibypass)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)

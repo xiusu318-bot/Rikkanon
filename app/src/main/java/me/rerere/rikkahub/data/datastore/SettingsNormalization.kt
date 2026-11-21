@@ -32,11 +32,15 @@ internal fun Settings.withBuiltInDefaults(): Settings {
     }
     val promptPresets = this.promptPresets.ifEmpty { DEFAULT_PROMPT_PRESETS }
         .map { it.ensureRequiredMarkers() }
+    val uiPresets = this.uiPresets.filterNot {
+        it.id in me.rerere.rikkahub.data.model.LEGACY_BUILT_IN_UI_PRESET_IDS && !it.enabled
+    }
     return copy(
         providers = providers,
         assistants = assistants,
         ttsProviders = ttsProviders,
         promptPresets = promptPresets,
+        uiPresets = uiPresets,
     )
 }
 
@@ -132,6 +136,7 @@ internal fun Settings.withoutInvalidReferences(): Settings {
         favoriteModels = settings.favoriteModels.filter { it in validModelIds },
         modeInjections = settings.modeInjections.distinctBy { it.id },
         promptPresets = settings.promptPresets.distinctBy { it.id }.map { it.ensureRequiredMarkers() },
+        uiPresets = settings.uiPresets.distinctBy { it.id },
         lorebooks = settings.lorebooks.distinctBy { it.id },
         quickMessages = settings.quickMessages.distinctBy { it.id },
     )

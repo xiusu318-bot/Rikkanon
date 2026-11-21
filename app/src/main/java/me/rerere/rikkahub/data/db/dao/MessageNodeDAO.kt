@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.db.dao
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -41,6 +42,27 @@ interface MessageNodeDAO {
     @Query("DELETE FROM message_node WHERE conversation_id = :conversationId")
     suspend fun deleteByConversation(conversationId: String)
 
+    @Query("DELETE FROM message_node WHERE conversation_id = :conversationId AND node_index >= :fromIndex")
+    suspend fun deleteFromIndex(conversationId: String, fromIndex: Int)
+
+    @Query(
+        "SELECT id, node_index, select_index, length(messages) AS msgLen " +
+            "FROM message_node WHERE conversation_id = :conversationId " +
+            "ORDER BY node_index ASC LIMIT :limit OFFSET :offset"
+    )
+    suspend fun getNodeMetasPaged(
+        conversationId: String,
+        limit: Int,
+        offset: Int,
+    ): List<MessageNodeMetaRow>
+
+    @Query("SELECT substr(messages, :startOneBased, :charCount) FROM message_node WHERE id = :nodeId")
+    suspend fun getNodeMessagesChunk(
+        nodeId: String,
+        startOneBased: Int,
+        charCount: Int,
+    ): String?
+
     @Query("DELETE FROM message_node WHERE id = :nodeId")
     suspend fun deleteById(nodeId: String)
 
@@ -60,6 +82,13 @@ data class MessageTokenStats(
 )
 
 data class MessageDayCount(val day: String, val count: Int)
+
+data class MessageNodeMetaRow(
+    val id: String,
+    @ColumnInfo("node_index") val nodeIndex: Int,
+    @ColumnInfo("select_index") val selectIndex: Int,
+    val msgLen: Int,
+)
 
 // 在 json_each() 的参数内校验 JSON，避免损坏行导致整个统计查询失败。
 // 使用 CASE 而非依赖 WHERE 条件的求值顺序，无效 JSON 按空数组处理。

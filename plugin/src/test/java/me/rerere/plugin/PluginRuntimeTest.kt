@@ -297,4 +297,65 @@ class PluginRuntimeTest {
         host.storage("sync_test").set("flag", JsonPrimitive(false))
         assertEquals("off", rt.invoke("tool", reg.handlerId, emptyList()).jsonPrimitive.content)
     }
+
+    @Test(timeout = 30_000)
+    fun `new capabilities callMethodStream ui_update onUnload skill lorebook quickMessage dynamic tool params`() = runBlocking {
+        installAndEnable(
+            "ext_test", """
+            rikka.registerProvider({
+              name: "stream_prov",
+              streamText: async function* (req) {
+                yield "hello ";
+                yield "world";
+              },
+              getBalance: async () => "${'$'}42.00"
+            });
+            const mountId = rikka.ui.mount("chat.topbar", { type: "badge", text: "init", status: "ready" });
+            rikka.expose("updateBadge", (text) => {
+              rikka.ui.update(mountId, { text: text, status: "running" });
+              return "ok";
+            });
+            rikka.registerSkill({ name: "my_skill", description: "desc", content: "# body" });
+            rikka.registerLorebook({ name: "my_lb", entries: [] });
+            rikka.registerQuickMessage({ name: "qm1", content: "hello" });
+            rikka.registerTool({
+              name: "dyn_tool",
+              parameters: (ctx) => ({ type: "object", properties: { task: { type: "string", description: ctx.task } } }),
+              systemPrompt: (ctx) => "prompt_for_" + ctx.task,
+              execute: () => "ok"
+            });
+            rikka.onUnload(() => {
+              rikka.storage.set("unloaded", true);
+            });
+            """
+        )
+        // 1. 测试真流式 callMethodStream
+        val chunks = mutableListOf<String>()
+        host.callMethodStream("ext_test", "provider", "stream_prov", "streamText", listOf(buildJsonObject {})).collect {
+            chunks += it.jsonPrimitive.content
+        }
+        assertEquals(listOf("hello ", "world"), chunks)
+        assertEquals("${'$'}42.00", host.callMethod("ext_test", "provider", "stream_prov", "getBalance", emptyList()).jsonPrimitive.content)
+
+        // 2. 测试 ui.update 动态局部更新 spec
+        host.callExposed("ext_test", "updateBadge", JsonPrimitive("updated!"))
+        val uiSpec = host.chain("ui").single().second.meta.jsonObject["spec"]!!.jsonObject
+        assertEquals("updated!", uiSpec["text"]!!.jsonPrimitive.content)
+        assertEquals("running", uiSpec["status"]!!.jsonPrimitive.content)
+
+        // 3. 测试声明式资源注册与动态工具参数
+        assertEquals(1, host.chain("skill").size)
+        assertEquals(1, host.chain("lorebook").size)
+        assertEquals(1, host.chain("quickMessage").size)
+        val (rt, toolReg) = host.chain("tool").single()
+        val dynPrompt = rt.invokeInternal("tool.systemPrompt", "__tool_sysprompt", buildJsonObject {
+            put("handler", toolReg.handlerId)
+            put("ctx", buildJsonObject { put("task", "chat") })
+        }).jsonPrimitive.content
+        assertEquals("prompt_for_chat", dynPrompt)
+
+        // 4. 测试 onUnload 在停用时触发
+        host.setEnabled("ext_test", false)
+        assertEquals(JsonPrimitive(true), host.storage("ext_test").get("unloaded"))
+    }
 }

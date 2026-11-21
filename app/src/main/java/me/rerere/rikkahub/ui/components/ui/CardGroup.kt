@@ -39,6 +39,17 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEachIndexed
 import me.rerere.rikkahub.ui.theme.CustomColors
+import me.rerere.rikkahub.data.model.UIComponentStyle
+import me.rerere.rikkahub.ui.custom.LocalActiveUIPreset
+import me.rerere.rikkahub.ui.custom.UISlot
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiSafeClip
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.material3.contentColorFor
+import androidx.compose.ui.unit.sp
 
 private val CardGroupCorner = 14.dp
 
@@ -147,15 +158,20 @@ fun CardGroupScope.switchItem(
     supportingContent = supportingContent,
     leadingContent = leadingContent,
     trailingContent = {
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        me.rerere.rikkahub.ui.custom.UISwitch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     },
     headlineContent = headlineContent,
 )
 
-fun cardGroupItemShape(index: Int, count: Int): Shape {
-    val top = if (index == 0) CardGroupCorner else 4.dp
-    val bottom = if (index == count - 1) CardGroupCorner else 4.dp
-    return RoundedCornerShape(topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom)
+fun cardGroupItemShape(
+    index: Int,
+    count: Int,
+    corner: androidx.compose.ui.unit.Dp = CardGroupCorner,
+    cut: Boolean = false,
+): Shape {
+    val top = if (index == 0) corner else 4.dp
+    val bottom = if (index == count - 1) corner else 4.dp
+    return me.rerere.rikkahub.ui.custom.uiCornerShape(topStart = top, topEnd = top, bottomEnd = bottom, bottomStart = bottom, cut = cut)
 }
 
 @Composable
@@ -170,12 +186,33 @@ fun CardGroupIcon(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Icon(
-        imageVector = icon,
-        contentDescription = null,
-        modifier = modifier.size(22.dp),
-        tint = tint,
-    )
+    // 界面自定义 ui.style("card_group.icon", { color, bg, corner, padding, width（图标尺寸）})；未设置时为原版
+    val uiStyle = uiComponentStyle("card_group.icon")
+    if (uiStyle == null) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = modifier.size(22.dp),
+            tint = tint,
+        )
+        return
+    }
+    val scheme = MaterialTheme.colorScheme
+    val shape = me.rerere.rikkahub.ui.custom.uiCornerShape((uiStyle.cornerDp ?: 0f).dp)
+    val bg = uiStyle.colorOr({ it.background }, scheme, Color.Unspecified)
+    Box(
+        modifier = modifier
+            .then(if (bg != Color.Unspecified) Modifier.clip(shape).background(bg, shape) else Modifier)
+            .padding(horizontal = (uiStyle.paddingHorizontalDp ?: 0f).dp, vertical = (uiStyle.paddingVerticalDp ?: 0f).dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size((uiStyle.widthDp ?: 22f).dp),
+            tint = if (contentColor != Color.Unspecified) contentColor else uiStyle.colorOr({ it.color }, scheme, tint),
+        )
+    }
 }
 
 @Composable
@@ -183,16 +220,22 @@ fun CardGroupValue(
     text: String,
     modifier: Modifier = Modifier,
 ) {
+    // 界面自定义 ui.style("card_group.value", { bg, color, corner, padding, fontSize })；未设置时各值与原版相同
+    val uiStyle = uiComponentStyle("card_group.value")
+    val scheme = MaterialTheme.colorScheme
     Surface(
         modifier = modifier,
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = uiStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+            ?: if (me.rerere.rikkahub.ui.custom.hasUICustomShapes()) MaterialTheme.shapes.small else CircleShape,
+        color = uiStyle.colorOr({ it.background }, scheme, MaterialTheme.colorScheme.secondaryContainer),
+        contentColor = uiStyle.colorOr({ it.color }, scheme, MaterialTheme.colorScheme.onSecondaryContainer),
     ) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+            modifier = Modifier.padding(horizontal = (uiStyle?.paddingHorizontalDp ?: 10f).dp, vertical = (uiStyle?.paddingVerticalDp ?: 4f).dp),
+            style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum").let { st ->
+                uiStyle?.fontSizeSp?.let { st.copy(fontSize = it.sp) } ?: st
+            },
             maxLines = 1,
         )
     }
@@ -202,10 +245,12 @@ fun CardGroupValue(
 private fun CardGroupFormItem(
     item: CardGroupItem,
     formContent: @Composable ColumnScope.() -> Unit,
+    style: UIComponentStyle? = null,
 ) {
     Surface(
         modifier = item.modifier.fillMaxWidth(),
-        color = CustomColors.listItemColors.containerColor,
+        color = style.colorOr({ it.background }, MaterialTheme.colorScheme, CustomColors.listItemColors.containerColor),
+        contentColor = style.colorOr({ it.color }, MaterialTheme.colorScheme, contentColorFor(CustomColors.listItemColors.containerColor)),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
@@ -226,7 +271,7 @@ private fun CardGroupFormItem(
                         }
                         item.supportingContent?.let { supporting ->
                             CompositionLocalProvider(
-                                LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant
+                                LocalContentColor provides style.colorOr({ it.secondaryColor }, MaterialTheme.colorScheme, MaterialTheme.colorScheme.onSurfaceVariant)
                             ) {
                                 ProvideTextStyle(MaterialTheme.typography.bodyMedium, supporting)
                             }
@@ -243,6 +288,7 @@ private fun CardGroupFormItem(
 @Composable
 private fun CardGroupListItem(
     item: CardGroupItem,
+    style: UIComponentStyle? = null,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
 
@@ -263,7 +309,17 @@ private fun CardGroupListItem(
         supportingContent = item.supportingContent,
         leadingContent = item.leadingContent,
         trailingContent = item.trailingContent,
-        colors = item.colors ?: CustomColors.listItemColors,
+        colors = item.colors ?: CustomColors.listItemColors.let { base ->
+            // 界面自定义 ui.style("card_group", { bg, color, secondaryColor })；未设置时为原版
+            if (style == null) base else {
+                val scheme = MaterialTheme.colorScheme
+                base.copy(
+                    containerColor = style.colorOr({ it.background }, scheme, base.containerColor),
+                    contentColor = style.colorOr({ it.color }, scheme, base.contentColor),
+                    supportingContentColor = style.colorOr({ it.secondaryColor }, scheme, base.supportingContentColor),
+                )
+            }
+        },
     )
 }
 
@@ -276,38 +332,119 @@ fun CardGroup(
     val scope = CardGroupScopeImpl()
     scope.content()
 
+    // 界面自定义：ui.style("card_group" / "card_group.title") 改样式，ui.slot("card_group.title" / "card_group.item") 接管标题与每一行；
+    // 未设置时各值与原版相同
+    val groupStyle = uiComponentStyle("card_group")
+    val titleStyle = uiComponentStyle("card_group.title")
+    val scheme = MaterialTheme.colorScheme
+
     Column(modifier = modifier) {
         if (title != null) {
-            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.primary) {
-                ProvideTextStyle(MaterialTheme.typography.titleSmallEmphasized) {
-                    Box(modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 8.dp)) {
-                        title()
+            UISlot(
+                name = "card_group.title",
+                parts = mapOf("title" to { info -> Box(info.modifier) { ProvideTextStyle(info.textStyle) { title() } } }),
+            ) {
+                CompositionLocalProvider(LocalContentColor provides titleStyle.colorOr({ it.color }, scheme, MaterialTheme.colorScheme.primary)) {
+                    ProvideTextStyle(MaterialTheme.typography.titleSmallEmphasized.let { st -> titleStyle?.fontSizeSp?.let { st.copy(fontSize = it.sp) } ?: st }) {
+                        Box(
+                            modifier = Modifier.padding(
+                                start = (titleStyle?.paddingHorizontalDp ?: 4f).dp,
+                                top = (titleStyle?.paddingVerticalDp ?: 8f).dp,
+                                bottom = (titleStyle?.paddingVerticalDp ?: 8f).dp,
+                            )
+                        ) {
+                            title()
+                        }
                     }
                 }
             }
         }
         val count = scope.items.size
         if (count > 0) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(CardGroupCorner))
-            ) {
-                scope.items.fastForEachIndexed { index, item ->
-                    val formContent = item.formContent
-                    if (formContent != null) {
-                        CardGroupFormItem(item = item, formContent = formContent)
-                    } else {
-                        CardGroupListItem(item = item)
+            val corner = groupStyle?.cornerDp?.dp ?: CardGroupCorner
+            val cut = me.rerere.rikkahub.ui.custom.isUICutCornerShape()
+            val groupShape = me.rerere.rikkahub.ui.custom.uiCornerShape(corner, cut = cut)
+            val border = groupStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+                BorderStroke(it.dp, groupStyle.colorOr({ s -> s.borderColor }, scheme, scheme.outlineVariant))
+            }
+            val gap = groupStyle?.spacingDp
+            if (gap == null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .uiSafeClip(groupShape)
+                        .then(if (border != null) Modifier.border(border, groupShape) else Modifier)
+                ) {
+                    scope.items.fastForEachIndexed { index, item ->
+                        CardGroupEntry(item = item, index = index, count = count, style = groupStyle)
+                        if (index != count - 1) {
+                            HorizontalDivider(
+                                thickness = 0.5.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
+                            )
+                        }
                     }
-                    if (index != count - 1) {
-                        HorizontalDivider(
-                            thickness = 0.5.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
-                        )
+                }
+            } else {
+                // 写了 spacing：各行分开，用间距代替分割线（首尾行外侧用组圆角，其余用小圆角）
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(gap.dp),
+                ) {
+                    scope.items.fastForEachIndexed { index, item ->
+                        val shape = cardGroupItemShape(index, count, corner, cut = cut)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .uiSafeClip(shape)
+                                .then(if (border != null) Modifier.border(border, shape) else Modifier)
+                        ) {
+                            CardGroupEntry(item = item, index = index, count = count, style = groupStyle)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+/** 一行：主题可用 ui.slot("card_group.item", ...) 接管；没写时为原版的列表项 / 表单项。 */
+@Composable
+private fun CardGroupEntry(item: CardGroupItem, index: Int, count: Int, style: UIComponentStyle?) {
+    val formContent = item.formContent
+    val slotActive = LocalActiveUIPreset.current?.hasSlot("card_group.item") == true
+    UISlot(
+        name = "card_group.item",
+        data = if (slotActive) mapOf(
+            "index" to index,
+            "count" to count,
+            "first" to (index == 0),
+            "last" to (index == count - 1),
+            "clickable" to (item.onClick != null),
+            "form" to (formContent != null),
+            "hasSupporting" to (item.supportingContent != null),
+            "hasLeading" to (item.leadingContent != null),
+            "hasTrailing" to (item.trailingContent != null),
+            "hasOverline" to (item.overlineContent != null),
+        ) else emptyMap(),
+        parts = if (slotActive) buildMap {
+            fun part(name: String, content: (@Composable () -> Unit)?) {
+                if (content != null) put(name) { info -> Box(info.modifier) { ProvideTextStyle(info.textStyle) { content() } } }
+            }
+            part("headline", item.headlineContent)
+            part("supporting", item.supportingContent)
+            part("overline", item.overlineContent)
+            part("leading", item.leadingContent)
+            part("trailing", item.trailingContent)
+            if (formContent != null) put("form") { info -> Column(info.modifier) { formContent() } }
+        } else emptyMap(),
+        actions = item.onClick?.let { mapOf("click" to it) } ?: emptyMap(),
+        modifier = item.modifier.fillMaxWidth(),
+    ) {
+        if (formContent != null) {
+            CardGroupFormItem(item = item, formContent = formContent, style = style)
+        } else {
+            CardGroupListItem(item = item, style = style)
         }
     }
 }

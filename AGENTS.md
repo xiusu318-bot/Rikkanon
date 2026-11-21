@@ -2,21 +2,15 @@
 
 ## Project Overview
 
-RikkaHub is a native Android LLM chat client that supports switching between different AI providers
-for conversations.
-Built with Jetpack Compose, Kotlin, and follows Material 3 Expressive (MD3 Expressive) design language.
+Rikkanon (package `me.rerere.rikkahub.rikkanon`) is a personal Android AI Agent client forked from RikkaHub, supporting multi-provider LLM chat, advanced SillyTavern-style prompt assembly & lorebooks, persistent workspace PTY terminals, sub-agents, a QuickJS plugin runtime (`:plugin`), and an independent native Custom UI engine (`.ui.js`).
+Built with Jetpack Compose and Kotlin.
 
 ## Design Language
 
-The UI follows Material 3 Expressive. New and reworked screens should match it rather than the older baseline
-Material 3 look (cards with dividers, plain forms).
+The default host UI uses `MaterialExpressiveTheme` (`app/src/main/java/me/rerere/rikkahub/ui/theme/Theme.kt`) while preserving compact card/dialog workflows preferred in this fork.
 
-- The app theme is `MaterialExpressiveTheme` (app/src/main/java/me/rerere/rikkahub/ui/theme/Theme.kt); prefer the
-  expressive variants of components, shapes (`MaterialShapes`), emphasized typography (e.g. `titleSmallEmphasized`)
-  and motion from `androidx.compose.material3` over hand-rolled equivalents.
-- Settings-style and form pages use segmented groups via `CardGroup` (
-  app/src/main/java/me/rerere/rikkahub/ui/components/ui/CardGroup.kt) instead of a card with dividers.
-- Favor larger corner radii, filled/tonal containers, and whole-row click targets.
+- Settings-style and form pages use `CardGroup` (`app/src/main/java/me/rerere/rikkahub/ui/components/ui/CardGroup.kt`).
+- Shared controls such as `UIModalBottomSheet`, `UISwitch`, `uiToggleButtonShapes`, `uiConnectedButtonShapes`, and `uiSegmentedListItemShapes` (`app/src/main/java/me/rerere/rikkahub/ui/custom/UIHostComponents.kt`) behave identically to baseline components when Custom UI is off and automatically adapt to `ui.shapes` / `ui.style` when Custom UI is enabled.
 
 ## Build, Test, and Development Commands
 
@@ -28,67 +22,44 @@ Material 3 look (cards with dividers, plain forms).
 
 ## Module Structure
 
-- **app**: Main application module with UI, ViewModels, and core logic
-- **ai**: AI SDK abstraction layer for different providers (OpenAI, Google, Anthropic)
+- **app**: Main application module with Compose UI, Custom UI engine (`ui/custom/`), ViewModels, database, and core orchestration
+- **ai**: AI SDK abstraction layer for different providers (OpenAI Chat & Responses, Google GenerateContent & Interactions, Anthropic)
 - **common**: Common utilities and extensions
-- **document**: Document parsing module for handling PDF, DOCX, PPTX, and EPUB files
+- **document**: Document parsing module for PDF, DOCX, PPTX, and EPUB files
 - **highlight**: Code syntax highlighting implementation
-- **material3**: Material color utility extensions used by the app UI
-- **ui**: Reusable Compose UI components that do not depend on app logic
-- **search**: Search functionality SDK for multiple providers (Exa, Tavily, Zhipu, Bing, Brave, SearXNG, and others)
-- **speech**: Speech module for TTS and ASR implementations
-- **web**: Embedded web server module that provides Ktor server startup function and hosts static frontend build files (
-  built from web-ui/ React project)
-- **workspace**: Sandboxed per-workspace file system and shell execution environment exposed to the AI as tools.
+- **material3**: Material color utility extensions (HCT / Oklab) used by the app UI
+- **mediagen**: Unified image and video generation provider abstraction
+- **oauth**: OAuth authentication helpers
+- **plugin**: Standalone QuickJS (`quickjs-kt`) ES2020 plugin runtime, registry, Java reflection bridge (`PluginJavaBridge`), and Pine ART method hook engine (`PluginHookEngine`)
+- **search**: Web search SDK for multiple providers (Exa, Tavily, Zhipu, Bing, Brave, SearXNG, etc.)
+- **speech**: TTS and ASR provider implementations
+- **terminal**: Terminal emulator core (`TerminalSession` / `TerminalTransport` / `LocalPtyTransport`) for local PRoot and remote SSH sessions
+- **ui**: Reusable Compose UI components and Markdown renderer independent of app business logic
+- **web**: Embedded Ktor server hosting static frontend build files from `web-ui/`
+- **workspace**: Sandboxed per-workspace PRoot / SSH file system, shell execution, and transparent loopback proxy bridge
 
-## Concepts
+## Core Concepts
 
-- **Assistant**: An assistant configuration with system prompts, model parameters, and conversation isolation. Each
-  assistant maintains its own settings including temperature, context size, custom headers, tools, memory options, regex
-  transformations, and prompt injections (mode/lorebook). Assistants provide isolated chat environments with specific
-  behaviors and capabilities. (app/src/main/java/me/rerere/rikkahub/data/model/Assistant.kt)
+- **Assistant**: An assistant configuration with system prompts, model parameters, temperature, context size, custom headers, local/workspace tools, sub-agent bindings, memory options, regex rules, and prompt presets / lorebooks (`app/src/main/java/me/rerere/rikkahub/data/model/Assistant.kt`).
 
-- **Conversation**: A persistent conversation thread between the user and an assistant. Each conversation maintains a
-  list of MessageNodes in a tree structure to support message branching, along with metadata like title, creation time,
-  update time, pin status, chat suggestions, optional conversation-level system prompt, and prompt injection bindings.
-  Once a conversation is persisted it also holds a `ConversationConfig` snapshot (chat model, reasoning level, search,
-  MCP servers, workspace, skills) taken from the assistant; from then on chat-page changes to those settings stay on
-  the conversation, and code should read them through `Settings.getAssistantOf(conversation)` /
-  `Settings.getChatModelOf(conversation)` instead of the assistant directly. (
-  app/src/main/java/me/rerere/rikkahub/data/model/Conversation.kt,
-  app/src/main/java/me/rerere/rikkahub/data/model/ConversationConfig.kt)
+- **Conversation**: A persistent conversation thread holding a tree of `MessageNode` branches, title, timestamps, pin status, prompt injection bindings, and optional sub-agent linkage (`parentConversationId`, `subAgentCode`). Unlike upstream snapshot locking, **conversations dynamically follow their bound `Assistant`'s latest configuration** (model, reasoning level, web search, MCP servers, skills, workspace) via `Settings.getAssistantById(conversation.assistantId)` (`app/src/main/java/me/rerere/rikkahub/data/model/Conversation.kt`).
 
-- **UIMessage**: A platform-agnostic message abstraction that encapsulates chat messages with different types of content
-  parts (text, images, documents, reasoning, tool calls/results, etc.). Each message has a role (USER, ASSISTANT,
-  SYSTEM, TOOL), creation timestamp, model ID, token usage information, and optional annotations. UIMessages support
-  streaming updates through chunk merging. (ai/src/main/java/me/rerere/ai/ui/Message.kt)
+- **UIMessage & MessageNode**: `UIMessage` (`ai/src/main/java/me/rerere/ai/ui/Message.kt`) encapsulates multi-part messages (text, media, reasoning, tool calls/results) with streaming chunk merging and `finalizeInterruptedParts` recovery. `MessageNode` wraps alternative `UIMessage` branches with `selectIndex` and supports incremental single-node persistence (`checkpointConversation`) plus chunked `substr` fallback loading for nodes exceeding Android's 2MB `CursorWindow`.
 
-- **MessageNode**: A container holding one or more UIMessages to implement message branching functionality. Each node
-  maintains a list of alternative messages and tracks which message is currently selected (selectIndex). This enables
-  users to regenerate responses and switch between different conversation branches, creating a tree-like conversation
-  structure. (app/src/main/java/me/rerere/rikkahub/data/model/Conversation.kt)
+- **Message Transformer**: Input/output transformation pipeline (`app/src/main/java/me/rerere/rikkahub/data/ai/transformers/Transformer.kt`), including `PromptInjectionTransformer` (advanced prompt preset track, `@D` depth injection, raw JSON blocks, and `LorebookScanEngine`), `TemplateTransformer`, `ThinkTagTransformer`, `RegexOutputTransformer`, `DocumentAsPromptTransformer`, `Base64ImageToLocalFileTransformer`, `OcrTransformer`, and `WorkspaceReminderTransformer`.
 
-- **Message Transformer**: A pipeline mechanism for transforming messages before sending to AI providers (
-  InputMessageTransformer) or after receiving responses (OutputMessageTransformer). Transformers can modify message
-  content, add metadata, apply templates, handle special tags, convert formats, and perform OCR. Common transformers
-  include:
-  - TemplateTransformer: Apply Pebble templates to user messages with variables like time/date
-  - ThinkTagTransformer: Extract `<think>` tags and convert to reasoning parts
-  - RegexOutputTransformer: Apply regex replacements to assistant responses
-  - DocumentAsPromptTransformer: Convert document attachments to text prompts
-  - Base64ImageToLocalFileTransformer: Convert base64 images to local file references
-  - OcrTransformer: Perform OCR on images to extract text
+## Custom UI Hooks & R8 / ProGuard Rules
 
-  Output transformers support `visualTransform()` for UI display during streaming and `onGenerationFinish()` for final
-  processing after generation completes.
-  (app/src/main/java/me/rerere/rikkahub/data/ai/transformers/Transformer.kt)
+- **Preserve Custom UI Hooks**: Host components contain lightweight hooks such as `UISlot("chat.topbar", ...) { original }`, `uiComponentStyle("card_group")`, `uiPageEntryDecorator`, and `CustomColors.topBarColors`. When Custom UI is off (default), they run the original host code unchanged. Do not delete these hook wrappers or `style?.x ?: originalValue` fallbacks when editing UI screens; see `CUSTOM_UI_DOCS.md`.
+- **Kotlin / Compose & Android ICU Pitfalls**:
+  - Never write `return@label` inside inline `@Composable` lambdas (`Column`, `Row`, `Box`, `key`), as R8 dexing fails with `$$$$$NON_LOCAL_RETURN$$$$$`.
+  - Always escape `{`, `}`, `[`, `]` in Android ICU regular expressions (e.g. `\\}\\}`).
+- **R8 & Reflection Compatibility**:
+  - All modules compile with `-java-parameters` so `java.copy(obj, patch)` can match Kotlin `data class` primary `copy(...)` parameter names reliably on Android ART (where `Class.getDeclaredFields()` reorders fields).
+  - `app/proguard-rules.pro` uses `-keep,allowshrinking` on `me.rerere.**` (excluding `me.rerere.hugeicons.**`) and `kotlin.uuid.**`, and applies hard `-keep` (without `allowshrinking`) on public data models, `SettingsExtKt` / `DefaultSettingsKt`, repositories, ViewModels, and composable controls documented in `CUSTOM_UI_DOCS.md` and `PLUGIN_API_DOC.md`. Keep `proguard-rules.pro` in sync if adding new public APIs promised in those docs.
 
 ## Internationalization
 
-- String resources are usually located in `app/src/main/res/values*/strings.xml`; feature modules such as `search`
-  may also maintain their own `values*/strings.xml`
-- Use `stringResource(R.string.key_name)` in Compose
-- Page-specific strings should use page prefix (e.g., `setting_page_`)
-- If the user does not explicitly request localization, prioritize implementing functionality without considering
-  localization. (e.g `Text("Hello world")`)
-- For `locale-tui` operations, use the `locale-tui-localization` skill.
+- String resources live in `app/src/main/res/values*/strings.xml` (and module-level `values*/strings.xml` such as `search`).
+- Use `stringResource(R.string.key_name)` in Compose; page-specific strings use page prefixes (e.g. `setting_page_`).
+- Unless localization is explicitly requested, prioritize implementing functionality directly. For `locale-tui`, use its CLI/TUI workflow documented in `locale-tui/CLAUDE.md`.

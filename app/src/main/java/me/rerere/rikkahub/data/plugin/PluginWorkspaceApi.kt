@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.data.plugin
 
+import android.util.Base64
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -13,7 +14,7 @@ import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalSession
 import me.rerere.workspace.WorkspaceManager
 import me.rerere.workspace.WorkspaceStorageArea
 
-/** rikka.workspace 的实现：文件、shell、持久化终端（与 workspace_terminal 工具共用同一终端池）。 */
+/** rikka.workspace 的实现：文件（含二进制 Base64）、shell、持久化终端（与 workspace_terminal 工具共用同一终端池）。 */
 class PluginWorkspaceApi(
     private val repo: WorkspaceRepository,
     private val terminals: WorkspaceTerminalSessionManager,
@@ -48,6 +49,17 @@ class PluginWorkspaceApi(
 
         "workspace.write" -> {
             repo.writeText(workspace(o).id, o.str("path"), o.str("text"), o.boolOr("overwrite", true))
+            JsonNull
+        }
+
+        "workspace.readBase64" -> {
+            val bytes = repo.readBytes(workspace(o).id, o.str("path"))
+            JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP))
+        }
+
+        "workspace.writeBase64" -> {
+            val bytes = Base64.decode(o.str("base64"), Base64.DEFAULT)
+            repo.writeBytes(workspace(o).id, o.str("path"), bytes, o.boolOr("overwrite", true))
             JsonNull
         }
 

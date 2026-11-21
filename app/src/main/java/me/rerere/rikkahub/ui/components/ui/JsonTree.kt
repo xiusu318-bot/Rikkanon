@@ -63,7 +63,7 @@ fun JsonTree(
     }
 
     selectedString?.let { content ->
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { selectedString = null },
             sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
         ) {

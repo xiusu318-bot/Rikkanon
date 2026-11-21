@@ -212,7 +212,7 @@ private fun PromptEditSheet(
     onReset: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         // 直接全展开，半展开时键盘会把输入框整个盖住
         sheetState = rememberBottomSheetState(

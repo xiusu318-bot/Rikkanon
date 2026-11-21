@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.components.message
 
+import me.rerere.rikkahub.ui.pages.extensions.plugin.uiSpec
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
@@ -32,6 +33,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -95,8 +97,16 @@ import me.rerere.rikkahub.data.model.AssistantRegexPhase
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.service.ToolEditAction
+import me.rerere.rikkahub.ui.custom.LocalActiveUIPreset
+import me.rerere.rikkahub.ui.custom.resolveUIColor
+import me.rerere.rikkahub.ui.custom.toAvatarShape
 import me.rerere.rikkahub.utils.JsonInstantPretty
+import me.rerere.rikkahub.utils.copyMessageToClipboard
+import me.rerere.rikkahub.utils.extractQuotedContentAsText
+import me.rerere.rikkahub.utils.removeBracketedContent
+import me.rerere.rikkahub.utils.toMessageTimeString
 import me.rerere.rikkahub.utils.writeClipboardText
+import kotlinx.datetime.toJavaLocalDateTime
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.rememberScrollState
@@ -129,6 +139,7 @@ import me.rerere.rikkahub.utils.urlDecode
 import me.rerere.ui.charts.ChartCard
 import me.rerere.ui.charts.ChartSpec
 import me.rerere.ui.webview.WebViewContentCache
+import me.rerere.rikkahub.ui.custom.colorOr
 import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -197,102 +208,227 @@ fun ChatMessage(
     }
     val navController = LocalNavController.current
     val context = LocalContext.current
+    val toaster = me.rerere.rikkahub.ui.context.LocalToaster.current
     val colorScheme = MaterialTheme.colorScheme
-    Column(
-        modifier = modifier.fillMaxWidth(),
-        horizontalAlignment = if (message.role == MessageRole.USER) Alignment.End else Alignment.Start,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        if (!message.parts.isEmptyUIMessage()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-            ) {
-                ChatMessageAssistantAvatar(
-                    message = message,
-                    model = model,
-                    assistant = assistant,
-                    loading = loading,
-                    modifier = Modifier.weight(1f)
-                )
-                ChatMessageUserAvatar(
-                    message = message,
-                    avatar = settings.userAvatar,
-                    nickname = settings.userNickname,
-                    modifier = Modifier.weight(1f)
-                )
-            }
+    val tts = me.rerere.rikkahub.ui.context.LocalTTSState.current
+    val isSpeaking by tts.isSpeaking.collectAsState()
+    val openWebViewPreview = {
+        val textContent = message.parts
+            .filterIsInstance<UIMessagePart.Text>()
+            .joinToString("\n\n") { it.text }
+            .trim()
+        if (textContent.isNotBlank()) {
+            val htmlContent = buildMarkdownPreviewHtml(
+                context = context,
+                markdown = textContent,
+                colorScheme = colorScheme
+            )
+            val contentId = WebViewContentCache.store(context.cacheDir, htmlContent)
+            navController.navigate(Screen.WebView(contentId = contentId))
         }
-        CompositionLocalProvider(
-            LocalTextStyle provides textStyle,
-            LocalWorkspaceId provides assistant?.workspaceId?.toString(),
-        ) {
-            MessagePartsBlock(
+    }
+    // 界面自定义：主题可用 ui.slot("chat.message.user" / "chat.message.assistant", ...) 接管整条消息；没写时绘制下面的原版
+    val messageSlotName = if (message.role == MessageRole.USER) "chat.message.user" else "chat.message.assistant"
+    val messageSlotActive = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot(messageSlotName) == true
+    val messageActions: Map<String, () -> Unit> = mapOf(
+        "edit_message" to { handleEditClick() },
+        "open_parts_editor" to { showPartsEditorSheet = true },
+        "open_action_sheet" to { showActionsSheet = true },
+        "copy_message" to {
+            context.copyMessageToClipboard(message)
+            toaster.show("已复制到剪贴板")
+        },
+        "select_and_copy" to { showSelectCopySheet = true },
+        "regenerate" to onRegenerate,
+        "fork_message" to onFork,
+        "toggle_favorite" to { onToggleFavorite?.invoke() },
+        "translate_message" to { onTranslate?.invoke(message, Locale.getDefault()) },
+        "speak_tts" to {
+            if (isSpeaking) {
+                tts.stop()
+            } else {
+                var textToSpeak = message.toText()
+                if (settings.ttsOnlyReadQuoted) {
+                    textToSpeak = textToSpeak.extractQuotedContentAsText() ?: textToSpeak
+                }
+                if (settings.ttsOnlyReadOutsideBrackets) {
+                    textToSpeak = textToSpeak.removeBracketedContent() ?: textToSpeak
+                }
+                tts.speak(textToSpeak)
+            }
+        },
+        "webview_preview" to { openWebViewPreview() },
+        "delete_message" to onDelete,
+    )
+
+    val defaultUserName = stringResource(R.string.user_default_name)
+    val defaultAssistantName = stringResource(R.string.assistant_page_default_assistant)
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = messageSlotName,
+        data = if (messageSlotActive) {
+            val userName = settings.userNickname.ifEmpty { defaultUserName }
+            val charName = assistant?.name?.ifEmpty { defaultAssistantName } ?: defaultAssistantName
+            val notEmpty = !message.parts.isEmptyUIMessage()
+            val timeFormatted = message.createdAt.toJavaLocalDateTime().toMessageTimeString()
+            val shortTimeStr = message.createdAt.toJavaLocalDateTime().let { "%02d:%02d".format(it.hour, it.minute) }
+            mapOf(
+            "role" to if (message.role == MessageRole.USER) "user" else "assistant",
+            "user" to userName,
+            "char" to charName,
+            "name" to if (message.role == MessageRole.USER) userName else charName,
+            "model" to (model?.displayName?.ifEmpty { model.modelId } ?: ""),
+            "time" to timeFormatted,
+            "shortTime" to shortTimeStr,
+                "tokens" to (message.usage?.totalTokens ?: 0),
+                "loading" to loading,
+                "lastMessage" to lastMessage,
+                "favorite" to isFavorite,
+                "branchIndex" to node.selectIndex + 1,
+                "branchCount" to node.messages.size,
+                "translated" to (message.translation != null),
+                // 原写法的显示条件简写
+                "not_empty" to notEmpty,
+                "not_loading_if_last" to if (lastMessage) !loading else notEmpty,
+                "when_loading" to loading,
+                "when_not_loading" to !loading,
+                "only_last_message" to (lastMessage && !loading),
+                "has_branches" to (node.messages.size > 1),
+                "has_reasoning" to (message.parts.groupMessageParts().firstOrNull() is MessagePartBlock.ThinkingBlock),
+                "has_usage" to (message.usage != null),
+            )
+        } else emptyMap(),
+        parts = if (messageSlotActive) {
+            rememberChatMessageParts(
+                node = node,
+                message = message,
                 assistant = assistant,
+                model = model,
+                loading = loading,
                 regexDepth = regexDepth,
                 isSubAgentConversation = isSubAgentConversation,
-                role = message.role,
-                parts = message.parts,
-                annotations = message.annotations,
-                loading = loading,
-                model = model,
+                isFavorite = isFavorite,
+                onToggleFavorite = onToggleFavorite,
+                onUpdate = onUpdate,
+                onRegenerate = onRegenerate,
+                onEdit = handleEditClick,
+                onOpenPartsEditor = { showPartsEditorSheet = true },
+                onFork = onFork,
+                onWebViewPreview = openWebViewPreview,
+                onOpenActionSheet = { showActionsSheet = true },
+                onTranslate = onTranslate,
+                onClearTranslation = onClearTranslation,
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
-                onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
                 onRegeneratePart = onRegeneratePart,
                 onEditToolCall = onEditToolCall,
             )
-
-            message.translation?.let { translation ->
-                CollapsibleTranslationText(
-                    content = translation,
-                    onClickCitation = {}
-                )
-            }
-        }
-
-        val showActions = if (lastMessage) {
-            !loading
-        } else {
-            message.parts.isEmptyUIMessage().not()
-        }
-
-        val motionScheme = MaterialTheme.motionScheme
-        AnimatedVisibility(
-            visible = showActions,
-            enter = slideInVertically(motionScheme.defaultSpatialSpec()) { it / 2 } +
-                fadeIn(motionScheme.defaultEffectsSpec()),
-            exit = slideOutVertically(motionScheme.fastSpatialSpec()) { it / 2 } +
-                fadeOut(motionScheme.fastEffectsSpec())
+        } else emptyMap(),
+        actions = messageActions,
+        modifier = modifier.fillMaxWidth(),
+        textStyle = textStyle,
+    ) {
+    Column(
+            modifier = modifier.fillMaxWidth(),
+            horizontalAlignment = if (message.role == MessageRole.USER) Alignment.End else Alignment.Start,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Column(
-                modifier = Modifier.animateContentSize()
-            ) {
-                ChatMessageActionButtons(
-                    message = message,
-                    onRegenerate = onRegenerate,
-                    node = node,
-                    onUpdate = onUpdate,
-                    onOpenActionSheet = {
-                        showActionsSheet = true
-                    },
-                    onTranslate = onTranslate,
-                    onClearTranslation = onClearTranslation
-                )
+            if (!message.parts.isEmptyUIMessage()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    ChatMessageAssistantAvatar(
+                        message = message,
+                        model = model,
+                        assistant = assistant,
+                        loading = loading,
+                        modifier = Modifier.weight(1f)
+                    )
+                    ChatMessageUserAvatar(
+                        message = message,
+                        avatar = settings.userAvatar,
+                        nickname = settings.userNickname,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
+            CompositionLocalProvider(
+                LocalTextStyle provides textStyle,
+                LocalWorkspaceId provides assistant?.workspaceId?.toString(),
+            ) {
+                MessagePartsBlock(
+                    assistant = assistant,
+                    regexDepth = regexDepth,
+                    isSubAgentConversation = isSubAgentConversation,
+                    role = message.role,
+                    parts = message.parts,
+                    annotations = message.annotations,
+                    loading = loading,
+                    model = model,
+                    onToolApproval = onToolApproval,
+                    onToolAnswer = onToolAnswer,
+                    onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
+                    onRegeneratePart = onRegeneratePart,
+                    onEditToolCall = onEditToolCall,
+                )
+
+                message.translation?.let { translation ->
+                    CollapsibleTranslationText(
+                        content = translation,
+                        onClickCitation = {}
+                    )
+                }
+            }
+
+            val showActions = if (lastMessage) {
+                !loading
+            } else {
+                message.parts.isEmptyUIMessage().not()
+            }
+
+            val motionScheme = MaterialTheme.motionScheme
+            AnimatedVisibility(
+                visible = showActions,
+                enter = slideInVertically(motionScheme.defaultSpatialSpec()) { it / 2 } +
+                    fadeIn(motionScheme.defaultEffectsSpec()),
+                exit = slideOutVertically(motionScheme.fastSpatialSpec()) { it / 2 } +
+                    fadeOut(motionScheme.fastEffectsSpec())
+            ) {
+                Column(
+                    modifier = Modifier.animateContentSize()
+                ) {
+                    ChatMessageActionButtons(
+                        message = message,
+                        onRegenerate = onRegenerate,
+                        node = node,
+                        onUpdate = onUpdate,
+                        onOpenActionSheet = {
+                            showActionsSheet = true
+                        },
+                        onTranslate = onTranslate,
+                        onClearTranslation = onClearTranslation
+                    )
+                }
+            }
+
+            EditedFilesList(
+                parts = message.parts,
+                assistant = assistant,
+            )
+
+            me.rerere.rikkahub.ui.pages.extensions.plugin.PluginMessageFooterMounts(
+                message = message,
+                conversationId = null,
+                assistantId = assistant?.id?.toString(),
+            )
+
+            ProvideTextStyle(textStyle) {
+                ChatMessageNerdLine(message = message)
+            }
+
         }
-
-        EditedFilesList(
-            parts = message.parts,
-            assistant = assistant,
-        )
-
-        ProvideTextStyle(textStyle) {
-            ChatMessageNerdLine(message = message)
-        }
-
     }
     if (showActionsSheet) {
         ChatMessageActionsSheet(
@@ -364,6 +500,12 @@ fun ChatMessage(
     }
 }
 
+private enum class MessagePartsRenderMode {
+    ALL,
+    LEADING_REASONING_AND_TOOLS,
+    FROM_FIRST_CONTENT,
+}
+
 @OptIn(FlowPreview::class)
 @Composable
 private fun MessagePartsBlock(
@@ -375,6 +517,8 @@ private fun MessagePartsBlock(
     parts: List<UIMessagePart>,
     annotations: List<UIMessageAnnotation>,
     loading: Boolean,
+    renderMode: MessagePartsRenderMode = MessagePartsRenderMode.ALL,
+    wrapTextInDefaultBubble: Boolean = true,
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
@@ -419,17 +563,51 @@ private fun MessagePartsBlock(
 
     // Render parts in original order (group thinking/tool as chain-of-thought)
     val groupedParts = remember(parts) { parts.groupMessageParts() }
-    groupedParts.fastForEach { block ->
+    val firstContentIndex = remember(groupedParts) {
+        groupedParts.indexOfFirst { it !is MessagePartBlock.ThinkingBlock }
+    }
+    val visibleBlocks = remember(groupedParts, firstContentIndex, renderMode) {
+        when (renderMode) {
+            MessagePartsRenderMode.ALL -> groupedParts
+            MessagePartsRenderMode.LEADING_REASONING_AND_TOOLS -> {
+                if (firstContentIndex < 0) groupedParts
+                else groupedParts.subList(0, firstContentIndex)
+            }
+            MessagePartsRenderMode.FROM_FIRST_CONTENT -> {
+                if (firstContentIndex < 0) emptyList()
+                else groupedParts.subList(firstContentIndex, groupedParts.size)
+            }
+        }
+    }
+    // 界面自定义 ui.style("reasoning")；未设置时为 null，各值与原版相同
+    val reasoningStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("reasoning")
+    val customTypo = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.typographySection?.takeIf { it.enabled }
+    val colorScheme = MaterialTheme.colorScheme
+    visibleBlocks.fastForEach { block ->
         when (block) {
             is MessagePartBlock.ThinkingBlock -> {
                 if (block.steps.isNotEmpty()) {
                     val isReasoningOnlyBlock = block.steps.fastAll { it is ThinkingStep.ReasoningStep }
+                    val cotBg = reasoningStyle.colorOr({ it.background }, colorScheme, colorScheme.surfaceContainerHigh)
+                    val cotAlpha = reasoningStyle?.opacity ?: settings.displaySetting.bubbleOpacity
                     ChainOfThought(
                         modifier = Modifier.animateContentSize(),
                         steps = block.steps,
                         collapsedAdaptiveWidth = isReasoningOnlyBlock,
+                        shape = reasoningStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+                            ?: me.rerere.rikkahub.ui.custom.uiCornerShape(20.dp),
+                        border = reasoningStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+                            androidx.compose.foundation.BorderStroke(
+                                it.dp,
+                                reasoningStyle.colorOr({ s -> s.borderColor }, colorScheme, colorScheme.outlineVariant),
+                            )
+                        },
                         cardColors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity),
+                            containerColor = if (reasoningStyle?.background == null && reasoningStyle?.opacity == null) {
+                                MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity)
+                            } else {
+                                cotBg.copy(alpha = cotBg.alpha * cotAlpha)
+                            },
                         ),
                     ) { step ->
                         when (step) {
@@ -481,12 +659,15 @@ private fun MessagePartsBlock(
                 }
             }
 
-            is MessagePartBlock.ChartBlock -> key(block.index) {
-                val spec = remember(block.tool.input) { ChartSpec.fromJson(block.tool.inputAsJson()) }
-                spec?.let { ChartCard(spec = it) }
+            is MessagePartBlock.ChartBlock -> {
+                key(block.index) {
+                    val spec = remember(block.tool.input) { ChartSpec.fromJson(block.tool.inputAsJson()) }
+                    spec?.let { ChartCard(spec = it) }
+                }
             }
 
-            is MessagePartBlock.ContentBlock -> key(block.index) {
+            is MessagePartBlock.ContentBlock -> {
+                key(block.index) {
                 val partRendererType = remember(block.part.metadata) {
                     (block.part.metadata?.get("rikka.renderer") as? kotlinx.serialization.json.JsonPrimitive)?.content
                 }
@@ -494,8 +675,8 @@ private fun MessagePartsBlock(
                 val matchedPartMount = remember(partMounts, partRendererType) {
                     if (partRendererType.isNullOrBlank()) null
                     else partMounts.find { (_, reg) ->
-                        val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
-                        (spec?.get("rendererType") as? kotlinx.serialization.json.JsonPrimitive)?.content == partRendererType
+                        val spec = reg.uiSpec
+                        spec.getValue("rendererType").jsonPrimitive.content == partRendererType
                     }
                 }
                 if (matchedPartMount != null) {
@@ -522,7 +703,20 @@ private fun MessagePartsBlock(
                             )
                         }
                         val textContent = @Composable {
-                            if (role == MessageRole.USER) {
+                            val userTextColor = if (role == MessageRole.USER && customTypo != null) {
+                                me.rerere.rikkahub.ui.custom.resolveUIColor(customTypo.userBodyTextColorHex, colorScheme)
+                            } else Color.Unspecified
+                            val mdStyle = if (userTextColor != Color.Unspecified) {
+                                LocalTextStyle.current.copy(color = userTextColor)
+                            } else LocalTextStyle.current
+                            if (!wrapTextInDefaultBubble) {
+                                MarkdownBlock(
+                                    content = displayContent,
+                                    style = mdStyle,
+                                    onClickCitation = handleClickCitation,
+                                    modifier = Modifier.animateContentSize(),
+                                )
+                            } else if (role == MessageRole.USER) {
                                 Surface(
                                     modifier = Modifier.animateContentSize(),
                                     shape = RoundedCornerShape(16.dp),
@@ -532,6 +726,7 @@ private fun MessagePartsBlock(
                                     Column(modifier = Modifier.padding(8.dp)) {
                                         MarkdownBlock(
                                             content = displayContent,
+                                            style = mdStyle,
                                             onClickCitation = handleClickCitation
                                         )
                                     }
@@ -546,6 +741,7 @@ private fun MessagePartsBlock(
                                         Column(modifier = Modifier.padding(8.dp)) {
                                             MarkdownBlock(
                                                 content = displayContent,
+                                                style = mdStyle,
                                                 onClickCitation = handleClickCitation,
                                             )
                                         }
@@ -553,6 +749,7 @@ private fun MessagePartsBlock(
                                 } else {
                                     MarkdownBlock(
                                         content = displayContent,
+                                        style = mdStyle,
                                         onClickCitation = handleClickCitation,
                                         modifier = Modifier
                                             .animateContentSize()
@@ -648,12 +845,13 @@ private fun MessagePartsBlock(
                         // Skip unknown part types (e.g., deprecated ToolCall, ToolResult, Search)
                     }
                 }
+                }
             }
         }
     }
 
     // Annotations (always rendered at the end)
-    if (annotations.isNotEmpty()) {
+    if (annotations.isNotEmpty() && renderMode != MessagePartsRenderMode.LEADING_REASONING_AND_TOOLS) {
         ChatMessageCitations(annotations = annotations)
     }
 }
@@ -830,7 +1028,7 @@ private fun MessagePartsEditorSheet(
         )
     }
 
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismissRequest,
         sheetState = rememberBottomSheetState(
             initialValue = SheetValue.Expanded,
@@ -1343,9 +1541,10 @@ private fun PluginMessagePartRenderer(
     part: UIMessagePart,
 ) {
     val host = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
-    val spec = (reg.meta as? kotlinx.serialization.json.JsonObject)?.get("spec") as? kotlinx.serialization.json.JsonObject
-    val path = (spec?.get("path") as? kotlinx.serialization.json.JsonPrimitive)?.content
-    val heightDp = ((spec?.get("height") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: 200).coerceIn(60, 800)
+    val spec = reg.uiSpec
+    val path = (spec["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+    val explicitHeight = (spec["height"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()
+    val heightDp = (explicitHeight ?: 160).coerceIn(36, 800)
     val partJsonElement = remember(part) {
         me.rerere.rikkahub.utils.JsonInstant.encodeToJsonElement(UIMessagePart.serializer(), part)
     }
@@ -1354,31 +1553,25 @@ private fun PluginMessagePartRenderer(
             pluginId = runtime.id,
             path = path,
             argsJson = partJsonElement.toString(),
+            autoHeight = explicitHeight == null,
+            initialHeightDp = heightDp,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(heightDp.dp),
         )
     } else {
-        val rendered by androidx.compose.runtime.produceState<String?>(initialValue = null, runtime.id, reg.handlerId, part) {
-            value = runCatching {
-                val res = host.callUiHandler(runtime.id, reg.handlerId, partJsonElement)
-                when (res) {
-                    is kotlinx.serialization.json.JsonPrimitive -> res.content
-                    is kotlinx.serialization.json.JsonObject ->
-                        (res["html"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-                            ?: (res["text"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    else -> null
-                }
-            }.getOrNull()
-        }
-        val content = rendered
-        if (content != null) {
+        val rendered = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginRendered(runtime.id, reg.handlerId, partJsonElement, part)
+        rendered?.exceptionOrNull()?.let { me.rerere.rikkahub.ui.pages.extensions.plugin.PluginRenderError(it) }
+        val content = rendered?.getOrNull()
+        if (!content.isNullOrEmpty()) {
             if (content.trimStart().startsWith("<")) {
                 me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
                     pluginId = runtime.id,
                     path = "",
                     argsJson = partJsonElement.toString(),
                     inlineHtml = content,
+                    autoHeight = explicitHeight == null,
+                    initialHeightDp = heightDp,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(heightDp.dp),
@@ -1389,4 +1582,298 @@ private fun PluginMessagePartRenderer(
         }
     }
 }
+
+/**
+ * 递归渲染自定义消息积木树 [me.rerere.rikkahub.data.model.UIMessageNode]
+ */
+@Composable
+private fun rememberChatMessageParts(
+    node: MessageNode,
+    message: UIMessage,
+    assistant: Assistant?,
+    model: Model?,
+    loading: Boolean,
+    regexDepth: Int?,
+    isSubAgentConversation: Boolean,
+    isFavorite: Boolean,
+    onToggleFavorite: (() -> Unit)?,
+    onUpdate: (MessageNode) -> Unit,
+    onRegenerate: () -> Unit,
+    onEdit: () -> Unit,
+    onOpenPartsEditor: () -> Unit,
+    onFork: () -> Unit,
+    onWebViewPreview: () -> Unit,
+    onOpenActionSheet: () -> Unit,
+    onTranslate: ((UIMessage, Locale) -> Unit)?,
+    onClearTranslation: (UIMessage) -> Unit,
+    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)?,
+    onToolAnswer: ((toolCallId: String, answer: String) -> Unit)?,
+    onRegeneratePart: ((partIndex: Int, rerunTool: Boolean) -> Unit)?,
+    onEditToolCall: ((toolCallId: String, newInput: String, newOutputText: String?, action: ToolEditAction) -> Unit)?,
+): Map<String, @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit> {
+    // 通用节点由 RenderUINode 绘制；这里只提供消息专属的上下文与业务节点（头像、正文、思考、操作栏……）
+    val settings = LocalSettings.current
+    val displaySetting = settings.displaySetting
+    val defaultUser = stringResource(R.string.user_default_name)
+    val defaultAssistant = stringResource(R.string.assistant_page_default_assistant)
+    val timeStr = remember(message.createdAt) {
+        message.createdAt.toJavaLocalDateTime().toMessageTimeString()
+    }
+    // 消息的原版部件：主题用 Host("名字") 放置（Avatar()、MarkdownBody() 等是它们的简写）
+    val workspaceId = assistant?.workspaceId?.toString()
+    return mapOf(
+            "avatar" to { info ->
+                val sizeDp = info.node.avatarSizeDp.coerceAtLeast(1f).dp
+                val avatarShape = info.node.toAvatarShape(cut = me.rerere.rikkahub.ui.custom.isUICutCornerShape())
+                Box(modifier = info.modifier.clip(avatarShape)) {
+                    if (message.role == MessageRole.USER) {
+                        me.rerere.rikkahub.ui.components.ui.UIAvatar(
+                            name = displaySetting.userNickname,
+                            modifier = Modifier.size(sizeDp).clip(avatarShape),
+                            value = displaySetting.userAvatar,
+                            loading = false,
+                        )
+                    } else if (assistant?.useAssistantAvatar == true) {
+                        me.rerere.rikkahub.ui.components.ui.UIAvatar(
+                            name = assistant.name,
+                            modifier = Modifier.size(sizeDp).clip(avatarShape),
+                            value = assistant.avatar,
+                            loading = loading,
+                        )
+                    } else if (model != null) {
+                        me.rerere.rikkahub.ui.components.ui.AutoAIIcon(
+                            name = model.modelId,
+                            modifier = Modifier.size(sizeDp).clip(avatarShape),
+                            loading = loading,
+                        )
+                    } else {
+                        me.rerere.rikkahub.ui.components.ui.UIAvatar(
+                            name = assistant?.name.orEmpty(),
+                            modifier = Modifier.size(sizeDp).clip(avatarShape),
+                            value = assistant?.avatar ?: me.rerere.rikkahub.data.model.Avatar.Dummy,
+                            loading = loading,
+                        )
+                    }
+                }
+            },
+            "model_icon" to { info ->
+                val sizeDp = info.node.avatarSizeDp.coerceAtLeast(1f).dp
+                if (model != null) {
+                    me.rerere.rikkahub.ui.components.ui.AutoAIIcon(
+                        name = model.modelId,
+                        modifier = info.modifier.size(sizeDp),
+                        loading = loading,
+                    )
+                }
+            },
+            "author_name" to { info ->
+                val defaultUser = stringResource(R.string.user_default_name)
+                val defaultAssistant = stringResource(R.string.assistant_page_default_assistant)
+                val authorText = if (message.role == MessageRole.USER) {
+                    displaySetting.userNickname.ifEmpty { defaultUser }
+                } else if (assistant?.useAssistantAvatar == true || model == null) {
+                    assistant?.name?.ifEmpty { defaultAssistant } ?: defaultAssistant
+                } else {
+                    model.displayName.ifEmpty { model.modelId }
+                }
+                Text(
+                    text = authorText,
+                    style = MaterialTheme.typography.labelLargeEmphasized.merge(info.textStyle),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = info.modifier,
+                )
+            },
+            "model_name" to { info ->
+                val modelText = model?.displayName?.ifEmpty { model.modelId }
+                    ?: assistant?.name?.ifEmpty { stringResource(R.string.assistant_page_default_assistant) }
+                    ?: "AI"
+                Text(
+                    text = modelText,
+                    style = MaterialTheme.typography.labelMedium.merge(info.textStyle),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = info.modifier,
+                )
+            },
+            "timestamp" to { info ->
+                val colorScheme = MaterialTheme.colorScheme
+                val timeStr = remember(message.createdAt) {
+                    message.createdAt.toJavaLocalDateTime().toMessageTimeString()
+                }
+                Text(
+                    text = timeStr,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = if (info.textColor != Color.Unspecified) info.textColor
+                        else colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                    ),
+                    maxLines = 1,
+                    modifier = info.modifier,
+                )
+            },
+            "branch_pager" to { info ->
+                ChatMessageBranchSelector(
+                    node = node,
+                    modifier = info.modifier,
+                    onUpdate = onUpdate,
+                )
+            },
+            "reasoning_block" to { info ->
+                CompositionLocalProvider(LocalWorkspaceId provides workspaceId) {
+                    Column(modifier = info.modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MessagePartsBlock(
+                            assistant = assistant,
+                            regexDepth = regexDepth,
+                            isSubAgentConversation = isSubAgentConversation,
+                            role = message.role,
+                            model = model,
+                            parts = message.parts,
+                            annotations = emptyList(),
+                            loading = loading,
+                            renderMode = MessagePartsRenderMode.LEADING_REASONING_AND_TOOLS,
+                            wrapTextInDefaultBubble = false,
+                            onToolApproval = onToolApproval,
+                            onToolAnswer = onToolAnswer,
+                            onUserMessageClick = null,
+                            onRegeneratePart = onRegeneratePart,
+                            onEditToolCall = onEditToolCall,
+                        )
+                    }
+                }
+            },
+            "markdown_body" to { info ->
+                CompositionLocalProvider(LocalWorkspaceId provides workspaceId) {
+                    Column(modifier = info.modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MessagePartsBlock(
+                            assistant = assistant,
+                            regexDepth = regexDepth,
+                            isSubAgentConversation = isSubAgentConversation,
+                            role = message.role,
+                            model = model,
+                            parts = message.parts,
+                            annotations = message.annotations,
+                            loading = loading,
+                            renderMode = MessagePartsRenderMode.FROM_FIRST_CONTENT,
+                            wrapTextInDefaultBubble = false,
+                            onToolApproval = onToolApproval,
+                            onToolAnswer = onToolAnswer,
+                            onUserMessageClick = null,
+                            onRegeneratePart = onRegeneratePart,
+                            onEditToolCall = onEditToolCall,
+                        )
+                    }
+                }
+            },
+            "message_parts" to { info ->
+                CompositionLocalProvider(LocalWorkspaceId provides workspaceId) {
+                    Column(modifier = info.modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        MessagePartsBlock(
+                            assistant = assistant,
+                            regexDepth = regexDepth,
+                            isSubAgentConversation = isSubAgentConversation,
+                            role = message.role,
+                            model = model,
+                            parts = message.parts,
+                            annotations = message.annotations,
+                            loading = loading,
+                            renderMode = MessagePartsRenderMode.ALL,
+                            wrapTextInDefaultBubble = false,
+                            onToolApproval = onToolApproval,
+                            onToolAnswer = onToolAnswer,
+                            onUserMessageClick = null,
+                            onRegeneratePart = onRegeneratePart,
+                            onEditToolCall = onEditToolCall,
+                        )
+                    }
+                }
+            },
+            "translation" to { info ->
+                message.translation?.let { translation ->
+                    Box(modifier = info.modifier) {
+                        CollapsibleTranslationText(
+                            content = translation,
+                            onClickCitation = {},
+                        )
+                    }
+                }
+            },
+            "edited_files" to { info ->
+                Box(modifier = info.modifier) {
+                    EditedFilesList(
+                        parts = message.parts,
+                        assistant = assistant,
+                    )
+                }
+            },
+            "nerd_stats" to { info ->
+                val colorScheme = MaterialTheme.colorScheme
+                val statsColor = if (info.textColor != Color.Unspecified) {
+                    info.textColor
+                } else {
+                    colorScheme.secondary.copy(alpha = 0.55f)
+                }
+                ChatMessageNerdLine(
+                    message = message,
+                    modifier = info.modifier,
+                    color = statsColor,
+                )
+            },
+            "action_bar" to { info ->
+                CustomChatMessageActionButtons(
+                    actionItems = info.node.actionItems,
+                    message = message,
+                    node = node,
+                    onUpdate = onUpdate,
+                    onRegenerate = onRegenerate,
+                    onEdit = onEdit,
+                    onOpenPartsEditor = onOpenPartsEditor,
+                    onFork = onFork,
+                    isFavorite = isFavorite,
+                    onToggleFavorite = onToggleFavorite,
+                    onWebViewPreview = onWebViewPreview,
+                    onOpenActionSheet = onOpenActionSheet,
+                    onTranslate = onTranslate,
+                    onClearTranslation = onClearTranslation,
+                    modifier = info.modifier,
+                )
+            },
+        "plugin_footer" to { info ->
+            Box(info.modifier) {
+                me.rerere.rikkahub.ui.pages.extensions.plugin.PluginMessageFooterMounts(
+                    message = message,
+                    conversationId = null,
+                    assistantId = assistant?.id?.toString(),
+                )
+            }
+        },
+    )
+}
+
+@Composable
+internal fun RenderUICanvasPrimitive(
+    drawType: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    androidx.compose.foundation.Canvas(modifier = modifier) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val r = size.minDimension / 2f
+        when (drawType.lowercase()) {
+            "circle", "dot" -> {
+                drawCircle(color = color, radius = r * 0.8f, center = androidx.compose.ui.geometry.Offset(cx, cy))
+            }
+            "ring" -> {
+                drawCircle(
+                    color = color,
+                    radius = r * 0.78f,
+                    center = androidx.compose.ui.geometry.Offset(cx, cy),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = (r * 0.22f).coerceAtLeast(2f)),
+                )
+            }
+            else -> Unit
+        }
+    }
+}
+
 

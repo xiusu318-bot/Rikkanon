@@ -66,14 +66,15 @@ fun ExtensionSelector(
         skills = skillManager.pruneOrphanedEnabledSkills()
     }
 
-    val pagerState = rememberPagerState { ExtensionTab.entries.size }
+    val tabs = ExtensionTab.entries
+    val pagerState = rememberPagerState { tabs.size }
 
     Column(
         modifier = modifier
     ) {
         PagerTabs(
             pagerState = pagerState,
-            tabs = ExtensionTab.entries,
+            tabs = tabs,
             modifier = Modifier.padding(bottom = 12.dp),
         )
 
@@ -83,7 +84,7 @@ fun ExtensionSelector(
                 .fillMaxWidth()
                 .weight(1f)
         ) { page ->
-            val tab = ExtensionTab.entries[page]
+            val tab = tabs[page]
             when (tab) {
                 ExtensionTab.QUICK_MESSAGES -> {
                     if (settings.quickMessages.isNotEmpty()) {

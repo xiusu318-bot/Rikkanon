@@ -173,6 +173,8 @@ class SettingsStore internal constructor(
         val MODE_INJECTIONS = stringPreferencesKey("mode_injections")
         val ENABLE_ADVANCED_PROMPT = booleanPreferencesKey("enable_advanced_prompt")
         val PROMPT_PRESETS = stringPreferencesKey("prompt_presets")
+        val ENABLE_CUSTOM_UI = booleanPreferencesKey("enable_custom_ui")
+        val UI_PRESETS = stringPreferencesKey("ui_presets")
         val LOREBOOKS = stringPreferencesKey("lorebooks")
         val QUICK_MESSAGES = stringPreferencesKey("quick_messages")
         val ENABLE_SECRET_KEY_ALIAS = booleanPreferencesKey("enable_secret_key_alias")
@@ -258,7 +260,12 @@ class SettingsStore internal constructor(
         // 加载完成前的修改等真实设置出来再应用。已加载时这里不能挂起：输入框、slider 依赖修改同步生效
         if (state.value.init) awaitLoaded()
         synchronized(stateLock) {
-            val updated = fn(state.value)
+            @Suppress("UNCHECKED_CAST")
+            val updated = (fn as (Settings) -> Settings?).invoke(state.value)
+            if (updated == null) {
+                Log.w(TAG, "Ignored null result from SettingsStore.update callback")
+                return
+            }
             if (updated.init) {
                 Log.w(TAG, "Cannot update dummy settings")
                 return

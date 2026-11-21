@@ -149,7 +149,7 @@ fun SettingFilesPage(
             initialValue = SheetValue.Hidden,
             enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
         )
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { showCleanSheet = false },
             sheetState = sheetState,
         ) {
@@ -336,15 +336,16 @@ private fun FolderRow(
             .selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        val tabShapes = me.rerere.rikkahub.ui.custom.uiToggleButtonShapes("pager_tab")
+        val tabColors = me.rerere.rikkahub.ui.custom.uiToggleButtonColors("pager_tab", MaterialTheme.colorScheme.surfaceContainerHighest)
         folders.forEach { folder ->
             val selected = selectedFolder == folder
             ToggleButton(
                 checked = selected,
                 onCheckedChange = { if (!selected) onFolderSelected(folder) },
                 modifier = Modifier.semantics { role = Role.Tab },
-                colors = ToggleButtonDefaults.colors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                ),
+                shapes = tabShapes,
+                colors = tabColors,
             ) {
                 Text(
                     text = folderDisplayName(folder),

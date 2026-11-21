@@ -1,0 +1,9 @@
+{
+  "id": "rikka.askuser.selftest",
+  "name": "工具进度与提问自测",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "main": "main.js",
+  "description": "自测工具执行中的 ctx.progress（实时进度）与 ctx.askUser（中途提问）。在对话里让模型调用 askuser_selftest 工具；提问出现后可以等超过 30 秒再回答，用来确认等待时间不计入超时。",
+  "permissions": []
+}

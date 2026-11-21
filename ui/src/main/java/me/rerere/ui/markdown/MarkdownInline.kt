@@ -85,7 +85,16 @@ private class InlineTextBuilder(
     private fun append(node: MarkdownInline) {
         when (node) {
             is MarkdownInline.Text -> appendText(node.text)
-            is MarkdownInline.Styled -> builder.withStyle(node.style) { append(node.children) }
+            is MarkdownInline.Styled -> {
+                var mergedStyle = node.style
+                if (node.style.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold && context.theme.boldText != null) {
+                    mergedStyle = mergedStyle.merge(context.theme.boldText)
+                }
+                if (node.style.fontStyle == androidx.compose.ui.text.font.FontStyle.Italic && context.theme.italicText != null) {
+                    mergedStyle = mergedStyle.merge(context.theme.italicText)
+                }
+                builder.withStyle(mergedStyle) { append(node.children) }
+            }
             is MarkdownInline.Code -> builder.withStyle(context.theme.inlineCode) { append(node.code) }
             is MarkdownInline.Link -> appendLink(node)
             is MarkdownInline.Math -> appendMath(node)

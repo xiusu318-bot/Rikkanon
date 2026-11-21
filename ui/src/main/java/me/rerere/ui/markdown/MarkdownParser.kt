@@ -252,10 +252,16 @@ private class DomConverter(
             else -> {
                 val children = flow(element.childNodes(), markdown)
                 val style = element.blockStyle()
+                val boxStyle = parseBoxStyle(element.attr("style"))
                 when {
                     children.isEmpty() -> Unit
-                    style == null -> out += children
-                    else -> out += MarkdownBlock.Container(children, style)
+                    style == null && boxStyle == null -> out += children
+                    else -> out += MarkdownBlock.Container(
+                        children = children,
+                        style = style ?: TextStyle.Default,
+                        boxStyle = boxStyle,
+                        hasTextStyle = style != null,
+                    )
                 }
             }
         }

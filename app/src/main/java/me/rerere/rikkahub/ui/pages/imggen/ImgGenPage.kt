@@ -823,11 +823,10 @@ private fun SettingsBottomSheet(
     sheetState: SheetState,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        dragHandle = { BottomSheetDefaults.DragHandle() }
-    ) {
+            ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

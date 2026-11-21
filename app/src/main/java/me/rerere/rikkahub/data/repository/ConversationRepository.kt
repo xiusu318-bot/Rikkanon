@@ -343,6 +343,41 @@ class ConversationRepository(
         messageFtsManager.indexConversation(conversation)
     }
 
+    /**
+     * 连续工具调用期间的轻量级单步检查点落库：
+     * - 仅在单事务内更新 `update_at` 并按 `REPLACE` 增量写入 `[dirtyFromNodeIndex, size)` 的尾部消息节点（通常仅最后 1 条助手节点）；
+     * - 不执行全表删除重插、不覆盖置顶/文件夹等独立元数据列、不在中间步触发 FTS5 全文重分词（最终收尾的 [updateConversation] 统一更新 FTS）。
+     */
+    suspend fun checkpointConversation(
+        conversation: Conversation,
+        dirtyFromNodeIndex: Int = (conversation.messageNodes.size - 1).coerceAtLeast(0),
+    ) {
+        require(conversation.messageNodes.none { it.messages.any { message -> message.hasBase64Part() } })
+        if (!existsConversationById(conversation.id)) {
+            insertConversation(conversation)
+            return
+        }
+        val convId = conversation.id.toString()
+        val nodes = conversation.messageNodes
+        val startIdx = dirtyFromNodeIndex.coerceIn(0, nodes.size)
+        database.withTransaction {
+            conversationDAO.updateTimestamp(convId, conversation.updateAt.toEpochMilli())
+            if (startIdx < nodes.size) {
+                val tailEntities = nodes.subList(startIdx, nodes.size).mapIndexed { offset, node ->
+                    MessageNodeEntity(
+                        id = node.id.toString(),
+                        conversationId = convId,
+                        nodeIndex = startIdx + offset,
+                        messages = JsonInstant.encodeToString(node.messages),
+                        selectIndex = node.selectIndex,
+                    )
+                }
+                messageNodeDAO.insertAll(tailEntities)
+            }
+            messageNodeDAO.deleteFromIndex(convId, nodes.size)
+        }
+    }
+
     suspend fun deleteConversation(conversation: Conversation) {
         // 获取完整的 Conversation（包含 messageNodes）以正确清理文件
         val fullConversation = if (conversation.messageNodes.isEmpty()) {
@@ -510,34 +545,63 @@ class ConversationRepository(
             var offset = 0
             val pageSize = 64
             while (true) {
-                val page = try {
+                val page: List<MessageNodeEntity>? = try {
                     messageNodeDAO.getNodesOfConversationPaged(conversationId, pageSize, offset)
                 } catch (e: SQLiteBlobTooBigException) {
-                    e.printStackTrace()
-                    offset += pageSize
-                    continue
+                    null
                 } catch (e: CancellationException) {
                     // CancellationException 是 IllegalStateException 的子类，必须先重新抛出，否则取消后会在事务内无限循环
                     throw e
                 } catch (e: IllegalStateException) {
-                    e.printStackTrace()
-                    offset += pageSize
-                    continue
+                    null
                 }
-                if (page.isEmpty()) break
-                page.forEach { entity ->
-                    val messages = JsonInstant.decodeFromString<List<UIMessage>>(entity.messages)
-                    val nodeId = Uuid.parse(entity.id)
-                    nodes.add(
-                        MessageNode(
-                            id = nodeId,
-                            messages = messages,
-                            selectIndex = entity.selectIndex,
-                            isFavorite = favoriteNodeIds.contains(nodeId)
+
+                if (page != null) {
+                    if (page.isEmpty()) break
+                    page.forEach { entity ->
+                        val messages = JsonInstant.decodeFromString<List<UIMessage>>(entity.messages)
+                        val nodeId = Uuid.parse(entity.id)
+                        nodes.add(
+                            MessageNode(
+                                id = nodeId,
+                                messages = messages,
+                                selectIndex = entity.selectIndex,
+                                isFavorite = favoriteNodeIds.contains(nodeId)
+                            )
                         )
-                    )
+                    }
+                    offset += page.size
+                } else {
+                    // 当整页合计或单条超长连续工具调用突破 Android SQLite CursorWindow (2MB) 上限时，
+                    // 退化为按元数据 + 256K 字符分片流式拼接读取，杜绝整页 64 条消息被静默跳过丢失。
+                    val metas = messageNodeDAO.getNodeMetasPaged(conversationId, pageSize, offset)
+                    if (metas.isEmpty()) break
+                    val chunkChars = 262_144
+                    metas.forEach { meta ->
+                        val sb = StringBuilder(meta.msgLen.coerceAtLeast(16))
+                        var pos = 1
+                        while (pos <= meta.msgLen) {
+                            val part = messageNodeDAO.getNodeMessagesChunk(meta.id, pos, chunkChars)
+                                ?: break
+                            if (part.isEmpty()) break
+                            sb.append(part)
+                            pos += part.length
+                        }
+                        runCatching {
+                            val messages = JsonInstant.decodeFromString<List<UIMessage>>(sb.toString())
+                            val nodeId = Uuid.parse(meta.id)
+                            nodes.add(
+                                MessageNode(
+                                    id = nodeId,
+                                    messages = messages,
+                                    selectIndex = meta.selectIndex,
+                                    isFavorite = favoriteNodeIds.contains(nodeId)
+                                )
+                            )
+                        }.onFailure { it.printStackTrace() }
+                    }
+                    offset += metas.size
                 }
-                offset += page.size
             }
             nodes
         }

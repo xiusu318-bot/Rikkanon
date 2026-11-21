@@ -1,7 +1,9 @@
 package me.rerere.rikkahub.ui.components.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,16 +15,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardColors
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
@@ -45,6 +51,7 @@ import me.rerere.hugeicons.stroke.ArrowUp01
 import me.rerere.hugeicons.stroke.Search01
 import me.rerere.hugeicons.stroke.Sparkles
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.ui.custom.uiSafeClip
 
 /**
  * 以时间线/步骤卡片的形式展示一组思考过程。
@@ -67,6 +74,8 @@ fun <T> ChainOfThought(
     cardColors: CardColors = CardDefaults.cardColors(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
     ),
+    shape: Shape = RoundedCornerShape(20.dp),
+    border: BorderStroke? = null,
     steps: List<T>,
     collapsedVisibleCount: Int = 2,
     collapsedAdaptiveWidth: Boolean = false,
@@ -76,11 +85,7 @@ fun <T> ChainOfThought(
     val canCollapse = steps.size > collapsedVisibleCount
     val shouldFillCollapseControlWidth = expanded || !collapsedAdaptiveWidth
 
-    Card(
-        modifier = modifier,
-        colors = cardColors,
-        shape = RoundedCornerShape(20.dp),
-    ) {
+    val cardBody: @Composable () -> Unit = {
         Column(
             modifier = Modifier
                 .padding(horizontal = 12.dp, vertical = 4.dp)
@@ -157,6 +162,28 @@ fun <T> ChainOfThought(
                     scope.content(step)
                 }
             }
+        }
+    }
+
+    if (shape is CutCornerShape) {
+        Box(
+            modifier = modifier
+                .uiSafeClip(shape)
+                .background(cardColors.containerColor, shape)
+                .then(if (border != null) Modifier.border(border, shape) else Modifier),
+        ) {
+            CompositionLocalProvider(LocalContentColor provides cardColors.contentColor) {
+                cardBody()
+            }
+        }
+    } else {
+        Card(
+            modifier = modifier,
+            colors = cardColors,
+            shape = shape,
+            border = border,
+        ) {
+            cardBody()
         }
     }
 }

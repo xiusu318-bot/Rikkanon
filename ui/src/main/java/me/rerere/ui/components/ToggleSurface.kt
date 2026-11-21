@@ -5,16 +5,20 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 
+/** 当界面自定义设置了 `ui.shapes` 时由宿主主题设为 true；默认 false 时 `:ui` 模块组件保持原版胶囊圆角。 */
+val LocalCustomShapesEnabled = staticCompositionLocalOf { false }
+
 @Composable
 fun ToggleSurface(
     checked: Boolean,
     modifier: Modifier = Modifier,
-    shape: Shape = RoundedCornerShape(50),
+    shape: Shape = if (LocalCustomShapesEnabled.current) MaterialTheme.shapes.small else RoundedCornerShape(50),
     onClick: () -> Unit = {},
     content: @Composable () -> Unit
 ) {

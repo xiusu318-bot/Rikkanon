@@ -24,6 +24,8 @@ okhttp = "5.5.0"
 retrofit = "3.0.0"
 coil = "3.6.3"
 quickjs = "1.0.15"
+pine = "0.3.0"
+hiddenapibypass = "6.1"
 room = "2.8.5"
 koin-bom = "4.2.2"
 datastore = "1.2.1"
@@ -125,6 +127,8 @@ coil-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", versio
 coil-svg = { group = "io.coil-kt.coil3", name = "coil-svg", version.ref = "coil" }
 coil-cache-control = { group = "io.coil-kt.coil3", name = "coil-network-cache-control", version.ref = "coil" }
 quickjs = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjs" }
+pine-core = { module = "top.canyie.pine:core", version.ref = "pine" }
+hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 koin-bom = { group = "io.insert-koin", name = "koin-bom", version.ref = "koin-bom" }
 koin-android = { group = "io.insert-koin", name = "koin-android" }
 koin-compose = { group = "io.insert-koin", name = "koin-androidx-compose" }

@@ -12,7 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import me.rerere.ai.ui.finishReasoning
+import me.rerere.ai.ui.finalizeInterruptedParts
 import me.rerere.rikkahub.data.model.Conversation
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -69,14 +69,49 @@ class ConversationSession(
         }
     }
 
-    // 失败和取消也必须保存已收到的内容，且保存完成前不能释放生成任务。
-    suspend fun finishGeneration(save: suspend (Conversation) -> Unit): Conversation =
+    // 失败和取消也必须保存已收到的内容，收尾未决思考与中断的工具调用（保留已完成的连续工具步骤），且保存完成前不能释放生成任务。
+    suspend fun finishGeneration(
+        cause: Throwable? = null,
+        interruptedErrorMessage: String? = null,
+        save: suspend (Conversation) -> Unit,
+    ): Conversation =
         withContext(NonCancellable) {
+            val status = if (cause is CancellationException) "cancelled" else "interrupted"
+            val errorMsg = interruptedErrorMessage ?: when (cause) {
+                null -> "Generation finished before tool execution completed."
+                is CancellationException -> "Generation cancelled by user before tool execution completed."
+                else -> "Generation interrupted before tool execution completed."
+            }
+            val keepPending = cause == null
+            val stripKeys = setOf("rikka_ask_user_spec")
             val current = state.value
+            val updatedNodes = current.messageNodes.mapNotNull { node ->
+                var removedBeforeSelected = 0
+                val safeSelect = node.selectIndex.coerceIn(0, (node.messages.size - 1).coerceAtLeast(0))
+                val keptMessages = buildList {
+                    node.messages.forEachIndexed { idx, msg ->
+                        val finalized = msg.finalizeInterruptedParts(
+                            keepPendingApprovals = keepPending,
+                            status = status,
+                            errorMessage = errorMsg,
+                            stripMetadataKeys = stripKeys,
+                        )
+                        if (finalized.isEmptyAssistantShell()) {
+                            if (idx < safeSelect) removedBeforeSelected++
+                        } else {
+                            add(finalized)
+                        }
+                    }
+                }
+                if (keptMessages.isEmpty()) {
+                    null
+                } else {
+                    val nextSelect = (safeSelect - removedBeforeSelected).coerceIn(0, keptMessages.lastIndex)
+                    node.copy(messages = keptMessages, selectIndex = nextSelect)
+                }
+            }
             val conversation = current.copy(
-                messageNodes = current.messageNodes.map { node ->
-                    node.copy(messages = node.messages.map { it.finishReasoning() })
-                },
+                messageNodes = updatedNodes,
                 updateAt = Instant.now(),
             )
             updateConversation(conversation)

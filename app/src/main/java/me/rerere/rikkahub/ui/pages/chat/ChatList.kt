@@ -22,6 +22,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -98,6 +99,7 @@ import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.model.withConversation
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.service.ChatService
@@ -141,9 +143,11 @@ fun ChatList(
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
     AnimatedContent(
         targetState = previewMode,
+        modifier = modifier,
         label = "ChatListMode",
         transitionSpec = {
             (fadeIn() + scaleIn(initialScale = 0.8f) togetherWith fadeOut() + scaleOut(targetScale = 0.8f))
@@ -309,15 +313,19 @@ private fun ChatListNormal(
         }
 
         ChatFontProvider(displaySetting = settings.displaySetting) {
+            // 界面自定义 ui.style("chat.messages", { padding, spacing })；未设置时为原版
+            val messagesStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("chat.messages")
+            val listHPad = (messagesStyle?.paddingHorizontalDp ?: 16f).dp
+            val itemSpacing = (messagesStyle?.spacingDp ?: 12f).dp
             LazyColumn(
                 state = state,
                 // 顶部留白放进 contentPadding，让消息可以滚动到透明标题栏下面
-                contentPadding = PaddingValues(16.dp) + PaddingValues(
+                contentPadding = PaddingValues(horizontal = listHPad, vertical = 16.dp) + PaddingValues(
                     top = innerPadding.calculateTopPadding(),
                     bottom = 32.dp + innerPadding.calculateBottomPadding(),
                 ),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(itemSpacing),
                 modifier = Modifier
                     .fillMaxSize()
                     .topFadingEdge(innerPadding.calculateTopPadding() + 24.dp)
@@ -413,22 +421,27 @@ private fun ChatListNormal(
 
             if (loading) {
                 item(LoadingIndicatorKey) {
-                    Row(
-                        modifier = Modifier.padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    me.rerere.rikkahub.ui.custom.UISlot(
+                        name = "chat.loading",
+                        data = mapOf("status" to processingStatus.orEmpty()),
                     ) {
-                        ContainedLoadingIndicator(
-                            modifier = Modifier.size(28.dp)
-                        )
-                        AnimatedVisibility(
-                            visible = processingStatus != null,
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text(
-                                text = processingStatus ?: "",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ContainedLoadingIndicator(
+                                modifier = Modifier.size(28.dp)
                             )
+                            AnimatedVisibility(
+                                visible = processingStatus != null,
+                            ) {
+                                Text(
+                                    text = processingStatus ?: "",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -450,6 +463,28 @@ private fun ChatListNormal(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
+            if (conversation.messageNodes.isEmpty() && !loading &&
+                me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot("chat.empty") == true
+            ) {
+                val activeModel = settings.getChatModelOf(conversation)
+                me.rerere.rikkahub.ui.custom.UISlot(
+                    name = "chat.empty",
+                    data = mapOf(
+                        "assistant" to (assistant?.name.orEmpty()),
+                        "assistantId" to conversation.assistantId.toString(),
+                        "model" to (activeModel?.displayName.orEmpty()),
+                        "user" to settings.displaySetting.userNickname,
+                    ),
+                    actionsWithArgs = mapOf(
+                        "fill_input" to { args ->
+                            val text = (args.firstOrNull() as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                            if (text.isNotEmpty()) onClickSuggestion(text)
+                        },
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                ) {}
+            }
+
             // 错误消息卡片
             ErrorCardsDisplay(
                 errors = errors,
@@ -680,7 +715,7 @@ private fun ChatListPreview(
                 }
             },
             singleLine = true,
-            shape = CircleShape,
+            shape = me.rerere.rikkahub.ui.custom.uiSearchBarShape(),
             maxLines = 1,
         )
 
@@ -752,27 +787,60 @@ private fun ChatSuggestionsRow(
     conversation: Conversation,
     onClickSuggestion: (String) -> Unit
 ) {
-    LazyRow(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = "chat.suggestions",
+        data = mapOf("items" to conversation.chatSuggestions),
+        actionsWithArgs = mapOf(
+            "select" to { args ->
+                val text = (args.firstOrNull() as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+                if (text.isNotEmpty()) onClickSuggestion(text)
+            },
+        ),
+        modifier = modifier,
     ) {
-        items(conversation.chatSuggestions) { suggestion ->
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable {
-                        onClickSuggestion(suggestion)
-                    }
-                    .background(MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp))
-                    .padding(vertical = 4.dp, horizontal = 8.dp),
-            ) {
-                Text(
-                    text = suggestion,
-                    style = MaterialTheme.typography.bodySmall
-                )
+        val style = me.rerere.rikkahub.ui.custom.uiComponentStyle("chat.suggestion")
+        val cut = me.rerere.rikkahub.ui.custom.isUICutCornerShape()
+        val scheme = MaterialTheme.colorScheme
+        val chipShape = when {
+            style?.cornerDp != null -> me.rerere.rikkahub.ui.custom.uiCornerShape(style.cornerDp.dp, cut = cut)
+            me.rerere.rikkahub.ui.custom.hasUICustomShapes() -> MaterialTheme.shapes.medium
+            else -> RoundedCornerShape(50)
+        }
+        val chipBg = style?.background?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme, scheme.surfaceColorAtElevation(2.dp)) }
+            ?: scheme.surfaceColorAtElevation(2.dp)
+        val chipFg = style?.color?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme, Color.Unspecified) } ?: Color.Unspecified
+        val padH = (style?.paddingHorizontalDp ?: 8f).dp
+        val padV = (style?.paddingVerticalDp ?: 4f).dp
+        val borderMod = if (style?.borderWidthDp != null && style.borderWidthDp > 0f) {
+            val bc = style.borderColor?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme, scheme.outlineVariant) } ?: scheme.outlineVariant
+            Modifier.border(style.borderWidthDp.dp, bc, chipShape)
+        } else Modifier
+        LazyRow(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy((style?.spacingDp ?: 8f).dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            items(conversation.chatSuggestions) { suggestion ->
+                Box(
+                    modifier = Modifier
+                        .clip(chipShape)
+                        .clickable {
+                            onClickSuggestion(suggestion)
+                        }
+                        .background(chipBg, chipShape)
+                        .then(borderMod)
+                        .padding(vertical = padV, horizontal = padH),
+                ) {
+                    Text(
+                        text = suggestion,
+                        color = chipFg,
+                        style = if (style?.fontSizeSp != null) {
+                            MaterialTheme.typography.bodySmall.copy(fontSize = androidx.compose.ui.unit.TextUnit(style.fontSizeSp, androidx.compose.ui.unit.TextUnitType.Sp))
+                        } else MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
     }
@@ -785,6 +853,11 @@ private fun BoxScope.MessageJumper(
     scope: CoroutineScope,
     state: LazyListState
 ) {
+    val goTop: () -> Unit = { scope.launch { state.scrollToItem(0) } }
+    val goUp: () -> Unit = { scope.launch { state.animateScrollToItem((state.firstVisibleItemIndex - 1).fastCoerceAtLeast(0)) } }
+    val goDown: () -> Unit = { scope.launch { state.animateScrollToItem(state.firstVisibleItemIndex + 1) } }
+    val goBottom: () -> Unit = { scope.launch { state.scrollToItem((state.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } }
+
     AnimatedVisibility(
         visible = show,
         modifier = Modifier.align(if (onLeft) Alignment.CenterStart else Alignment.CenterEnd),
@@ -795,87 +868,95 @@ private fun BoxScope.MessageJumper(
             targetOffsetX = { if (onLeft) -it * 2 else it * 2 },
         )
     ) {
-        Column(
-            modifier = Modifier.padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        me.rerere.rikkahub.ui.custom.UISlot(
+            name = "chat.jumper",
+            data = mapOf(
+                "onLeft" to onLeft,
+                "firstVisible" to state.firstVisibleItemIndex,
+                "totalItems" to state.layoutInfo.totalItemsCount,
+            ),
+            actions = mapOf(
+                "top" to goTop,
+                "up" to goUp,
+                "down" to goDown,
+                "bottom" to goBottom,
+            ),
         ) {
-            Surface(
-                onClick = {
-                    scope.launch {
-                        state.scrollToItem(0)
-                    }
-                },
-                shape = CircleShape,
-                tonalElevation = 4.dp,
-                color = MaterialTheme.colorScheme.surfaceColorAtElevation(
-                    4.dp
-                ).copy(alpha = 0.65f)
-            ) {
-                Icon(
-                    imageVector = HugeIcons.ArrowUpDouble,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .padding(4.dp)
-                )
+            val style = me.rerere.rikkahub.ui.custom.uiComponentStyle("chat.jumper")
+            val cut = me.rerere.rikkahub.ui.custom.isUICutCornerShape()
+            val scheme = MaterialTheme.colorScheme
+            val btnShape = when {
+                style?.cornerDp != null -> me.rerere.rikkahub.ui.custom.uiCornerShape(style.cornerDp.dp, cut = cut)
+                me.rerere.rikkahub.ui.custom.hasUICustomShapes() -> MaterialTheme.shapes.medium
+                else -> CircleShape
             }
-            Surface(
-                onClick = {
-                    scope.launch {
-                        state.animateScrollToItem(
-                            (state.firstVisibleItemIndex - 1).fastCoerceAtLeast(
-                                0
-                            )
-                        )
-                    }
-                },
-                shape = CircleShape,
-                tonalElevation = 4.dp,
-                color = MaterialTheme.colorScheme.surfaceColorAtElevation(
-                    4.dp
-                ).copy(alpha = 0.65f)
+            val defaultBg = scheme.surfaceColorAtElevation(4.dp).copy(alpha = 0.65f)
+            val baseBg = style?.background?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme, defaultBg) } ?: defaultBg
+            val btnBg = if (style?.opacity != null) baseBg.copy(alpha = baseBg.alpha * style.opacity) else baseBg
+            val iconCol = style?.color?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme, Color.Unspecified) } ?: Color.Unspecified
+            val borderStroke = if (style?.borderWidthDp != null && style.borderWidthDp > 0f) {
+                val bc = style.borderColor?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it, scheme, scheme.outlineVariant) } ?: scheme.outlineVariant
+                androidx.compose.foundation.BorderStroke(style.borderWidthDp.dp, bc)
+            } else null
+
+            Column(
+                modifier = Modifier.padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy((style?.spacingDp ?: 8f).dp)
             ) {
-                Icon(
-                    imageVector = HugeIcons.ArrowUp01,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .padding(4.dp)
-                )
-            }
-            Surface(
-                onClick = {
-                    scope.launch {
-                        state.animateScrollToItem(state.firstVisibleItemIndex + 1)
-                    }
-                },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceColorAtElevation(
-                    4.dp
-                ).copy(alpha = 0.65f)
-            ) {
-                Icon(
-                    imageVector = HugeIcons.ArrowDown01,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .padding(4.dp)
-                )
-            }
-            Surface(
-                onClick = {
-                    scope.launch {
-                        state.scrollToItem(state.layoutInfo.totalItemsCount - 1)
-                    }
-                },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceColorAtElevation(
-                    4.dp
-                ).copy(alpha = 0.65f),
-            ) {
-                Icon(
-                    imageVector = HugeIcons.ArrowDownDouble,
-                    contentDescription = stringResource(R.string.chat_page_scroll_to_bottom),
-                    modifier = Modifier
-                        .padding(4.dp)
-                )
+                Surface(
+                    onClick = goTop,
+                    shape = btnShape,
+                    border = borderStroke,
+                    tonalElevation = if (style == null) 4.dp else 0.dp,
+                    color = btnBg,
+                ) {
+                    Icon(
+                        imageVector = HugeIcons.ArrowUpDouble,
+                        contentDescription = null,
+                        tint = if (iconCol != Color.Unspecified) iconCol else androidx.compose.material3.LocalContentColor.current,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                }
+                Surface(
+                    onClick = goUp,
+                    shape = btnShape,
+                    border = borderStroke,
+                    tonalElevation = if (style == null) 4.dp else 0.dp,
+                    color = btnBg,
+                ) {
+                    Icon(
+                        imageVector = HugeIcons.ArrowUp01,
+                        contentDescription = null,
+                        tint = if (iconCol != Color.Unspecified) iconCol else androidx.compose.material3.LocalContentColor.current,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                }
+                Surface(
+                    onClick = goDown,
+                    shape = btnShape,
+                    border = borderStroke,
+                    color = btnBg,
+                ) {
+                    Icon(
+                        imageVector = HugeIcons.ArrowDown01,
+                        contentDescription = null,
+                        tint = if (iconCol != Color.Unspecified) iconCol else androidx.compose.material3.LocalContentColor.current,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                }
+                Surface(
+                    onClick = goBottom,
+                    shape = btnShape,
+                    border = borderStroke,
+                    color = btnBg,
+                ) {
+                    Icon(
+                        imageVector = HugeIcons.ArrowDownDouble,
+                        contentDescription = stringResource(R.string.chat_page_scroll_to_bottom),
+                        tint = if (iconCol != Color.Unspecified) iconCol else androidx.compose.material3.LocalContentColor.current,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                }
             }
         }
     }

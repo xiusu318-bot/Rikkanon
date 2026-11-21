@@ -2,6 +2,7 @@ package me.rerere.rikkahub.ui.pages.extensions.plugin
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -53,6 +54,8 @@ private val PERMISSION_LABELS = mapOf(
     "device" to "剪贴板 / 朗读",
     "workspace" to "工作区文件、shell 与终端",
     "memory" to "读写助手记忆",
+    "native" to "原生调用：任意 Java/Kotlin 代码与宿主内部对象（rikka.java / rikka.host）",
+    "hook" to "方法 Hook：拦截、改写、替换宿主与系统的任意方法（rikka.hook）",
 )
 
 private val KIND_LABELS = mapOf(
@@ -68,12 +71,16 @@ private val KIND_LABELS = mapOf(
     "macro" to "宏",
     "ui" to "界面挂载",
     "expose" to "暴露方法",
+    "unload" to "停止/卸载清理钩子",
     "chat.history" to "对话历史改写（仅真实历史）",
     "preset.beforeAssemble" to "预设块组装前改写",
     "prompt.assembled" to "预设组装后改写",
     "lorebook.activated" to "世界书激活改写",
     "promptBlock" to "自定义提示词块",
     "regex" to "正则替换",
+    "skill" to "Agent Skill 声明",
+    "lorebook" to "世界书声明",
+    "quickMessage" to "快捷消息声明",
     "conversation.beforeSave" to "对话保存前改写",
     "search.results" to "搜索结果改写",
     "tools.list" to "工具列表改写",
@@ -98,6 +105,8 @@ fun PluginDetailPage(id: String) {
     val active by host.activeRuntimes.collectAsStateWithLifecycle()
     val errors by host.errors.collectAsStateWithLifecycle()
     val logs by host.logs.collectAsStateWithLifecycle()
+    // 插件运行中 mount / unmount / ui.update 都会递增版本号；页面据此重新读取注册项，否则界面不会刷新
+    val registrationsVersion by host.registrationsVersion.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
     val toaster = LocalToaster.current
     val scope = rememberCoroutineScope()
@@ -129,18 +138,17 @@ fun PluginDetailPage(id: String) {
     }
 
     val disabledKeys = states[id]?.disabled.orEmpty()
-    val pageUiRegs = runtime?.registrations.orEmpty().filter { reg ->
-        reg.kind == "ui" && reg.key !in disabledKeys &&
-            ((reg.meta as? JsonObject)?.get("spec") as? JsonObject)
-                ?.get("type")?.jsonPrimitive?.contentOrNull in setOf("entry", "form", "html")
+    val pageUiRegs = remember(runtime, registrationsVersion, disabledKeys) {
+        runtime?.registrations.orEmpty().filter { reg ->
+            reg.kind == "ui" && reg.key !in disabledKeys &&
+                reg.uiSpec.getValue("type").jsonPrimitive.content in setOf("entry", "form", "html")
+        }
     }
     val entries = pageUiRegs.filter { reg ->
-        ((reg.meta as? JsonObject)?.get("spec") as? JsonObject)
-            ?.get("type")?.jsonPrimitive?.contentOrNull == "entry"
+        reg.uiSpec.getValue("type").jsonPrimitive.content == "entry"
     }
     val formsAndHtml = pageUiRegs.filter { reg ->
-        ((reg.meta as? JsonObject)?.get("spec") as? JsonObject)
-            ?.get("type")?.jsonPrimitive?.contentOrNull in setOf("form", "html")
+        reg.uiSpec.getValue("type").jsonPrimitive.content in setOf("form", "html")
     }
 
     Scaffold(
@@ -210,6 +218,22 @@ fun PluginDetailPage(id: String) {
                         headlineContent = { Text("内存上限") },
                         supportingContent = { Text("${states[id]?.memoryLimitMb ?: PluginRuntime.DEFAULT_MEMORY_LIMIT_MB} MB（重新启用后生效）") },
                     )
+                    if (states[id]?.enabled == true) {
+                        item(
+                            onClick = {
+                                scope.launch {
+                                    runCatching { host.reload(id) }
+                                        .onSuccess { toaster.show("已重新加载 ${plugin.manifest.name}") }
+                                        .onFailure {
+                                            host.recordError(id, it)
+                                            toaster.show(it.message ?: it.javaClass.name, type = ToastType.Error)
+                                        }
+                                }
+                            },
+                            headlineContent = { Text("重新加载插件") },
+                            supportingContent = { Text("从磁盘重新读取代码并重启插件运行时") },
+                        )
+                    }
                 }
             }
             if (runtime == null || entries.isNotEmpty() || formsAndHtml.isEmpty()) {
@@ -220,9 +244,12 @@ fun PluginDetailPage(id: String) {
                             pageUiRegs.isEmpty() -> item(headlineContent = { Text("该插件没有提供界面") })
                         }
                         entries.forEach { reg ->
-                            val spec = (reg.meta as JsonObject)["spec"] as JsonObject
+                            val spec = reg.uiSpec
                             val title = spec["title"]?.jsonPrimitive?.contentOrNull ?: "打开"
                             val openPath = spec["path"]?.jsonPrimitive?.contentOrNull
+                            val iconName = spec["icon"]?.jsonPrimitive?.contentOrNull
+                            val badgeText = spec["badge"]?.jsonPrimitive?.contentOrNull
+                                ?: spec["trailingText"]?.jsonPrimitive?.contentOrNull
                             item(
                                 onClick = {
                                     if (openPath != null) {
@@ -247,6 +274,25 @@ fun PluginDetailPage(id: String) {
                                 },
                                 headlineContent = { Text(title) },
                                 supportingContent = spec["description"]?.jsonPrimitive?.contentOrNull?.let { d -> { Text(d) } },
+                                leadingContent = iconName?.let { name ->
+                                    {
+                                        me.rerere.rikkahub.ui.components.ui.CardGroupIcon(
+                                            resolvePluginIcon(name),
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        )
+                                    }
+                                },
+                                trailingContent = badgeText?.takeIf { it.isNotBlank() }?.let { b ->
+                                    {
+                                        androidx.compose.material3.Badge(
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        ) {
+                                            Text(b, modifier = Modifier.padding(horizontal = 4.dp))
+                                        }
+                                    }
+                                },
                             )
                         }
                     }
@@ -254,8 +300,8 @@ fun PluginDetailPage(id: String) {
             }
             if (runtime != null && formsAndHtml.isNotEmpty()) {
                 items(formsAndHtml, key = { it.key }) { reg ->
-                    val spec = (reg.meta as? JsonObject)?.get("spec") as? JsonObject ?: return@items
-                    when (spec["type"]?.jsonPrimitive?.contentOrNull) {
+                    val spec = reg.uiSpec
+                    when (spec.getValue("type").jsonPrimitive.content) {
                         "form" -> PluginFormCardGroup(
                             host = host,
                             runtime = runtime,
@@ -273,18 +319,23 @@ fun PluginDetailPage(id: String) {
                             },
                         )
                         "html" -> {
-                            val path = spec["path"]?.jsonPrimitive?.contentOrNull ?: return@items
+                            val path = spec["path"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                            val inlineHtml = spec["html"]?.jsonPrimitive?.contentOrNull
+                            if (path.isEmpty() && inlineHtml == null) return@items
                             val title = spec["title"]?.jsonPrimitive?.contentOrNull ?: "插件面板"
-                            val heightDp = (spec["height"]?.jsonPrimitive?.intOrNull ?: 220).coerceIn(80, 800)
+                            val explicitHeight = spec["height"]?.jsonPrimitive?.intOrNull?.coerceAtLeast(1)
                             CardGroup(title = { Text(title) }) {
                                 formItem {
                                     PluginWebViewBox(
                                         pluginId = id,
                                         path = path,
+                                        inlineHtml = inlineHtml,
                                         argsJson = "{}",
+                                        autoHeight = explicitHeight == null,
+                                        initialHeightDp = explicitHeight ?: 220,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(heightDp.dp),
+                                            .then(if (explicitHeight != null) Modifier.height(explicitHeight.dp) else Modifier),
                                     )
                                 }
                             }

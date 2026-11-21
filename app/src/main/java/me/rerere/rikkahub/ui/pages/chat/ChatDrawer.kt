@@ -1,8 +1,13 @@
 package me.rerere.rikkahub.ui.pages.chat
 
+import androidx.compose.foundation.layout.fillMaxSize
+import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.toAvatarShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -107,6 +112,10 @@ fun ChatDrawerContent(
     vm: ChatVM,
     settings: Settings,
     current: Conversation,
+    asSheet: Boolean = true,
+    modifier: Modifier = Modifier,
+    hasExplicitBg: Boolean = false,
+    onDismissDrawer: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -167,263 +176,396 @@ fun ChatDrawerContent(
 
     // Menu popup 状态
     var showMenuPopup by remember { mutableStateOf(false) }
+    var showCustomAssistantPickerSheet by remember { mutableStateOf(false) }
 
-    ModalDrawerSheet(
-        modifier = Modifier.width(300.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+    // 界面自定义：ui.style("chat.drawer", { width, bg, corner })；未设置时为原版
+    val drawerStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("chat.drawer")
+
+    // 切换助手：按设置新建对话或打开该助手最近的对话（原版助手选择器的行为，界面自定义的助手切换共用）
+    val selectAssistant: (Assistant) -> Unit = { assistant ->
+        onDismissDrawer()
+        val updateJob = vm.updateSettings { it.copy(assistantId = assistant.id) }
+                scope.launch {
+                    updateJob.join()
+                    val id = if (context.readBooleanPreference("create_new_conversation_on_start", true)) {
+                        Uuid.random()
+                    } else {
+                        repo.getConversationsOfAssistant(assistant.id)
+                            .first()
+                            .firstOrNull()
+                            ?.id ?: Uuid.random()
+                    }
+                    navigateToChatPage(navigator = navController, chatId = id)
+                }
+    }
+
+    val currentAssistantObj = remember(settings.assistants, settings.assistantId) {
+        settings.assistants.find { it.id == settings.assistantId } ?: settings.assistants.firstOrNull()
+    }
+
+    if (showCustomAssistantPickerSheet && currentAssistantObj != null) {
+        me.rerere.rikkahub.ui.components.ai.AssistantPickerSheet(
+            settings = settings,
+            currentAssistant = currentAssistantObj,
+            onAssistantSelected = { assistant ->
+                showCustomAssistantPickerSheet = false
+                selectAssistant(assistant)
+            },
+            onDismiss = { showCustomAssistantPickerSheet = false },
+        )
+    }
+
+    val drawerBody: @Composable () -> Unit = {
+        val drawerSlotActive = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot("chat.drawer") == true
+        val drawerUserName = settings.displaySetting.userNickname.ifBlank { stringResource(R.string.user_default_name) }
+        val drawerAssistantName = settings.getCurrentAssistant().name.ifBlank { stringResource(R.string.assistant_page_default_assistant) }
+        // 界面自定义：主题可用 ui.slot("chat.drawer", ...) 接管侧边栏内容；没写时绘制下面的原版
+        me.rerere.rikkahub.ui.custom.UISlot(
+            name = "chat.drawer",
+            data = if (drawerSlotActive) mapOf(
+                "user" to drawerUserName,
+                "assistant" to drawerAssistantName,
+                "assistantId" to settings.assistantId,
+            ) else emptyMap(),
+            parts = if (drawerSlotActive) rememberDrawerParts(
+            settings = settings,
+            vm = vm,
+            drawerVm = drawerVm,
+            navController = navController,
+            current = current,
+            conversations = conversations,
+            conversationJobs = conversationJobs.keys,
+            conversationListState = conversationListState,
+            folders = folders,
+            selectedFolderId = selectedFolderId,
+            memoryDreaming = memoryDreaming,
+            onCreateFolder = { showCreateFolderDialog = true },
+            onRenameFolder = { folderToRename = it },
+            onDeleteFolder = { folderToDelete = it },
+            onMoveToAssistant = {
+                conversationToMove = it
+                showMoveToAssistantSheet = true
+            },
+            onMoveToFolder = {
+                conversationToMoveFolder = it
+                showMoveToFolderSheet = true
+            },
+            onSelectAssistant = selectAssistant,
+            onDismissDrawer = onDismissDrawer,
+            ) else emptyMap(),
+            actions = mapOf(
+                "new_chat" to {
+                    onDismissDrawer()
+                    navigateToChatPage(navController)
+                },
+                "open_assistant_picker" to { showCustomAssistantPickerSheet = true },
+                "edit_assistant" to {
+                    onDismissDrawer()
+                    navController.navigate(Screen.AssistantDetail(id = settings.assistantId.toString()))
+                },
+                "edit_nickname" to { nicknameEditState.open(settings.displaySetting.userNickname) },
+                "create_folder" to { showCreateFolderDialog = true },
+            ),
+            defaults = me.rerere.rikkahub.ui.custom.UINodeDefaults(
+                textBaseStyle = MaterialTheme.typography.bodyMedium,
+                textColor = MaterialTheme.colorScheme.onSurface,
+                boldWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                textMaxLines = 1,
+                buttonContainer = MaterialTheme.colorScheme.primary,
+                buttonContent = MaterialTheme.colorScheme.onPrimary,
+                iconTint = MaterialTheme.colorScheme.onSurface,
+                iconButtonDefaultIcon = "settings",
+                columnWeightFill = true,
+            ),
+            modifier = Modifier.fillMaxSize(),
         ) {
-            BackupReminderCard(
-                settings = settings,
-                onClick = { navController.navigate(Screen.Backup) },
-            )
-
-            // 用户头像和昵称自定义区域
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            Column(
+                modifier = Modifier.padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                UIAvatar(
-                    name = settings.displaySetting.userNickname.ifBlank { stringResource(R.string.user_default_name) },
-                    value = settings.displaySetting.userAvatar,
-                    onUpdate = { newAvatar ->
-                        vm.updateSettings {
-                            it.copy(
-                                displaySetting = it.displaySetting.copy(
-                                    userAvatar = newAvatar
-                                )
-                            )
-                        }
-                    },
-                    modifier = Modifier.size(50.dp),
+                BackupReminderCard(
+                    settings = settings,
+                    onClick = { navController.navigate(Screen.Backup) },
                 )
 
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                // 用户头像和昵称自定义区域
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text(
-                            text = settings.displaySetting.userNickname.ifBlank { stringResource(R.string.user_default_name) },
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.clickable {
-                                nicknameEditState.open(settings.displaySetting.userNickname)
+                    UIAvatar(
+                        name = settings.displaySetting.userNickname.ifBlank { stringResource(R.string.user_default_name) },
+                        value = settings.displaySetting.userAvatar,
+                        onUpdate = { newAvatar ->
+                            vm.updateSettings {
+                                it.copy(
+                                    displaySetting = it.displaySetting.copy(
+                                        userAvatar = newAvatar
+                                    )
+                                )
                             }
-                        )
+                        },
+                        modifier = Modifier.size(50.dp),
+                    )
 
-                        Icon(
-                            imageVector = HugeIcons.PencilEdit01,
-                            contentDescription = "Edit",
-                            modifier = Modifier
-                                .onClick {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = settings.displaySetting.userNickname.ifBlank { stringResource(R.string.user_default_name) },
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.clickable {
                                     nicknameEditState.open(settings.displaySetting.userNickname)
                                 }
-                                .size(LocalTextStyle.current.fontSize.toDp())
-                        )
-                    }
-                    Greeting(
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
+                            )
 
-            DrawerActions(navController = navController)
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                FolderBar(
-                    folders = folders,
-                    selectedFolderId = selectedFolderId,
-                    onSelect = { drawerVm.selectFolder(it) },
-                    onCreate = { showCreateFolderDialog = true },
-                    onRename = { folderToRename = it },
-                    onDelete = { folderToDelete = it },
-                    modifier = Modifier.weight(1f),
-                )
-
-                ConversationSortButton(
-                    sortOrder = settings.displaySetting.conversationSortOrder,
-                    onSortOrderChange = { sortOrder ->
-                        vm.updateSettings {
-                            it.copy(
-                                displaySetting = it.displaySetting.copy(
-                                    conversationSortOrder = sortOrder
-                                )
+                            Icon(
+                                imageVector = HugeIcons.PencilEdit01,
+                                contentDescription = "Edit",
+                                modifier = Modifier
+                                    .onClick {
+                                        nicknameEditState.open(settings.displaySetting.userNickname)
+                                    }
+                                    .size(LocalTextStyle.current.fontSize.toDp())
                             )
                         }
-                        // 换排序后回到顶部，否则会停留在原来滚动到的位置
-                        scope.launch { conversationListState.scrollToItem(0) }
-                    },
-                )
-            }
-
-            ConversationList(
-                current = current,
-                conversations = conversations,
-                conversationJobs = conversationJobs.keys,
-                listState = conversationListState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                onClick = {
-                    navigateToChatPage(navController, it.id)
-                },
-                onRegenerateTitle = {
-                    vm.generateTitle(it, true)
-                },
-                onDelete = {
-                    scope.launch {
-                        vm.deleteConversation(it).join()
-                        conversations.refresh()
-                        if (it.id == current.id) {
-                            navigateToChatPage(navController)
-                        }
-                    }
-                },
-                onPin = {
-                    vm.updatePinnedStatus(it)
-                },
-                onMoveToAssistant = {
-                    conversationToMove = it
-                    showMoveToAssistantSheet = true
-                },
-                onMoveToFolder = {
-                    conversationToMoveFolder = it
-                    showMoveToFolderSheet = true
-                }
-            )
-
-            if (memoryDreaming) {
-                MemoryDreamingEntry(
-                    onClick = { navController.navigate(Screen.AssistantMemory(settings.assistantId.toString())) },
-                )
-            }
-
-            // 助手选择器
-            AssistantPicker(
-                settings = settings,
-                onSelectAssistant = { assistant ->
-                    val updateJob = vm.updateSettings { it.copy(assistantId = assistant.id) }
-                    scope.launch {
-                        updateJob.join()
-                        val id = if (context.readBooleanPreference("create_new_conversation_on_start", true)) {
-                            Uuid.random()
-                        } else {
-                            repo.getConversationsOfAssistant(assistant.id)
-                                .first()
-                                .firstOrNull()
-                                ?.id ?: Uuid.random()
-                        }
-                        navigateToChatPage(navigator = navController, chatId = id)
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                onClickSetting = {
-                    val currentAssistantId = settings.assistantId
-                    navController.navigate(Screen.AssistantDetail(id = currentAssistantId.toString()))
-                }
-            )
-
-            Row(
-                horizontalArrangement = Arrangement.SpaceAround,
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
-            ) {
-                DrawerAction(
-                    icon = {
-                        Icon(
-                            imageVector = HugeIcons.LookTop,
-                            contentDescription = stringResource(R.string.assistant_page_title)
+                        Greeting(
+                            style = MaterialTheme.typography.labelMedium,
                         )
-                    },
-                    label = {
-                        Text(stringResource(R.string.assistant_page_title))
-                    },
-                    onClick = {
-                        navController.navigate(Screen.Assistant)
-                    },
-                )
+                    }
+                }
 
-                Box {
-                    DrawerAction(
-                        icon = {
-                            Icon(HugeIcons.Sparkles, "Menu")
-                        },
-                        label = {
-                            Text(stringResource(R.string.menu))
-                        },
-                        onClick = {
-                            showMenuPopup = true
+                DrawerActions(navController = navController)
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FolderBar(
+                        folders = folders,
+                        selectedFolderId = selectedFolderId,
+                        onSelect = { drawerVm.selectFolder(it) },
+                        onCreate = { showCreateFolderDialog = true },
+                        onRename = { folderToRename = it },
+                        onDelete = { folderToDelete = it },
+                        modifier = Modifier.weight(1f),
+                    )
+
+                    ConversationSortButton(
+                        sortOrder = settings.displaySetting.conversationSortOrder,
+                        onSortOrderChange = { sortOrder ->
+                            vm.updateSettings {
+                                it.copy(
+                                    displaySetting = it.displaySetting.copy(
+                                        conversationSortOrder = sortOrder
+                                    )
+                                )
+                            }
+                            // 换排序后回到顶部，否则会停留在原来滚动到的位置
+                            scope.launch { conversationListState.scrollToItem(0) }
                         },
                     )
-                    DropdownMenu(
-                        expanded = showMenuPopup,
-                        onDismissRequest = { showMenuPopup = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_page_menu_image_generation)) },
-                            leadingIcon = { Icon(HugeIcons.Image02, null) },
-                            onClick = {
-                                showMenuPopup = false
-                                navController.navigate(Screen.ImageGen)
-                            }
-                        )
-                    }
                 }
 
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.InLove, stringResource(R.string.favorite_page_title))
-                    },
-                    label = {
-                        Text(stringResource(R.string.favorite_page_title))
-                    },
+                ConversationList(
+                    current = current,
+                    conversations = conversations,
+                    conversationJobs = conversationJobs.keys,
+                    listState = conversationListState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
                     onClick = {
-                        navController.navigate(Screen.Favorite)
+                        onDismissDrawer()
+                        navigateToChatPage(navController, it.id)
                     },
+                    onRegenerateTitle = {
+                        vm.generateTitle(it, true)
+                    },
+                    onDelete = {
+                        scope.launch {
+                            vm.deleteConversation(it).join()
+                            conversations.refresh()
+                            if (it.id == current.id) {
+                                navigateToChatPage(navController)
+                            }
+                        }
+                    },
+                    onPin = {
+                        vm.updatePinnedStatus(it)
+                    },
+                    onMoveToAssistant = {
+                        conversationToMove = it
+                        showMoveToAssistantSheet = true
+                    },
+                    onMoveToFolder = {
+                        conversationToMoveFolder = it
+                        showMoveToFolderSheet = true
+                    }
                 )
 
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.ChartColumn, "统计数据")
+                if (memoryDreaming) {
+                    MemoryDreamingEntry(
+                        onClick = { navController.navigate(Screen.AssistantMemory(settings.assistantId.toString())) },
+                    )
+                }
+
+                // 助手选择器
+                AssistantPicker(
+                    settings = settings,
+                    onSelectAssistant = { assistant ->
+                        onDismissDrawer()
+                        val updateJob = vm.updateSettings { it.copy(assistantId = assistant.id) }
+                        scope.launch {
+                            updateJob.join()
+                            val id = if (context.readBooleanPreference("create_new_conversation_on_start", true)) {
+                                Uuid.random()
+                            } else {
+                                repo.getConversationsOfAssistant(assistant.id)
+                                    .first()
+                                    .firstOrNull()
+                                    ?.id ?: Uuid.random()
+                            }
+                            navigateToChatPage(navigator = navController, chatId = id)
+                        }
                     },
-                    label = {
-                        Text("统计数据")
-                    },
-                    onClick = {
-                        navController.navigate(Screen.Stats)
-                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    onClickSetting = {
+                        val currentAssistantId = settings.assistantId
+                        navController.navigate(Screen.AssistantDetail(id = currentAssistantId.toString()))
+                    }
                 )
 
-                Spacer(Modifier.weight(1f))
+                Row(
+                    horizontalArrangement = Arrangement.SpaceAround,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp)
+                ) {
+                    DrawerAction(
+                        icon = {
+                            Icon(
+                                imageVector = HugeIcons.LookTop,
+                                contentDescription = stringResource(R.string.assistant_page_title)
+                            )
+                        },
+                        label = {
+                            Text(stringResource(R.string.assistant_page_title))
+                        },
+                        onClick = {
+                            navController.navigate(Screen.Assistant)
+                        },
+                    )
 
-                DrawerAction(
-                    icon = {
-                        Icon(HugeIcons.Settings03, null)
-                    },
-                    label = { Text(stringResource(R.string.settings)) },
-                    onClick = {
-                        navController.navigate(Screen.Setting)
-                    },
-                )
+                    Box {
+                        DrawerAction(
+                            icon = {
+                                Icon(HugeIcons.Sparkles, "Menu")
+                            },
+                            label = {
+                                Text(stringResource(R.string.menu))
+                            },
+                            onClick = {
+                                showMenuPopup = true
+                            },
+                        )
+                        DropdownMenu(
+                            expanded = showMenuPopup,
+                            onDismissRequest = { showMenuPopup = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_page_menu_image_generation)) },
+                                leadingIcon = { Icon(HugeIcons.Image02, null) },
+                                onClick = {
+                                    showMenuPopup = false
+                                    navController.navigate(Screen.ImageGen)
+                                }
+                            )
+                        }
+                    }
+
+                    DrawerAction(
+                        icon = {
+                            Icon(HugeIcons.InLove, stringResource(R.string.favorite_page_title))
+                        },
+                        label = {
+                            Text(stringResource(R.string.favorite_page_title))
+                        },
+                        onClick = {
+                            navController.navigate(Screen.Favorite)
+                        },
+                    )
+
+                    DrawerAction(
+                        icon = {
+                            Icon(HugeIcons.ChartColumn, "统计数据")
+                        },
+                        label = {
+                            Text("统计数据")
+                        },
+                        onClick = {
+                            navController.navigate(Screen.Stats)
+                        },
+                    )
+
+                    Spacer(Modifier.weight(1f))
+
+                    DrawerAction(
+                        icon = {
+                            Icon(HugeIcons.Settings03, null)
+                        },
+                        label = { Text(stringResource(R.string.settings)) },
+                        onClick = {
+                            onDismissDrawer()
+                            navController.navigate(Screen.Setting)
+                        },
+                    )
+                }
             }
+        }
+    }
+
+    if (asSheet) {
+        ModalDrawerSheet(
+            modifier = modifier.width((drawerStyle?.widthDp ?: 300f).dp),
+            drawerContainerColor = drawerStyle.colorOr({ it.background }, MaterialTheme.colorScheme, androidx.compose.material3.DrawerDefaults.modalContainerColor),
+            drawerShape = drawerStyle?.cornerDp?.let {
+                me.rerere.rikkahub.ui.custom.uiCornerShape(
+                    topStart = 0.dp,
+                    topEnd = it.dp,
+                    bottomEnd = it.dp,
+                    bottomStart = 0.dp,
+                    cut = me.rerere.rikkahub.ui.custom.isUICutCornerShape(),
+                )
+            } ?: androidx.compose.material3.DrawerDefaults.shape,
+        ) {
+            drawerBody()
+        }
+    } else {
+        val defaultContainerColor = if (hasExplicitBg) {
+            androidx.compose.ui.graphics.Color.Transparent
+        } else {
+            drawerStyle.colorOr({ it.background }, MaterialTheme.colorScheme, androidx.compose.material3.DrawerDefaults.modalContainerColor)
+        }
+        Surface(
+            modifier = modifier,
+            color = defaultContainerColor,
+        ) {
+            drawerBody()
         }
     }
 
@@ -479,7 +621,7 @@ fun ChatDrawerContent(
                 }
             }
         }
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = {
                 showMoveToFolderSheet = false
                 conversationToMoveFolder = null
@@ -654,7 +796,7 @@ fun ChatDrawerContent(
 
     // 移动到助手 Bottom Sheet
     if (showMoveToAssistantSheet) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = {
                 showMoveToAssistantSheet = false
                 conversationToMove = null
@@ -846,6 +988,148 @@ private fun DrawerAction(
 }
 
 @Composable
+private fun rememberDrawerParts(
+    settings: Settings,
+    vm: ChatVM,
+    drawerVm: ChatDrawerVM,
+    navController: Navigator,
+    current: Conversation,
+    conversations: androidx.paging.compose.LazyPagingItems<ConversationListItem>,
+    conversationJobs: Collection<Uuid>,
+    conversationListState: androidx.compose.foundation.lazy.LazyListState,
+    folders: List<Folder>,
+    selectedFolderId: Uuid?,
+    memoryDreaming: Boolean,
+    onCreateFolder: () -> Unit,
+    onRenameFolder: (Folder) -> Unit,
+    onDeleteFolder: (Folder) -> Unit,
+    onMoveToAssistant: (Conversation) -> Unit,
+    onMoveToFolder: (Conversation) -> Unit,
+    onSelectAssistant: (Assistant) -> Unit,
+    onDismissDrawer: () -> Unit = {},
+): Map<String, @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit> {
+    // 通用节点由 RenderUINode 绘制；这里只提供侧边栏专属的上下文与业务节点（头像、文件夹栏、会话列表、助手切换）
+    val scope = rememberCoroutineScope()
+    val colorScheme = MaterialTheme.colorScheme
+    val defaultUser = stringResource(R.string.user_default_name)
+    val defaultAssistant = stringResource(R.string.assistant_page_default_assistant)
+    val currentAssistant = remember(settings.assistants, settings.assistantId) {
+        settings.assistants.find { it.id == settings.assistantId }
+    }
+    val userName = settings.displaySetting.userNickname.ifBlank { defaultUser }
+    val charName = currentAssistant?.name?.ifBlank { defaultAssistant } ?: defaultAssistant
+
+    // 侧边栏的原版部件：主题用 Host("名字") 放置（FolderBar()、ConversationList() 等是它们的简写）
+    return mapOf(
+            "avatar" to { info ->
+                val avSize = info.node.avatarSizeDp.coerceAtLeast(1f).dp
+                val avShape = info.node.toAvatarShape(cut = me.rerere.rikkahub.ui.custom.isUICutCornerShape())
+                UIAvatar(
+                    name = userName,
+                    value = settings.displaySetting.userAvatar,
+                    shape = avShape,
+                    onUpdate = { newAvatar ->
+                        vm.updateSettings {
+                            it.copy(displaySetting = it.displaySetting.copy(userAvatar = newAvatar))
+                        }
+                    },
+                    modifier = info.modifier.size(avSize),
+                )
+            },
+            "author_name" to { info ->
+                Text(
+                    text = info.node.customText.ifBlank { userName },
+                    style = info.textStyle,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = info.modifier,
+                )
+            },
+            "folder_bar" to { info ->
+                // 与原版侧边栏相同的文件夹栏 + 排序按钮（标签圆角等样式用 ui.style("folder_chip")）
+                Row(
+                    modifier = info.modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FolderBar(
+                        folders = folders,
+                        selectedFolderId = selectedFolderId,
+                        onSelect = { drawerVm.selectFolder(it) },
+                        onCreate = onCreateFolder,
+                        onRename = onRenameFolder,
+                        onDelete = onDeleteFolder,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ConversationSortButton(
+                        sortOrder = settings.displaySetting.conversationSortOrder,
+                        onSortOrderChange = { sortOrder ->
+                            vm.updateSettings {
+                                it.copy(displaySetting = it.displaySetting.copy(conversationSortOrder = sortOrder))
+                            }
+                            // 换排序后回到顶部，否则会停留在原来滚动到的位置
+                            scope.launch { conversationListState.scrollToItem(0) }
+                        },
+                    )
+                }
+            },
+            "conversation_list" to { info ->
+                Column(modifier = info.modifier.fillMaxWidth()) {
+                    ConversationList(
+                        current = current,
+                        conversations = conversations,
+                        conversationJobs = conversationJobs,
+                        listState = conversationListState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        onClick = {
+                            onDismissDrawer()
+                            navigateToChatPage(navController, it.id)
+                        },
+                        onRegenerateTitle = { vm.generateTitle(it, true) },
+                        onDelete = {
+                            scope.launch {
+                                vm.deleteConversation(it).join()
+                                conversations.refresh()
+                                if (it.id == current.id) {
+                                    navigateToChatPage(navController)
+                                }
+                            }
+                        },
+                        onPin = { vm.updatePinnedStatus(it) },
+                        onMoveToAssistant = onMoveToAssistant,
+                        onMoveToFolder = onMoveToFolder,
+                    )
+                    if (memoryDreaming) {
+                        MemoryDreamingEntry(
+                            onClick = { navController.navigate(Screen.AssistantMemory(settings.assistantId.toString())) },
+                        )
+                    }
+                }
+            },
+            "assistant_picker" to { info ->
+                // 与原版侧边栏相同：切换助手后按设置新建或打开该助手最近的对话
+                AssistantPicker(
+                    settings = settings,
+                    onSelectAssistant = onSelectAssistant,
+                    modifier = info.modifier.fillMaxWidth(),
+                    onClickSetting = {
+                        navController.navigate(Screen.AssistantDetail(id = settings.assistantId.toString()))
+                    },
+                )
+            },
+        "backup_reminder" to { info ->
+            Box(info.modifier) {
+                BackupReminderCard(settings = settings, onClick = { navController.navigate(Screen.Backup) })
+            }
+        },
+    )
+}
+
+@Composable
 private fun FolderBar(
     folders: List<Folder>,
     selectedFolderId: Uuid?,
@@ -919,11 +1203,15 @@ private fun ConversationSortButton(
     onSortOrderChange: (ConversationSortOrder) -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    // 界面自定义 ui.style("sort_button")；未设置时为 null，各值与原版相同
+    val uiStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("sort_button")
+    val scheme = MaterialTheme.colorScheme
     Box {
         Surface(
             onClick = { menuExpanded = true },
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = uiStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) } ?: CircleShape,
+            color = uiStyle.colorOr({ it.background }, scheme, scheme.surfaceContainerLow),
+            contentColor = uiStyle.colorOr({ it.color }, scheme, androidx.compose.material3.contentColorFor(scheme.surfaceContainerLow)),
         ) {
             Tooltip(
                 tooltip = { Text(stringResource(R.string.chat_page_sort_conversations)) }
@@ -976,15 +1264,19 @@ private fun FolderChip(
     onLongClick: () -> Unit,
     icon: ImageVector? = null,
 ) {
+    // 界面自定义 ui.style("folder_chip")；未设置时为 null，各值与原版相同
+    val uiStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("folder_chip")
+    val shape = uiStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+        ?: if (me.rerere.rikkahub.ui.custom.hasUICustomShapes()) MaterialTheme.shapes.small else CircleShape
     Surface(
-        shape = CircleShape,
+        shape = shape,
         color = if (selected) {
             MaterialTheme.colorScheme.secondaryContainer
         } else {
             MaterialTheme.colorScheme.surfaceContainerLow
         },
         modifier = Modifier
-            .clip(CircleShape)
+            .clip(shape)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,

@@ -65,18 +65,27 @@ internal val PLUGIN_BOOTSTRAP_JS = """
     log: log,
     registerTool(def) {
       if (!def || typeof def.name !== "string" || def.name.length === 0) throw new TypeError("tool.name is required");
+      const dynParams = typeof def.parameters === "function";
+      const dynSysPrompt = typeof def.systemPrompt === "function";
+      for (const k of ["title", "summary", "icon"]) {
+        if (def[k] != null && typeof def[k] !== "string") throw new TypeError("tool." + k + " 必须是字符串");
+      }
       const meta = {
         name: def.name,
         description: def.description || "",
-        parameters: def.parameters || { type: "object", properties: {} },
-        systemPrompt: def.systemPrompt || "",
+        parameters: dynParams ? { type: "object", properties: {} } : (def.parameters || { type: "object", properties: {} }),
+        systemPrompt: dynSysPrompt ? "" : (def.systemPrompt || ""),
         display: def.display || null,
         endTurn: !!def.endTurn,
         approval: def.approval || "auto",
         hasWhen: typeof def.when === "function",
+        hasDynamicParameters: dynParams,
+        hasDynamicSystemPrompt: dynSysPrompt,
       };
       const id = register("tool", meta, def.execute);
       if (meta.hasWhen) handlers[id + ":when"] = def.when;
+      if (dynParams) handlers[id + ":parameters"] = def.parameters;
+      if (dynSysPrompt) handlers[id + ":systemPrompt"] = def.systemPrompt;
       return id;
     },
     intercept(fn) { return register("intercept", null, fn); },
@@ -85,35 +94,89 @@ internal val PLUGIN_BOOTSTRAP_JS = """
       return register("stream", meta, factory);
     },
     on(hook, fn) { return register("hook", { hook: hook }, fn); },
+    onUnload(fn) { return register("unload", null, fn); },
     registerMacro(name, fn) { return register("macro", { name: name }, fn); },
     // 暴露方法给自己的面板（window.rikka.call）与其他插件调用
     expose(name, fn) {
       if (typeof name !== "string" || name.length === 0) throw new TypeError("expose: name is required");
       return register("expose", { name: name }, fn);
     },
-    // ---- 提示词 / 世界书 / 正则 ----
+    // ---- 提示词 / 世界书 / 正则 / 声明式资源 ----
     // 预设或任意提示词中写 {{plugin:<插件id>:<type>}}，组装时由 fn(arg, ctx) 生成内容
     registerPromptBlock(type, fn) {
       if (typeof type !== "string" || type.length === 0) throw new TypeError("registerPromptBlock: type is required");
       return register("promptBlock", { name: type }, fn);
     },
-    // def: { name, phase: "request" | "visual" | "persist", scope?: ["user","assistant"], replace(text, info) }
+    // def: { name, phase: "request" | "visual" | "persist", scope?: ["user","assistant","lorebook"], replace(text, info) }
     registerRegex(def) {
       if (!def || typeof def.name !== "string") throw new TypeError("registerRegex: name is required");
       const phase = def.phase || "request";
       if (["request", "visual", "persist"].indexOf(phase) < 0) throw new TypeError("registerRegex: unknown phase " + phase);
       return register("regex", { name: def.name, phase: phase, scope: def.scope || ["assistant"] }, def.replace);
     },
+    // 声明式注册 Agent Skill（启用即出现在可用技能列表，停用/卸载自动移除）
+    // def: { name, description, content, compatibility? }
+    registerSkill(def) {
+      if (!def || typeof def.name !== "string" || !def.name) throw new TypeError("registerSkill: name is required");
+      if (typeof def.description !== "string" || !def.description) throw new TypeError("registerSkill: description is required");
+      if (typeof def.content !== "string" || !def.content) throw new TypeError("registerSkill: content is required");
+      if (def.compatibility !== undefined && typeof def.compatibility !== "string") throw new TypeError("registerSkill: compatibility must be a string");
+      return register("skill", {
+        name: def.name,
+        description: def.description,
+        content: def.content,
+        compatibility: def.compatibility || null,
+      }, null, true);
+    },
+    // 声明式注册世界书（启用即同步到世界书列表，停用/卸载自动移除）
+    // def: { name, description?, entries: [...] }
+    registerLorebook(def) {
+      if (!def || typeof def.name !== "string" || !def.name) throw new TypeError("registerLorebook: name is required");
+      if (!Array.isArray(def.entries)) throw new TypeError("registerLorebook: entries array is required");
+      return register("lorebook", {
+        name: def.name,
+        description: def.description || "",
+        entries: def.entries,
+      }, null, true);
+    },
+    // 声明式注册快捷消息（启用即同步到快捷消息列表，停用/卸载自动移除）
+    // def: { name?, title, content, role? }
+    registerQuickMessage(def) {
+      const title = def && (def.title || def.name);
+      if (typeof title !== "string" || !title) throw new TypeError("registerQuickMessage: title or name is required");
+      if (typeof def.content !== "string") throw new TypeError("registerQuickMessage: content is required");
+      return register("quickMessage", {
+        name: def.name || title,
+        title: title,
+        content: def.content,
+        role: def.role || "USER",
+      }, null, true);
+    },
     // ---- 插件提供实现 ----
-    // { name, displayName?, listModels(cfg), streamText(req) => StreamChunk[] | async iterator, generateText?(req) }
-    registerProvider(def) { return registerMethods("provider", def, ["streamText"], ["listModels", "generateText"]); },
+    // { name, displayName?, models?, listModels?(cfg), streamText(req), generateText?(req), getBalance?(cfg), generateEmbedding?(req), generateImage?(req), editImage?(req) }
+    registerProvider(def) {
+      return registerMethods(
+        "provider",
+        def,
+        ["streamText"],
+        ["listModels", "generateText", "getBalance", "generateEmbedding", "generateImage", "editImage"]
+      );
+    },
     // { name, displayName?, search(params, opts) => { answer?, items:[{title,url,text}] }, scrape?(params) }
     registerSearch(def) { return registerMethods("search", def, ["search"], ["scrape"]); },
-    // { name, displayName?, speak(text, opts) => { audio: base64, format: "mp3"|"wav"|"pcm"|..., sampleRate? } }
+    // { name, displayName?, speak(text, opts) => { audio: base64, format: "mp3"|"wav"|"pcm"|..., sampleRate? } | async iterator }
     registerTTS(def) { return registerMethods("tts", def, ["speak"]); },
-    // { name, displayName?, transcribe({ audio: base64 wav, format, sampleRate }) => string }
-    registerASR(def) { return registerMethods("asr", def, ["transcribe"]); },
-    // { name, displayName?, kinds: ["image","video"], create(req) => task, query?(taskId) => task }
+    // { name, displayName?, transcribe?({ audio: base64 wav, format, sampleRate, config }) => string, startStream?(cfg), pushAudio?(frame), stopStream?() }
+    registerASR(def) {
+      if (!def || (typeof def.transcribe !== "function" && typeof def.startStream !== "function")) {
+        throw new TypeError("asr requires transcribe or startStream function");
+      }
+      if (typeof def.startStream === "function" && typeof def.pushAudio !== "function") {
+        throw new TypeError("asr startStream requires pushAudio function");
+      }
+      return registerMethods("asr", def, [], ["transcribe", "startStream", "pushAudio", "stopStream"]);
+    },
+    // { name, displayName?, models?, kinds?: ["image","video"], create(req) => task, query?(taskId) => task }
     registerMediaGen(def) { return registerMethods("mediagen", def, ["create"], ["query"]); },
     // 兼容设计文档名称
     registerOcr(fn) { return register("hook", { hook: "ocr.replace" }, fn); },
@@ -140,19 +203,41 @@ internal val PLUGIN_BOOTSTRAP_JS = """
     },
     ui: {
       // 挂载到宿主预留位置；挂载点与 spec.type 对应关系见文档，不支持的组合注册即报错。
-      // handler 可选：点击、表单按钮、渲染等回调。返回挂载 id，可用于 unmount。
+      // handler 可选：点击、表单变更/按钮、渲染等回调。返回挂载 id，可用于 update / unmount。
       mount(slot, spec, handler) {
         if (typeof slot !== "string") throw new TypeError("ui.mount: slot must be a string");
         if (!spec || typeof spec.type !== "string") throw new TypeError("ui.mount: spec.type is required");
-        return register("ui", { slot: slot, spec: spec }, handler, true);
+        return register("ui", { slot: slot, spec: spec, hasHandler: typeof handler === "function" }, handler, true);
+      },
+      // 动态局部更新已挂载项的 spec（如实时更新顶栏胶囊文字、状态灯颜色、badge 数字、菜单项、显隐等）
+      update(id, partialSpec) {
+        if (typeof id !== "string" || !id) throw new TypeError("ui.update: id is required");
+        if (!partialSpec || typeof partialSpec !== "object") throw new TypeError("ui.update: partialSpec must be an object");
+        sync("ui.update", { id: id, spec: partialSpec });
       },
       unmount(id) { delete handlers[id]; sync("unregister", { id: id }); },
       // 打开插件自带的 HTML 面板：presentation = page | sheet | dialog | floating
-      open(path, options) { return call("ui.open", { path: path, presentation: (options && options.presentation) || "page", args: (options && options.args) || null, title: (options && options.title) || null }); },
+      open(path, options) {
+        const opts = options || {};
+        return call("ui.open", {
+          path: path,
+          presentation: opts.presentation || "page",
+          args: opts.args === undefined ? null : opts.args,
+          title: opts.title || null,
+          width: opts.width || null,
+          height: opts.height || null,
+        });
+      },
       close(path) { return call("ui.close", { path: path || null }); },
-      // 向已打开的面板推送事件（面板内 window.rikka.on(event, fn) 接收）
-      emit(event, data) { return call("ui.emit", { event: String(event), data: data === undefined ? null : data }); },
-      // 通知宿主重新渲染本插件的挂载项（例如 badge 文本变了）
+      // 向已打开的面板推送事件（面板内 window.rikka.on(event, fn) 接收；可选 opts.path 定向推送）
+      emit(event, data, opts) {
+        return call("ui.emit", {
+          event: String(event),
+          data: data === undefined ? null : data,
+          path: (opts && opts.path) || null,
+        });
+      },
+      // 通知宿主重新渲染本插件的挂载项
       refresh() { return call("ui.refresh", {}); },
     },
     storage: {
@@ -161,14 +246,19 @@ internal val PLUGIN_BOOTSTRAP_JS = """
       delete(key) { sync("storage.delete", { key: key }); },
       keys() { return sync("storage.keys", null); },
     },
-    fetch(req) { return call("fetch", typeof req === "string" ? { url: req } : req); },
     // 插件自己目录下的文件（路径相对插件包根目录）
     files: {
       read(path) { return call("files.read", { path: path }); },
       write(path, text) { return call("files.write", { path: path, text: String(text) }); },
+      readBase64(path) { return call("files.readBase64", { path: path }); },
+      writeBase64(path, base64) { return call("files.writeBase64", { path: path, base64: String(base64) }); },
       list(path) { return call("files.list", { path: path || "" }); },
       delete(path) { return call("files.delete", { path: path }); },
       exists(path) { return call("files.exists", { path: path }); },
+    },
+    // 保存媒体/文档附件到宿主聊天附件存储，返回可供 UIMessagePart.Image/Audio/Video/Document 使用的本地 url/path
+    attachments: {
+      save(opts) { return call("attachments.save", opts || {}); },
     },
     host(name, args) { return call(name, args); },
     // ---- 宿主 API（需在 manifest.permissions 声明对应权限） ----
@@ -220,10 +310,12 @@ internal val PLUGIN_BOOTSTRAP_JS = """
     },
     workspace: {
       list() { return call("workspace.list", {}); },
-      files(id, path) { return call("workspace.files", { id: id, path: path || "" }); },
+      files(id, path, opts) { return call("workspace.files", Object.assign({ id: id, path: path || "" }, opts || {})); },
       read(id, path) { return call("workspace.read", { id: id, path: path }); },
       write(id, path, text, overwrite) { return call("workspace.write", { id: id, path: path, text: text, overwrite: overwrite !== false }); },
-      delete(id, path, recursive) { return call("workspace.delete", { id: id, path: path, recursive: !!recursive }); },
+      readBase64(id, path) { return call("workspace.readBase64", { id: id, path: path }); },
+      writeBase64(id, path, base64, overwrite) { return call("workspace.writeBase64", { id: id, path: path, base64: String(base64), overwrite: overwrite !== false }); },
+      delete(id, path, recursive, opts) { return call("workspace.delete", Object.assign({ id: id, path: path, recursive: !!recursive }, opts || {})); },
       exec(id, command, opts) { return call("workspace.exec", Object.assign({ id: id, command: command }, opts || {})); },
       terminal(id, opts) { return call("workspace.terminal", Object.assign({ id: id }, opts || {})); },
       terminals(id) { return call("workspace.terminals", { id: id }); },
@@ -253,6 +345,11 @@ internal val PLUGIN_BOOTSTRAP_JS = """
       const w = handlers[args.handler + ":when"];
       if (!w) throw new Error("tool has no when()");
       result = !!(await w(args.ctx));
+    } else if (handlerId === "__tool_params") {
+      result = await handlers[args.handler + ":parameters"](args.ctx);
+    } else if (handlerId === "__tool_sysprompt") {
+      result = await handlers[args.handler + ":systemPrompt"](args.ctx);
+      if (typeof result !== "string") throw new TypeError("tool systemPrompt(ctx) must return a string");
     } else if (handlerId === "__method") {
       const fn = handlers[args.handler + ":" + args.method];
       if (!fn) throw new Error("unknown method " + args.method);
@@ -267,6 +364,16 @@ internal val PLUGIN_BOOTSTRAP_JS = """
       if (!fn) throw new Error("unknown tool handler " + args.handler);
       const ctx = Object.assign({}, args.ctx, {
         progress: (parts) => call("tool.progress", { token: args.token, parts: parts }),
+        askUser: (spec) => {
+          const s = typeof spec === "string" ? { question: spec } : spec;
+          if (!s || typeof s.question !== "string" || !s.question) throw new TypeError("ctx.askUser: question is required");
+          if (s.options !== undefined && !(Array.isArray(s.options) && s.options.every((o) => typeof o === "string"))) {
+            throw new TypeError("ctx.askUser: options must be an array of strings");
+          }
+          if (s.multiSelect !== undefined && typeof s.multiSelect !== "boolean") throw new TypeError("ctx.askUser: multiSelect must be a boolean");
+          if (s.placeholder !== undefined && typeof s.placeholder !== "string") throw new TypeError("ctx.askUser: placeholder must be a string");
+          return call("tool.askUser", { token: args.askToken, spec: s });
+        },
       });
       result = await fn(args.args, ctx);
     } else if (entries[handlerId]) {

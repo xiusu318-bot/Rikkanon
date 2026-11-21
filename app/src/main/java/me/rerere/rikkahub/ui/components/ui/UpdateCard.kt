@@ -127,7 +127,7 @@ fun UpdateCard(vm: ChatVM) {
                 showDetail = false
                 toaster.show(context.getString(R.string.update_card_downloading), type = ToastType.Info)
             }
-            ModalBottomSheet(
+            me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
                 onDismissRequest = { showDetail = false },
                 sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
             ) {

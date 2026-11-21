@@ -514,7 +514,7 @@ private fun MainAgentPermissionsSheet(
     onUpdateAssistant: (Assistant) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(
             initialValue = SheetValue.Expanded,
@@ -780,7 +780,7 @@ private fun SubAgentToolsSheet(
         }
     }
 
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(
             initialValue = SheetValue.Expanded,

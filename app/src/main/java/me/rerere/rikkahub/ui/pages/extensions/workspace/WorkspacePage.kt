@@ -110,7 +110,7 @@ fun WorkspacePage(vm: WorkspaceVM = koinViewModel()) {
     }
 
     if (showTypeSheet) {
-        ModalBottomSheet(onDismissRequest = { showTypeSheet = false }) {
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(onDismissRequest = { showTypeSheet = false }) {
             CardGroup(
                 modifier = Modifier
                     .padding(horizontal = 16.dp)

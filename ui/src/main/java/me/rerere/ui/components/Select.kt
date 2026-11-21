@@ -56,15 +56,16 @@ fun <T> Select(
         expanded = expanded,
         onExpandedChange = { expanded = it }
     ) {
+        val selectorShape = if (LocalCustomShapesEnabled.current) MaterialTheme.shapes.medium else RoundedCornerShape(50)
         Surface(
             tonalElevation = 4.dp,
-            shape = RoundedCornerShape(50),
+            shape = selectorShape,
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(4.dp))
+                    .clip(if (LocalCustomShapesEnabled.current) selectorShape else RoundedCornerShape(4.dp))
                     .clickable { expanded = true }
                     .padding(vertical = 8.dp, horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),

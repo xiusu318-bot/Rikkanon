@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.components.ai.completion
 
+import me.rerere.rikkahub.ui.pages.extensions.plugin.uiSpec
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -81,7 +82,7 @@ fun rememberPluginSlashCompletionProvider(
                 if (query.any { it.isWhitespace() }) return null
 
                 val items = mounts.mapNotNull { (rt, reg) ->
-                    val spec = (reg.meta as? JsonObject)?.get("spec") as? JsonObject ?: return@mapNotNull null
+                    val spec = reg.uiSpec
                     val name = spec["name"]?.jsonPrimitive?.contentOrNull?.removePrefix("/") ?: return@mapNotNull null
                     val desc = spec["description"]?.jsonPrimitive?.contentOrNull
                         ?: spec["title"]?.jsonPrimitive?.contentOrNull

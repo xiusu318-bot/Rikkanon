@@ -31,14 +31,10 @@ android {
         applicationId = "me.rerere.rikkahub.rikkanon"
         minSdk = 26
         targetSdk = 37
-        versionCode = 192
-        versionName = "1.2.5"
+        versionCode = 193
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
     }
 
     splits {
@@ -48,8 +44,8 @@ android {
             val isBuildingBundle = gradle.startParameter.taskNames.any { it.lowercase().contains("bundle") }
             isEnable = !isBuildingBundle
             reset()
-            include("arm64-v8a", "x86_64")
-            isUniversalApk = true
+            include("arm64-v8a")
+            isUniversalApk = false
         }
     }
 
@@ -83,7 +79,17 @@ android {
             signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = true
+                keepRules {
+                    // Pine 自带的 consumer 规则里有一条 `-keep class * { native <methods>; }`，
+                    // 它实际会保留整个 App 的全部类（所有第三方库都无法被裁剪，APK 约 +9MB）。
+                    // 忽略它，Pine 真正需要的规则写在 proguard-rules.pro 里。
+                    ignoreFrom("top.canyie.pine:core")
+                }
             }
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
         }
@@ -92,6 +98,11 @@ android {
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
         }
+    }
+    testOptions {
+        // JVM 单元测试里直接跑 Compose 运行时（界面自定义的 Compose 节点测试）：它会调用 android.os.Trace 等系统方法，
+        // 让这些未模拟的方法返回默认值而不是抛异常
+        unitTests.isReturnDefaultValues = true
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -319,6 +330,7 @@ ksp {
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
+        javaParameters.set(true)
     }
 }
 

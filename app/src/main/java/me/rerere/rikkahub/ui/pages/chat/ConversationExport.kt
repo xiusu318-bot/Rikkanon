@@ -123,7 +123,7 @@ fun ChatExportSheet(
     var exportOptions by remember { mutableStateOf(ExportOptions()) }
 
     if (visible) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = onDismissRequest,
             sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
         ) {
@@ -142,7 +142,7 @@ fun ChatExportSheet(
                     ListItem(
                         headlineContent = { Text(stringResource(R.string.chat_page_export_include_reasoning)) },
                         trailingContent = {
-                            Switch(
+                            me.rerere.rikkahub.ui.custom.UISwitch(
                                 checked = exportOptions.includeReasoning,
                                 onCheckedChange = {
                                     exportOptions = exportOptions.copy(includeReasoning = it)
@@ -201,7 +201,7 @@ fun ChatExportSheet(
                         ListItem(
                             headlineContent = { Text(stringResource(R.string.chat_page_export_image_expand_reasoning)) },
                             trailingContent = {
-                                Switch(
+                                me.rerere.rikkahub.ui.custom.UISwitch(
                                     checked = exportOptions.expandReasoning,
                                     enabled = exportOptions.includeReasoning,
                                     onCheckedChange = {

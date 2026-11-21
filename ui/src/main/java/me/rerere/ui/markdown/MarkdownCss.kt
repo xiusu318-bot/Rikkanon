@@ -60,6 +60,42 @@ internal fun parseBlockStyle(css: String, align: String? = null): TextStyle? {
     ).merge(spanStyle ?: EMPTY_SPAN_STYLE)
 }
 
+internal fun parseBoxStyle(css: String): MarkdownBoxStyle? {
+    val properties = parseCssDeclarations(css)
+    if (properties.isEmpty()) return null
+    val bg = (properties["background-color"] ?: properties["background"])?.let(::parseCssColor) ?: Color.Unspecified
+    val radius = properties["border-radius"]?.let(::parseCssSize)?.value?.coerceIn(0f, 48f) ?: 0f
+    val borderRaw = properties["border"]
+    var borderWidth = properties["border-width"]?.let(::parseCssSize)?.value?.coerceIn(0f, 12f) ?: 0f
+    var borderColor = properties["border-color"]?.let(::parseCssColor) ?: Color.Unspecified
+    if (borderRaw != null) {
+        val tokens = borderRaw.trim().split(Regex("\\s+"))
+        tokens.forEach { token ->
+            parseCssSize(token)?.value?.let { if (borderWidth == 0f) borderWidth = it.coerceIn(0f, 12f) }
+            parseCssColor(token)?.let { if (borderColor == Color.Unspecified) borderColor = it }
+        }
+    }
+    var padH = 0f
+    var padV = 0f
+    properties["padding"]?.trim()?.split(Regex("\\s+"))?.mapNotNull { parseCssSize(it)?.value }?.let { vals ->
+        when (vals.size) {
+            1 -> { padV = vals[0]; padH = vals[0] }
+            2 -> { padV = vals[0]; padH = vals[1] }
+            3 -> { padV = vals[0]; padH = vals[1] }
+            4 -> { padV = (vals[0] + vals[2]) / 2f; padH = (vals[1] + vals[3]) / 2f }
+        }
+    }
+    if (bg == Color.Unspecified && borderWidth <= 0f && radius <= 0f && padH <= 0f && padV <= 0f) return null
+    return MarkdownBoxStyle(
+        backgroundColor = bg,
+        borderColor = borderColor,
+        borderWidthDp = borderWidth,
+        cornerRadiusDp = radius,
+        paddingHorizontalDp = padH.coerceIn(0f, 64f),
+        paddingVerticalDp = padV.coerceIn(0f, 64f),
+    )
+}
+
 /** 解析 `<font color size face>` 这类旧式属性 */
 internal fun parseFontTag(color: String, size: String, face: String): SpanStyle? {
     val style = SpanStyle(

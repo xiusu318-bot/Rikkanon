@@ -195,7 +195,7 @@ fun PromptPage(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Switch(
+                        me.rerere.rikkahub.ui.custom.UISwitch(
                             checked = settings.enableAdvancedPrompt,
                             onCheckedChange = if (switchVisible) {
                                 { enabled ->
@@ -674,7 +674,7 @@ private fun PresetHeaderBar(
             )
         }
 
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = activePreset.enabled,
             onCheckedChange = onTogglePresetEnabled,
         )
@@ -833,7 +833,7 @@ private fun PromptBlockRowItem(
                 )
             }
 
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = block.enabled,
                 onCheckedChange = onToggleEnabled,
             )
@@ -1124,7 +1124,7 @@ private fun PromptBlockEditDialog(
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                     )
-                    Switch(
+                    me.rerere.rikkahub.ui.custom.UISwitch(
                         checked = enabled,
                         onCheckedChange = { enabled = it },
                     )
@@ -1312,7 +1312,7 @@ private fun PromptBlockEditDialog(
                                 style = MaterialTheme.typography.labelLarge,
                                 modifier = Modifier.weight(1f),
                             )
-                            Switch(
+                            me.rerere.rikkahub.ui.custom.UISwitch(
                                 checked = followPresetInToolCall,
                                 onCheckedChange = { followPresetInToolCall = it },
                             )
@@ -1837,7 +1837,7 @@ private fun LorebookCard(
                     )
                 )
 
-                Switch(
+                me.rerere.rikkahub.ui.custom.UISwitch(
                     checked = book.enabled,
                     onCheckedChange = onToggle
                 )
@@ -1897,7 +1897,7 @@ private fun LorebookEditSheet(
     )
     val scope = rememberCoroutineScope()
 
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         dragHandle = {
@@ -2104,7 +2104,7 @@ private fun LorebookGlobalSettingsDialog(
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                     )
-                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                    me.rerere.rikkahub.ui.custom.UISwitch(checked = enabled, onCheckedChange = { enabled = it })
                 }
 
                 Text("🟢 绿灯触发与缓存策略", style = MaterialTheme.typography.labelLarge)
@@ -2258,7 +2258,7 @@ private fun LoreEntryRowCard(
                 )
             }
 
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = entry.enabled,
                 onCheckedChange = onToggleEnabled,
             )
@@ -2408,7 +2408,7 @@ private fun RegexInjectionEditDialog(
                         onClick = { constantActive = !constantActive },
                         label = { Text(if (constantActive) "🔵常驻" else "🟢绿灯") },
                     )
-                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                    me.rerere.rikkahub.ui.custom.UISwitch(checked = enabled, onCheckedChange = { enabled = it })
                 }
             }
         },

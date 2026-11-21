@@ -1,12 +1,15 @@
 package me.rerere.rikkahub.service
 
 import kotlinx.serialization.json.JsonPrimitive
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.provider.BuiltInTools
 import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.CustomHeader
 import me.rerere.ai.provider.Model
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.limitContext
 import me.rerere.rikkahub.data.ai.tools.shouldUseExternalWebSearch
 import me.rerere.rikkahub.data.model.Assistant
@@ -16,6 +19,7 @@ import me.rerere.rikkahub.data.model.toMessageNode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -137,5 +141,125 @@ class ChatServiceTest {
         val model = Model(tools = setOf(BuiltInTools.UrlContext))
 
         assertTrue(shouldUseExternalWebSearch(assistant, model))
+    }
+
+    @Test
+    fun `sanitize invalid messages preserves completed multi-step tools instead of deleting whole message`() {
+        val userNode = UIMessage.user("Refactor module").toMessageNode()
+        val multiStepAssistant = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(
+                UIMessagePart.Reasoning("Step 1 plan"),
+                UIMessagePart.Tool(
+                    toolCallId = "call-1",
+                    toolName = "workspace_read_file",
+                    input = """{"path":"/workspace/a.kt"}""",
+                    output = listOf(UIMessagePart.Text("file content A")),
+                ),
+                UIMessagePart.Text("Now checking second file"),
+                UIMessagePart.Tool(
+                    toolCallId = "call-2",
+                    toolName = "workspace_shell",
+                    input = """{"command":"./gradlew test"}""",
+                    output = emptyList(),
+                    approvalState = ToolApprovalState.Pending,
+                ),
+                // Half-streamed broken SSE fragment at tail
+                UIMessagePart.Tool(
+                    toolCallId = "call-3",
+                    toolName = "workspace_edit",
+                    input = """{"path":"/work""",
+                    output = emptyList(),
+                    approvalState = ToolApprovalState.Auto,
+                ),
+            ),
+        ).toMessageNode()
+        val conv = Conversation(
+            assistantId = Uuid.random(),
+            messageNodes = listOf(userNode, multiStepAssistant),
+        )
+
+        val sanitized = sanitizeConversationInvalidMessages(conv)
+
+        assertEquals(2, sanitized.messageNodes.size)
+        val assistantMsg = sanitized.messageNodes[1].currentMessage
+        val tools = assistantMsg.getTools()
+        // Step 1 stays intact, Step 2 (complete call) is closed as cancelled, Step 3 (broken fragment) is stripped
+        assertEquals(2, tools.size)
+        assertEquals("call-1", tools[0].toolCallId)
+        assertEquals("file content A", (tools[0].output.single() as UIMessagePart.Text).text)
+        assertEquals("call-2", tools[1].toolCallId)
+        assertTrue(tools[1].isExecuted)
+        assertTrue((tools[1].output.single() as UIMessagePart.Text).text.contains("\"status\":\"cancelled\""))
+    }
+
+    @Test
+    fun `sanitize invalid messages keeps resumable approved tool on active target node`() {
+        val approvedTool = UIMessagePart.Tool(
+            toolCallId = "call-approve",
+            toolName = "workspace_shell",
+            input = """{"command":"ls"}""",
+            output = emptyList(),
+            approvalState = ToolApprovalState.Approved,
+        )
+        val conv = Conversation(
+            assistantId = Uuid.random(),
+            messageNodes = listOf(
+                UIMessage.user("run ls").toMessageNode(),
+                UIMessage(role = MessageRole.ASSISTANT, parts = listOf(approvedTool)).toMessageNode(),
+            ),
+        )
+
+        val sanitized = sanitizeConversationInvalidMessages(conv)
+
+        val keptTool = sanitized.messageNodes[1].currentMessage.getTools().single()
+        assertEquals(ToolApprovalState.Approved, keptTool.approvalState)
+        assertFalse(keptTool.isExecuted)
+    }
+
+    @Test
+    fun `cold load recovery closes interrupted auto tool from step checkpoint while keeping pending approvals`() {
+        val runningCheckpointConv = Conversation(
+            assistantId = Uuid.random(),
+            messageNodes = listOf(
+                UIMessage.user("build").toMessageNode(),
+                UIMessage(
+                    role = MessageRole.ASSISTANT,
+                    parts = listOf(
+                        UIMessagePart.Tool(
+                            toolCallId = "done-1",
+                            toolName = "workspace_read_file",
+                            input = """{"path":"/workspace/README.md"}""",
+                            output = listOf(UIMessagePart.Text("ok")),
+                        ),
+                        UIMessagePart.Tool(
+                            toolCallId = "running-2",
+                            toolName = "workspace_shell",
+                            input = """{"command":"sleep 60"}""",
+                            output = emptyList(),
+                            approvalState = ToolApprovalState.Auto,
+                            startedAt = kotlin.time.Clock.System.now(),
+                        ),
+                        UIMessagePart.Tool(
+                            toolCallId = "pending-3",
+                            toolName = "ask_user",
+                            input = """{"question":"continue?"}""",
+                            output = emptyList(),
+                            approvalState = ToolApprovalState.Pending,
+                        ),
+                    ),
+                ).toMessageNode(),
+            ),
+        )
+
+        val recovered = recoverColdLoadedConversation(runningCheckpointConv)
+
+        val tools = recovered.messageNodes[1].currentMessage.getTools()
+        assertEquals(3, tools.size)
+        assertEquals("ok", (tools[0].output.single() as UIMessagePart.Text).text)
+        assertTrue(tools[1].isExecuted)
+        assertTrue((tools[1].output.single() as UIMessagePart.Text).text.contains("\"status\":\"interrupted\""))
+        assertNotNull(tools[1].finishedAt)
+        assertTrue(tools[2].isPending)
     }
 }

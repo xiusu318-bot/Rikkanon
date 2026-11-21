@@ -52,14 +52,18 @@ object PluginHookKind {
     const val MACRO = "macro"
     const val UI = "ui"
     const val EXPOSE = "expose"
+    const val UNLOAD = "unload"
 
-    // 提示词 / 世界书 / 正则
+    // 提示词 / 世界书 / 正则 / 声明式资源
     const val CHAT_HISTORY = "chat.history"
     const val PRESET_BEFORE_ASSEMBLE = "preset.beforeAssemble"
     const val PROMPT_ASSEMBLED = "prompt.assembled"
     const val LOREBOOK_ACTIVATED = "lorebook.activated"
     const val PROMPT_BLOCK = "promptBlock"
     const val REGEX = "regex"
+    const val SKILL = "skill"
+    const val LOREBOOK = "lorebook"
+    const val QUICK_MESSAGE = "quickMessage"
 
     // 数据
     const val CONVERSATION_BEFORE_SAVE = "conversation.beforeSave"
@@ -90,14 +94,19 @@ object PluginHookKind {
 
     val ALL: Set<String> = setOf(
         TOOL, INTERCEPT, STREAM, MESSAGES_BEFORE_SEND, RESPONSE_VISUAL, RESPONSE_FINISH,
-        TOOL_BEFORE, TOOL_AFTER, APPROVAL, MACRO, UI, EXPOSE,
+        TOOL_BEFORE, TOOL_AFTER, APPROVAL, MACRO, UI, EXPOSE, UNLOAD,
         CHAT_HISTORY, PRESET_BEFORE_ASSEMBLE, PROMPT_ASSEMBLED, LOREBOOK_ACTIVATED, PROMPT_BLOCK, REGEX,
+        SKILL, LOREBOOK, QUICK_MESSAGE,
         CONVERSATION_BEFORE_SAVE, SEARCH_RESULTS, TOOLS_LIST, PARAMS_BEFORE_SEND, INPUT_BEFORE_SAVE, ATTACHMENT_PARSE,
         PROVIDER, SEARCH, TTS, ASR, MEDIAGEN, SHARE, SCHEDULE, WEB,
     ) + TASKS.flatMap { t -> TASK_STAGES.map { task(t, it) } }
 
     /** 同一插件内按 meta.name 不能重复的注册类型。 */
-    val NAMED_UNIQUE = setOf(TOOL, EXPOSE, PROVIDER, SEARCH, TTS, ASR, MEDIAGEN, PROMPT_BLOCK, SHARE, SCHEDULE, WEB, MACRO, REGEX)
+    val NAMED_UNIQUE = setOf(
+        TOOL, EXPOSE, PROVIDER, SEARCH, TTS, ASR, MEDIAGEN,
+        PROMPT_BLOCK, SHARE, SCHEDULE, WEB, MACRO, REGEX,
+        SKILL, LOREBOOK, QUICK_MESSAGE,
+    )
 
     /** 可订阅事件（rikka.on("event:<name>")）。只列出宿主实际会派发的事件。 */
     val EVENTS = setOf(
@@ -127,9 +136,16 @@ object PluginPermission {
     const val DEVICE = "device"
     const val WORKSPACE = "workspace"
     const val MEMORY = "memory"
+
+    /** `rikka.java`（反射调用任意 Java/Kotlin 代码）与 `rikka.host`（宿主内部对象）。 */
+    const val NATIVE = "native"
+
+    /** `rikka.hook`（拦截 / 改写 / 替换宿主与系统的任意方法）。 */
+    const val HOOK = "hook"
     val ALL = setOf(
         NETWORK, CONVERSATION_READ, CONVERSATION_WRITE, SUBAGENT,
         SETTINGS_READ, SETTINGS_WRITE, NOTIFICATION, DEVICE, WORKSPACE, MEMORY,
+        NATIVE, HOOK,
     )
 }
 
@@ -148,12 +164,16 @@ object PluginUiSlot {
         "provider.detail" to PAGE_TYPES,      // 提供商详情
         "mcp.detail" to PAGE_TYPES,           // MCP 详情
         "workspace.detail" to PAGE_TYPES,     // 工作区详情
-        "chat.topbar" to setOf("button", "badge"), // 聊天页顶栏
-        "chat.input" to setOf("button"),      // 输入栏按钮
+        "chat.more" to setOf("entry", "form", "html", "button", "switch"), // 聊天页 + 扩展面板
+        "chat.topbar" to setOf("button", "badge", "menu"), // 聊天页顶栏
+        "chat.input" to setOf("button", "badge", "menu"),  // 输入栏快捷按钮/胶囊
         "chat.slash" to setOf("command"),     // 斜杠命令
         "message.menu" to setOf("menuItem"),  // 消息长按菜单
+        "message.footer" to setOf("badge", "button", "html", "renderer"), // 消息底部附加栏
+        "conversation.menu" to setOf("menuItem"), // 左侧抽屉会话长按操作菜单
         "markdown.codeblock" to setOf("renderer"), // 代码块渲染（spec.languages）
         "message.part" to setOf("renderer"),  // 消息部件渲染（spec.rendererType 对应 metadata["rikka.renderer"]）
+        "tool.card" to setOf("renderer"),     // 工具调用步骤卡片自定义渲染（spec.toolNames）
     )
 
     val ALL: Set<String> get() = TYPES.keys
@@ -162,5 +182,8 @@ object PluginUiSlot {
     val PRESENTATIONS = setOf("page", "sheet", "dialog", "floating")
 
     /** form 字段类型 */
-    val FORM_FIELD_TYPES = setOf("switch", "text", "textarea", "number", "select", "multiselect", "list", "button")
+    val FORM_FIELD_TYPES = setOf(
+        "switch", "text", "textarea", "password", "number", "slider",
+        "select", "segmented", "multiselect", "list", "model", "button",
+    )
 }

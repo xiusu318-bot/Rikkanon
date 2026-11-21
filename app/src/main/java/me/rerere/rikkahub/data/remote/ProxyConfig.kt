@@ -968,3 +968,48 @@ object WorkspaceLoopbackProxyBridge {
         }
     }
 }
+
+private val DIRECT_SENTINEL = ProxyProfile(id = Uuid.NIL, name = "DIRECT", host = "", port = 0)
+private const val MAX_PLUGIN_PROXY_CLIENTS = 24
+private val pluginProxyClients = object : LinkedHashMap<ProxyProfile, OkHttpClient>(16, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ProxyProfile, OkHttpClient>): Boolean =
+        size > MAX_PLUGIN_PROXY_CLIENTS
+}
+
+/**
+ * 供插件 `rikka.fetch` / `rikka.ws` / `rikka.intercept` 按单次请求的 `proxy` 参数获取对应的 [OkHttpClient]：
+ * - `null` / 空串：返回 [defaultClient]
+ * - `"direct"` / `"none"` / `"false"` / `"off"`：强制直连（绕过全局代理）
+ * - `"llm"` / `"workspace"` / `"mcp"`：使用对应模块当前配置的代理
+ * - 已保存代理节点的 `id` 或 `name`
+ * - 代理 URI（`socks5://...`、`http://...`、`https://...`）或 `host:port:user:pass` 四段式字符串
+ */
+fun resolvePluginProxyClient(
+    defaultClient: OkHttpClient,
+    settingsStore: SettingsStore,
+    proxySpec: String?,
+): OkHttpClient {
+    val raw = proxySpec?.trim().orEmpty()
+    if (raw.isEmpty()) return defaultClient
+    val net = settingsStore.settingsFlow.value.networkSetting
+    val lower = raw.lowercase()
+    val profile: ProxyProfile? = when (lower) {
+        "direct", "none", "false", "off" -> null
+        "llm" -> net.resolveProxy(OutboundTarget.LLM)
+        "workspace" -> net.resolveProxy(OutboundTarget.WORKSPACE)
+        "mcp" -> net.resolveProxy(OutboundTarget.MCP)
+        else -> {
+            net.proxies.firstOrNull { it.id.toString().equals(raw, ignoreCase = true) || it.name.equals(raw, ignoreCase = true) }
+                ?: raw.parseProxyProfileOrNull(name = "plugin-custom")
+                ?: error("无法解析代理配置: $raw")
+        }
+    }
+    val key = profile ?: DIRECT_SENTINEL
+    synchronized(pluginProxyClients) {
+        pluginProxyClients[key]?.let { return it }
+        return defaultClient.newBuilder()
+            .configureOutboundProxy { profile }
+            .build()
+            .also { pluginProxyClients[key] = it }
+    }
+}

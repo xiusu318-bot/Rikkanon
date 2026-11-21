@@ -9,6 +9,7 @@ import me.rerere.ai.ui.RawJsonMessageMetadata
 import me.rerere.ai.ui.ReasoningType
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.mapRawJsonStringsSuspend
 import me.rerere.ai.ui.rawJsonElementOrNull
 import me.rerere.ai.ui.toMetadata
 import me.rerere.rikkahub.data.datastore.DEFAULT_PROMPT_PRESETS
@@ -72,29 +73,33 @@ object PromptInjectionTransformer : InputMessageTransformer, KoinComponent {
             ctx.toolSystemPrompt.trim().takeIf { it.isNotEmpty() },
             ctx.workspacePrompt.trim().takeIf { it.isNotEmpty() },
         ).joinToString("\n\n")
-        val chatHistoryHook: ((List<UIMessage>) -> List<UIMessage>)? =
-            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.CHAT_HISTORY, ctx.assistant)) {
-                { rawHistory ->
-                    kotlinx.coroutines.runBlocking {
-                        pluginBridge.chatHistory(rawHistory, ctx.assistant, ctx.pluginCtx)
-                    }
-                }
-            } else null
-        val presetHook: ((PromptPreset) -> PromptPreset)? =
-            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.PRESET_BEFORE_ASSEMBLE, ctx.assistant)) {
-                { rawPreset ->
-                    kotlinx.coroutines.runBlocking {
-                        pluginBridge.presetBeforeAssemble(rawPreset, ctx.assistant, ctx.pluginCtx)
-                    }
-                }
-            } else null
-        val lorebookHook: ((List<ActivatedLoreEntry>) -> List<ActivatedLoreEntry>)? =
-            if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.LOREBOOK_ACTIVATED, ctx.assistant)) {
-                { rawEntries ->
+        val hasChatHistoryHook = pluginBridge != null && pluginBridge.hasHook(PluginHookKind.CHAT_HISTORY, ctx.assistant)
+        val hasPresetHook = pluginBridge != null && pluginBridge.hasHook(PluginHookKind.PRESET_BEFORE_ASSEMBLE, ctx.assistant)
+        val hasLorebookHook = pluginBridge != null && pluginBridge.hasHook(PluginHookKind.LOREBOOK_ACTIVATED, ctx.assistant)
+
+        val assembled = transformMessagesInline(
+            messages = messages,
+            assistant = ctx.assistant,
+            modeInjections = ctx.settings.modeInjections,
+            lorebooks = ctx.settings.lorebooks,
+            promptPresets = ctx.settings.promptPresets,
+            enableAdvancedPrompt = ctx.settings.enableAdvancedPrompt,
+            memoryPrompt = ctx.memoryPrompt,
+            workspacePrompt = combinedWorkspacePrompt,
+            hasChatHistoryTransform = hasChatHistoryHook,
+            chatHistoryTransform = { rawHistory ->
+                if (hasChatHistoryHook) pluginBridge.chatHistory(rawHistory, ctx.assistant, ctx.pluginCtx) else rawHistory
+            },
+            hasPresetBeforeAssembleTransform = hasPresetHook,
+            presetBeforeAssembleTransform = { rawPreset ->
+                if (hasPresetHook) pluginBridge.presetBeforeAssemble(rawPreset, ctx.assistant, ctx.pluginCtx) else rawPreset
+            },
+            lorebookActivatedTransform = { rawEntries ->
+                if (!hasLorebookHook) {
+                    rawEntries
+                } else {
                     val byId = rawEntries.associateBy { it.entry.id }
-                    val updated = kotlinx.coroutines.runBlocking {
-                        pluginBridge.lorebookActivated(rawEntries.map { it.entry }, ctx.assistant, ctx.pluginCtx)
-                    }
+                    val updated = pluginBridge.lorebookActivated(rawEntries.map { it.entry }, ctx.assistant, ctx.pluginCtx)
                     updated.map { entry ->
                         val prev = byId[entry.id]
                         if (prev != null && prev.entry.content == entry.content) {
@@ -109,21 +114,22 @@ object PromptInjectionTransformer : InputMessageTransformer, KoinComponent {
                         }
                     }
                 }
-            } else null
-
-        val assembled = transformMessages(
-            messages = messages,
-            assistant = ctx.assistant,
-            modeInjections = ctx.settings.modeInjections,
-            lorebooks = ctx.settings.lorebooks,
-            promptPresets = ctx.settings.promptPresets,
-            enableAdvancedPrompt = ctx.settings.enableAdvancedPrompt,
-            memoryPrompt = ctx.memoryPrompt,
-            workspacePrompt = combinedWorkspacePrompt,
-            chatHistoryTransform = chatHistoryHook,
-            presetBeforeAssembleTransform = presetHook,
-            lorebookActivatedTransform = lorebookHook,
-        )
+            },
+        ).let { list ->
+            if (pluginBridge != null && pluginBridge.hasMacros()) {
+                list.map { m ->
+                    val expandedParts = m.parts.map { p ->
+                        if (p is UIMessagePart.Text && p.text.contains("{{")) {
+                            p.copy(text = pluginBridge.expandMacros(p.text, ctx.pluginCtx))
+                        } else p
+                    }
+                    val withParts = if (expandedParts == m.parts) m else m.copy(parts = expandedParts)
+                    withParts.mapRawJsonStringsSuspend { str: String ->
+                        if (str.contains("{{")) pluginBridge.expandMacros(str, ctx.pluginCtx) else str
+                    }
+                }
+            } else list
+        }
         return if (pluginBridge != null && pluginBridge.hasHook(PluginHookKind.PROMPT_ASSEMBLED, ctx.assistant)) {
             pluginBridge.promptAssembled(assembled, ctx.assistant, ctx.pluginCtx)
         } else {
@@ -167,6 +173,36 @@ internal fun transformMessages(
     chatHistoryTransform: ((List<UIMessage>) -> List<UIMessage>)? = null,
     presetBeforeAssembleTransform: ((PromptPreset) -> PromptPreset)? = null,
     lorebookActivatedTransform: ((List<ActivatedLoreEntry>) -> List<ActivatedLoreEntry>)? = null,
+): List<UIMessage> = transformMessagesInline(
+    messages = messages,
+    assistant = assistant,
+    modeInjections = modeInjections,
+    lorebooks = lorebooks,
+    promptPresets = promptPresets,
+    enableAdvancedPrompt = enableAdvancedPrompt,
+    memoryPrompt = memoryPrompt,
+    workspacePrompt = workspacePrompt,
+    hasChatHistoryTransform = chatHistoryTransform != null,
+    chatHistoryTransform = { raw -> chatHistoryTransform?.invoke(raw) ?: raw },
+    hasPresetBeforeAssembleTransform = presetBeforeAssembleTransform != null,
+    presetBeforeAssembleTransform = { raw -> presetBeforeAssembleTransform?.invoke(raw) ?: raw },
+    lorebookActivatedTransform = { raw -> lorebookActivatedTransform?.invoke(raw) ?: raw },
+)
+
+private inline fun transformMessagesInline(
+    messages: List<UIMessage>,
+    assistant: Assistant,
+    modeInjections: List<PromptInjection.ModeInjection>,
+    lorebooks: List<Lorebook>,
+    promptPresets: List<PromptPreset> = emptyList(),
+    enableAdvancedPrompt: Boolean = true,
+    memoryPrompt: String = "",
+    workspacePrompt: String = "",
+    hasChatHistoryTransform: Boolean = false,
+    chatHistoryTransform: (List<UIMessage>) -> List<UIMessage>,
+    hasPresetBeforeAssembleTransform: Boolean = false,
+    presetBeforeAssembleTransform: (PromptPreset) -> PromptPreset,
+    lorebookActivatedTransform: (List<ActivatedLoreEntry>) -> List<ActivatedLoreEntry>,
 ): List<UIMessage> {
     if (!enableAdvancedPrompt) return messages
     // 1. 提取顶层系统消息（代表 📌 助手系统提示词）
@@ -190,7 +226,7 @@ internal fun transformMessages(
     } else {
         nonSystemMessages
     }
-    val chatHistoryMessages: List<UIMessage> = chatHistoryTransform?.invoke(rawChatHistoryMessages) ?: rawChatHistoryMessages
+    val chatHistoryMessages: List<UIMessage> = if (hasChatHistoryTransform) chatHistoryTransform(rawChatHistoryMessages) else rawChatHistoryMessages
     val activeToolChainMessage: UIMessage? = if (isTrailingActiveToolChain) lastNonSys else null
 
     // 3. 解析当前生效的提示词预设（PromptPreset）
@@ -198,7 +234,7 @@ internal fun transformMessages(
         assistant = assistant,
         promptPresets = promptPresets,
     )
-    val activePreset: PromptPreset? = if (presetBeforeAssembleTransform != null) {
+    val activePreset: PromptPreset? = if (hasPresetBeforeAssembleTransform) {
         presetBeforeAssembleTransform(resolvedPreset ?: PromptPreset(blocks = defaultPromptBlocks())).ensureRequiredMarkers()
     } else {
         resolvedPreset
@@ -216,7 +252,7 @@ internal fun transformMessages(
         )
     }
 
-    val effectiveLoreEntries = lorebookActivatedTransform?.invoke(activatedLoreEntries) ?: activatedLoreEntries
+    val effectiveLoreEntries = lorebookActivatedTransform(activatedLoreEntries)
 
     // 4.1 世界书正则（作用范围勾选「世界书」）：激活后、汇聚锚点前对条目正文执行，不影响关键字扫描与递归（与酒馆一致）。
     // 深度取条目的 @D 深度，非 @D 条目（角色定义前/后、锚点）不做深度限制
@@ -252,7 +288,7 @@ internal fun transformMessages(
     val hasCustomMarkerOrder = activePreset != null && !isStandardDefaultMarkerOrder(activePreset)
     val hasMemoryOrWorkspace = memoryPrompt.isNotBlank() || workspacePrompt.isNotBlank()
     if (resolvedLoreEntries.isEmpty() && legacyModeInjections.isEmpty() && !hasActivePresetBlocks && !hasCustomMarkerOrder && !hasMemoryOrWorkspace) {
-        if (chatHistoryTransform == null) return messages
+        if (!hasChatHistoryTransform) return messages
         return listOfNotNull(charSystemMessage) + chatHistoryMessages + listOfNotNull(activeToolChainMessage)
     }
 

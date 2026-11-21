@@ -234,7 +234,7 @@ fun SettingWebPage() {
                         headlineContent = { Text(stringResource(R.string.setting_page_web_server_localhost_only)) },
                         supportingContent = { Text(stringResource(R.string.setting_page_web_server_localhost_only_desc)) },
                         trailingContent = {
-                            Switch(
+                            me.rerere.rikkahub.ui.custom.UISwitch(
                                 checked = settings.webServerLocalhostOnly,
                                 onCheckedChange = { checked ->
                                     scope.launch {
@@ -252,7 +252,7 @@ fun SettingWebPage() {
                         headlineContent = { Text(stringResource(R.string.setting_page_web_server_jwt_enable)) },
                         supportingContent = { Text(stringResource(R.string.setting_page_web_server_jwt_enable_desc)) },
                         trailingContent = {
-                            Switch(
+                            me.rerere.rikkahub.ui.custom.UISwitch(
                                 checked = settings.webServerJwtEnabled,
                                 onCheckedChange = { checked ->
                                     scope.launch {

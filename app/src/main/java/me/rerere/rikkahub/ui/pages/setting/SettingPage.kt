@@ -480,7 +480,7 @@ private val QQ_GROUPS = listOf(
 @Composable
 private fun QQGroupBottomSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

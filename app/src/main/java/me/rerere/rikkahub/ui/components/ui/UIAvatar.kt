@@ -141,42 +141,63 @@ fun UIAvatar(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier.fillMaxSize()
             ) {
-                when (value) {
-                    is Avatar.Image -> {
-                        AsyncImage(
-                            model = value.url,
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop,
-                        )
-                    }
-
-                    is Avatar.Emoji -> {
-                        Text(
-                            text = value.content,
-                            autoSize = TextAutoSize.StepBased(
-                                minFontSize = 15.sp,
-                                // 大头像里表情跟着放大，小头像保持原来的 30sp 上限
-                                maxFontSize = maxOf(30f, maxWidth.value * 0.45f).sp,
-                            ),
-                            lineHeight = 0.8.em,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(5.dp)
-                        )
-                    }
-
-                    is Avatar.Dummy -> {
-                        ProceduralAvatar(
-                            name = name,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                // 界面自定义：主题可用 ui.slot("avatar", ...) 接管头像图案（编辑菜单、角标仍由宿主负责）；没写时绘制原版
+                me.rerere.rikkahub.ui.custom.UISlot(
+                    name = "avatar",
+                    data = mapOf(
+                        "name" to name,
+                        "initial" to name.trim().take(1).uppercase(),
+                        "kind" to when (value) {
+                            is Avatar.Image -> "image"
+                            is Avatar.Emoji -> "emoji"
+                            is Avatar.Dummy -> "dummy"
+                        },
+                        "url" to (value as? Avatar.Image)?.url.orEmpty(),
+                        "emoji" to (value as? Avatar.Emoji)?.content.orEmpty(),
+                        "editable" to (onUpdate != null),
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    when (value) {
+                        is Avatar.Image -> {
+                            AsyncImage(
+                                model = value.url,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+    
+                        is Avatar.Emoji -> {
+                            Text(
+                                text = value.content,
+                                autoSize = TextAutoSize.StepBased(
+                                    minFontSize = 15.sp,
+                                    // 大头像里表情跟着放大，小头像保持原来的 30sp 上限
+                                    maxFontSize = maxOf(30f, maxWidth.value * 0.45f).sp,
+                                ),
+                                lineHeight = 0.8.em,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(5.dp)
+                            )
+                        }
+    
+                        is Avatar.Dummy -> {
+                            ProceduralAvatar(
+                                name = name,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Show edit icon when editable
-        if (onUpdate != null) {
+        // Show edit icon when editable（界面自定义 ui.slot("avatar.edit_badge", 节点) 可替换，写空节点 Box({}) 即隐藏；没写或返回 null 时为原版）
+        if (onUpdate != null) me.rerere.rikkahub.ui.custom.UISlot(
+            name = "avatar.edit_badge",
+            modifier = Modifier.align(Alignment.BottomEnd),
+        ) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -261,7 +282,7 @@ fun UIAvatar(
     }
 
     if (showEmojiPicker) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = {
                 showEmojiPicker = false
             },

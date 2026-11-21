@@ -11,6 +11,7 @@ import androidx.compose.material3.TopAppBarColors
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import me.rerere.rikkahub.ui.custom.colorOr
 
 data class ExtendColors(
     val red1: Color,
@@ -176,10 +177,36 @@ object CustomColors {
 
     val topBarColors: TopAppBarColors
         @Composable get() {
-            return if (!LocalDarkMode.current) TopAppBarDefaults.topAppBarColors(
+            val base = if (!LocalDarkMode.current) TopAppBarDefaults.topAppBarColors(
                 containerColor = colorScheme.surfaceContainer,
                 scrolledContainerColor = colorScheme.surfaceContainer
             ) else TopAppBarDefaults.topAppBarColors()
+            // 界面自定义：
+            // 1. ui.style("topbar", { bg, color })：直接指定各页面顶栏（及 52 个页面的 Scaffold）底色与内容色；
+            // 2. 当前页配置了 `ui.page(..., { background })` 且未显式写 `ui.style("topbar", { bg })` 时，
+            //    containerColor 自动透明以透出页面背景，scrolledContainerColor 保持半透明底色防止滚动时标题叠字。
+            val style = me.rerere.rikkahub.ui.custom.uiComponentStyle("topbar")
+            val hasPageBg = me.rerere.rikkahub.ui.custom.LocalUIPageHasBackground.current
+            if (style == null && !hasPageBg) return base
+            val bg = style.colorOr({ it.background }, colorScheme, Color.Unspecified)
+            val fg = style.colorOr({ it.color }, colorScheme, Color.Unspecified)
+            val container = when {
+                bg != Color.Unspecified -> bg
+                hasPageBg -> Color.Transparent
+                else -> base.containerColor
+            }
+            val scrolled = when {
+                bg != Color.Unspecified && bg != Color.Transparent -> bg
+                hasPageBg || bg == Color.Transparent -> colorScheme.surface.copy(alpha = 0.88f)
+                else -> base.scrolledContainerColor
+            }
+            return base.copy(
+                containerColor = container,
+                scrolledContainerColor = scrolled,
+                navigationIconContentColor = if (fg != Color.Unspecified) fg else base.navigationIconContentColor,
+                titleContentColor = if (fg != Color.Unspecified) fg else base.titleContentColor,
+                actionIconContentColor = if (fg != Color.Unspecified) fg else base.actionIconContentColor,
+            )
         }
 
     val cardColors: CardColors
@@ -189,7 +216,16 @@ object CustomColors {
         @Composable get() = CardDefaults.cardColors(containerColor = colorScheme.surfaceBright)
 
     val listItemColors: ListItemColors
-        @Composable get() = ListItemDefaults.colors(containerColor = colorScheme.surfaceBright)
+        @Composable get() {
+            val base = ListItemDefaults.colors(containerColor = colorScheme.surfaceBright)
+            // 界面自定义 ui.style("list_item", { bg, color, secondaryColor })：全 App 列表项（含设置分组、返回按钮底色）；未设置时为原版
+            val style = me.rerere.rikkahub.ui.custom.uiComponentStyle("list_item") ?: return base
+            return base.copy(
+                containerColor = style.colorOr({ it.background }, colorScheme, base.containerColor),
+                contentColor = style.colorOr({ it.color }, colorScheme, base.contentColor),
+                supportingContentColor = style.colorOr({ it.secondaryColor }, colorScheme, base.supportingContentColor),
+            )
+        }
 
     // 浅色模式下页面背景和悬浮工具栏默认的底色相同，用强调色的版本才分得开
     val floatingToolbarColors: FloatingToolbarColors

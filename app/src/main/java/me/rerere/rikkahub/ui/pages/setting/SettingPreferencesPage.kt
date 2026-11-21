@@ -15,6 +15,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Code
 import me.rerere.hugeicons.stroke.Internet
 import me.rerere.hugeicons.stroke.Notification01
 import me.rerere.hugeicons.stroke.PaintBoard
@@ -64,6 +65,12 @@ fun SettingPreferencesPage() {
                         leadingContent = { CardGroupIcon(HugeIcons.Sun01, containerColor = containerColor, contentColor = contentColor) },
                         headlineContent = { Text(stringResource(R.string.setting_page_preferences_theme)) },
                         supportingContent = { Text(stringResource(R.string.setting_page_preferences_theme_desc)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.UICustomize()) },
+                        leadingContent = { CardGroupIcon(HugeIcons.Code, containerColor = containerColor, contentColor = contentColor) },
+                        headlineContent = { Text("界面自定义") },
+                        supportingContent = { Text("用 JS 定制配色、字体、组件样式、各位置布局、动画与着色器") },
                     )
                     item(
                         onClick = { navController.navigate(Screen.SettingPreferencesNotification) },

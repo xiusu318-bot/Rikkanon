@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.components.message
 
+import me.rerere.rikkahub.ui.pages.extensions.plugin.uiSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -44,6 +45,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessagePart
@@ -140,6 +142,13 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     }
 
     val renderer = remember(tool.toolName) { ToolUIRegistry.resolve(tool.toolName) }
+    val pluginToolMount = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginToolCardMount(tool.toolName)
+    val pluginToolSpec = remember(pluginToolMount) {
+        pluginToolMount?.second?.uiSpec
+    }
+    val liveAskSpec = remember(tool.metadata) {
+        tool.metadata?.get(me.rerere.rikkahub.data.plugin.PLUGIN_ASK_USER_SPEC_KEY) as? JsonObject
+    }
     val outputJson = remember(tool) {
         if (tool.isExecuted) {
             runCatching {
@@ -152,7 +161,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         }
     }
     // 输出不是 JSON (例如超长被截断后只剩文本预览) 时, 定制渲染器读不到任何字段, 详情改用默认渲染展示原文
-    val outputUnparsable = tool.isExecuted && outputJson == null
+    val outputUnparsable = tool.isExecuted && outputJson == null && pluginToolMount == null
     val context = remember(tool, loading, assistant) {
         ToolUIContext(
             tool = tool,
@@ -171,9 +180,15 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     val isDenied = tool.approvalState is ToolApprovalState.Denied
     val images = tool.output.filterIsInstance<UIMessagePart.Image>()
     val duration = rememberToolDuration(tool, loading)
+    val pluginSummaryText = pluginToolSpec?.get("summary")?.jsonPrimitive?.contentOrNull
 
-    // 摘要由注册的渲染器决定; 图片输出与拒绝原因为所有工具通用
-    val hasExtraContent = renderer.hasSummary(context) || isDenied || images.isNotEmpty()
+    // 摘要由注册的渲染器或插件 tool.card 决定; 图片输出、实时提问与拒绝原因为所有工具通用
+    val hasExtraContent = renderer.hasSummary(context) || !pluginSummaryText.isNullOrBlank() ||
+        liveAskSpec != null || isDenied || images.isNotEmpty()
+
+    val toolTitle = pluginToolSpec?.get("title")?.jsonPrimitive?.contentOrNull ?: renderer.title(context)
+    // 界面自定义：主题可用 ui.slot("chat.tool.header", ...) 接管标题行；没写时走原版
+    val headerSlotActive = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot("chat.tool.header") == true
 
     ControlledChainOfThoughtStep(
         expanded = expanded,
@@ -184,59 +199,64 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                     size = 10.dp
                 )
             } else {
+                val customIcon = pluginToolSpec?.get("icon")?.jsonPrimitive?.contentOrNull?.let {
+                    me.rerere.rikkahub.ui.pages.extensions.plugin.resolvePluginIcon(it, renderer.icon(context))
+                } ?: renderer.icon(context)
                 Icon(
-                    imageVector = renderer.icon(context),
+                    imageVector = customIcon,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                     tint = LocalContentColor.current.copy(alpha = 0.7f)
                 )
             }
         },
-        label = {
-            Text(
-                text = renderer.title(context),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier.shimmer(isLoading = loading),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        extra = if (isPending && onToolApproval != null) {
+        label = if (headerSlotActive) {
             {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    FilledTonalIconButton(
-                        onClick = { showDenyDialog = true },
-                        modifier = Modifier.size(28.dp),
-                    ) {
-                        Icon(
-                            imageVector = HugeIcons.Cancel01,
-                            contentDescription = stringResource(R.string.chat_message_tool_deny),
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                    FilledTonalIconButton(
-                        onClick = { onToolApproval(tool.toolCallId, true, "") },
-                        modifier = Modifier.size(28.dp),
-                    ) {
-                        Icon(
-                            imageVector = HugeIcons.Tick01,
-                            contentDescription = stringResource(R.string.chat_message_tool_approve),
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
+                ToolHeaderSlot(
+                    loading = loading,
+                    pending = isPending,
+                    denied = isDenied,
+                    titleText = toolTitle,
+                    toolName = tool.toolName,
+                    duration = duration,
+                    title = { info -> ToolStepTitle(toolTitle, loading, info.modifier, info.textColor) },
+                    durationBlock = { info ->
+                        if (duration != null && duration >= 100.milliseconds) {
+                            ToolStepDuration(duration, loading, info.modifier, info.textColor)
+                        }
+                    },
+                    approvalButtons = { info ->
+                        if (isPending && onToolApproval != null) {
+                            ToolApprovalButtons(
+                                onDeny = { showDenyDialog = true },
+                                onApprove = { onToolApproval(tool.toolCallId, true, "") },
+                                modifier = info.modifier,
+                            )
+                        }
+                    },
+                    actions = mapOf(
+                        "open" to { editingInSheet = false; showResult = true },
+                        "approve" to { onToolApproval?.invoke(tool.toolCallId, true, "") },
+                        "deny" to { showDenyDialog = true },
+                    ),
+                    original = { ToolStepTitle(toolTitle, loading) },
+                )
+            }
+        } else {
+            { ToolStepTitle(toolTitle, loading) }
+        },
+        extra = if (headerSlotActive) {
+            null
+        } else if (isPending && onToolApproval != null) {
+            {
+                ToolApprovalButtons(
+                    onDeny = { showDenyDialog = true },
+                    onApprove = { onToolApproval(tool.toolCallId, true, "") },
+                )
             }
         } else if (duration != null && duration >= 100.milliseconds) {
             {
-                Text(
-                    text = duration.toString(DurationUnit.SECONDS, 1),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.shimmer(isLoading = loading),
-                )
+                ToolStepDuration(duration, loading)
             }
         } else {
             null
@@ -248,7 +268,22 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         content = if (hasExtraContent) {
             {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    renderer.Summary(context)
+                    if (!pluginSummaryText.isNullOrBlank()) {
+                        Text(
+                            text = pluginSummaryText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        renderer.Summary(context)
+                    }
+                    if (liveAskSpec != null && onToolAnswer != null) {
+                        PluginToolLiveAskContent(
+                            toolCallId = tool.toolCallId,
+                            spec = liveAskSpec,
+                            onToolAnswer = onToolAnswer,
+                        )
+                    }
                     if (images.isNotEmpty()) {
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -292,7 +327,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     }
 
     if (showResult) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             sheetState = rememberBottomSheetState(
                 initialValue = SheetValue.Hidden,
                 enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)
@@ -373,6 +408,12 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                                 showResult = false
                                 onEditToolCall(tool.toolCallId, newInput, newOutput, action)
                             },
+                        )
+                    } else if (pluginToolMount != null) {
+                        PluginToolCardSheetPreview(
+                            runtime = pluginToolMount.first,
+                            reg = pluginToolMount.second,
+                            tool = tool,
                         )
                     } else if (outputUnparsable) {
                         DefaultToolPreview(context = context)
@@ -924,8 +965,148 @@ private data class AskUserQuestion(
     val id: String,
     val question: String,
     val options: List<String>,
-    val selectionType: String = "text", // "text" | "single" | "multi"
+    val selectionType: String = "text",
 )
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PluginToolLiveAskContent(
+    toolCallId: String,
+    spec: JsonObject,
+    onToolAnswer: (toolCallId: String, answer: String) -> Unit,
+) {
+    // question 在插件侧 ctx.askUser 已校验
+    val question = spec.getValue("question").jsonPrimitive.content
+    val placeholder = spec["placeholder"]?.jsonPrimitive?.contentOrNull ?: "输入内容..."
+    val options = remember(spec) {
+        spec["options"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+    }
+    val isMulti = spec["multiSelect"]?.jsonPrimitive?.boolean == true
+    var textAnswer by remember(toolCallId, spec) { mutableStateOf("") }
+    var selectedSet by remember(toolCallId, spec) { mutableStateOf(emptySet<String>()) }
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+    ) {
+        Text(
+            text = question,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        if (options.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                options.forEach { opt ->
+                    val sel = if (isMulti) opt in selectedSet else textAnswer == opt
+                    FilterChip(
+                        selected = sel,
+                        onClick = {
+                            if (isMulti) {
+                                selectedSet = if (opt in selectedSet) selectedSet - opt else selectedSet + opt
+                            } else {
+                                textAnswer = opt
+                            }
+                        },
+                        label = { Text(opt, style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+            }
+        }
+        OutlinedTextField(
+            value = textAnswer,
+            onValueChange = { textAnswer = it },
+            placeholder = { Text(placeholder) },
+            textStyle = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 1,
+            maxLines = 3,
+        )
+        FilledTonalButton(
+            onClick = {
+                val finalAns = if (isMulti) {
+                    (selectedSet.toList() + listOfNotNull(textAnswer.takeIf { it.isNotBlank() })).joinToString(", ")
+                } else {
+                    textAnswer
+                }
+                onToolAnswer(toolCallId, finalAns)
+            },
+            enabled = if (isMulti) (selectedSet.isNotEmpty() || textAnswer.isNotBlank()) else textAnswer.isNotBlank(),
+            modifier = Alignment.End.let { Modifier.align(it) },
+        ) {
+            Icon(HugeIcons.Tick01, contentDescription = null, modifier = Modifier.size(16.dp))
+            Text(
+                text = stringResource(R.string.chat_message_tool_submit),
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PluginToolCardSheetPreview(
+    runtime: me.rerere.plugin.runtime.PluginRuntime,
+    reg: me.rerere.plugin.registry.PluginRegistration,
+    tool: UIMessagePart.Tool,
+) {
+    val host = koinInject<me.rerere.plugin.host.PluginHost>()
+    val spec = reg.uiSpec
+    val path = spec["path"]?.jsonPrimitive?.contentOrNull
+    val explicitHeight = spec["height"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+    val heightDp = (explicitHeight ?: 320).coerceIn(120, 680)
+    val payload = remember(tool) {
+        buildJsonObject {
+            put("toolCallId", JsonPrimitive(tool.toolCallId))
+            put("toolName", JsonPrimitive(tool.toolName))
+            put("input", tool.inputAsJson())
+            put("output", JsonPrimitive(tool.output.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }))
+            put("isExecuted", JsonPrimitive(tool.isExecuted))
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        if (!path.isNullOrBlank()) {
+            me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
+                pluginId = runtime.id,
+                path = path,
+                argsJson = payload.toString(),
+                autoHeight = explicitHeight == null,
+                initialHeightDp = heightDp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(heightDp.dp),
+            )
+        } else {
+            val rendered = me.rerere.rikkahub.ui.pages.extensions.plugin.rememberPluginRendered(runtime.id, reg.handlerId, payload, tool)
+            rendered?.exceptionOrNull()?.let { me.rerere.rikkahub.ui.pages.extensions.plugin.PluginRenderError(it) }
+            val content = rendered?.getOrNull()
+            if (!content.isNullOrBlank()) {
+                if (content.trimStart().startsWith("<")) {
+                    me.rerere.rikkahub.ui.pages.extensions.plugin.PluginWebViewBox(
+                        pluginId = runtime.id,
+                        path = "",
+                        inlineHtml = content,
+                        argsJson = payload.toString(),
+                        autoHeight = explicitHeight == null,
+                        initialHeightDp = heightDp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(heightDp.dp),
+                    )
+                } else {
+                    me.rerere.rikkahub.ui.components.richtext.MarkdownBlock(content = content)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun ToolDenyReasonDialog(
@@ -960,5 +1141,106 @@ private fun ToolDenyReasonDialog(
                 Text(stringResource(android.R.string.cancel))
             }
         }
+    )
+}
+
+@Composable
+private fun ToolStepTitle(
+    title: String,
+    loading: Boolean,
+    modifier: Modifier = Modifier,
+    color: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
+) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleSmall,
+        color = if (color != androidx.compose.ui.graphics.Color.Unspecified) color else MaterialTheme.colorScheme.secondary,
+        modifier = modifier.shimmer(isLoading = loading),
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun ToolStepDuration(
+    duration: kotlin.time.Duration,
+    loading: Boolean,
+    modifier: Modifier = Modifier,
+    color: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
+) {
+    Text(
+        text = duration.toString(DurationUnit.SECONDS, 1),
+        style = MaterialTheme.typography.labelSmall,
+        color = if (color != androidx.compose.ui.graphics.Color.Unspecified) color else MaterialTheme.colorScheme.secondary,
+        modifier = modifier.shimmer(isLoading = loading),
+    )
+}
+
+@Composable
+private fun ToolApprovalButtons(
+    onDeny: () -> Unit,
+    onApprove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilledTonalIconButton(
+            onClick = onDeny,
+            modifier = Modifier.size(28.dp),
+        ) {
+            Icon(
+                imageVector = HugeIcons.Cancel01,
+                contentDescription = stringResource(R.string.chat_message_tool_deny),
+                modifier = Modifier.size(14.dp)
+            )
+        }
+        FilledTonalIconButton(
+            onClick = onApprove,
+            modifier = Modifier.size(28.dp),
+        ) {
+            Icon(
+                imageVector = HugeIcons.Tick01,
+                contentDescription = stringResource(R.string.chat_message_tool_approve),
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}
+
+/**
+ * 工具步骤标题行接入点 `chat.tool.header`。左侧图标、点击打开详情、摘要与图片仍由宿主负责。
+ * 数据：loading / pending（等待审批）/ denied / title / tool（工具名）/ seconds；
+ * 原版部件：title / duration / approval_buttons / original；动作：open（详情）/ approve / deny。
+ */
+@Composable
+private fun ToolHeaderSlot(
+    loading: Boolean,
+    pending: Boolean,
+    denied: Boolean,
+    titleText: String,
+    toolName: String,
+    duration: kotlin.time.Duration?,
+    title: @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit,
+    durationBlock: @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit,
+    approvalButtons: @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit,
+    actions: Map<String, () -> Unit>,
+    original: @Composable () -> Unit,
+) {
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = "chat.tool.header",
+        data = mapOf(
+            "loading" to loading,
+            "pending" to pending,
+            "denied" to denied,
+            "title" to titleText,
+            "tool" to toolName,
+            "seconds" to duration?.let { "%.1f".format(it.toDouble(DurationUnit.SECONDS)) }.orEmpty(),
+        ),
+        parts = mapOf("title" to title, "duration" to durationBlock, "approval_buttons" to approvalButtons),
+        actions = actions,
+        modifier = Modifier.fillMaxWidth(),
+        original = original,
     )
 }

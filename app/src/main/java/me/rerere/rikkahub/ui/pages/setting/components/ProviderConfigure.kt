@@ -33,6 +33,11 @@ import me.rerere.ai.provider.ClaudePromptCacheTtl
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.DEFAULT_PROVIDERS
+import me.rerere.rikkahub.data.datastore.apiKeyOrBlank
+import me.rerere.rikkahub.data.datastore.baseUrlOrBlank
+import me.rerere.rikkahub.data.datastore.convertToTargetBaseUrl
+import me.rerere.rikkahub.data.datastore.defaultProtocolBaseUrl
+import me.rerere.rikkahub.data.datastore.resolveInheritedBaseUrl
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.View
 import me.rerere.hugeicons.stroke.ViewOff
@@ -49,6 +54,7 @@ import kotlin.reflect.KClass
 fun ProviderConfigure(
     provider: ProviderSetting,
     modifier: Modifier = Modifier,
+    parentProvider: ProviderSetting? = null,
     onEdit: (provider: ProviderSetting) -> Unit
 ) {
     Column(
@@ -65,56 +71,53 @@ fun ProviderConfigure(
                         ),
                         label = { Text(type.simpleName ?: "") },
                         selected = provider::class == type,
-                        onClick = { onEdit(provider.convertTo(type)) }
+                        onClick = { onEdit(provider.convertTo(type, keepBlankBaseUrl = parentProvider != null)) }
                     )
                 }
             }
         }
 
         when (provider) {
-            is ProviderSetting.OpenAI -> ProviderConfigureOpenAI(provider, onEdit)
-            is ProviderSetting.Google -> ProviderConfigureGoogle(provider, onEdit)
-            is ProviderSetting.Claude -> ProviderConfigureClaude(provider, onEdit)
+            is ProviderSetting.OpenAI -> ProviderConfigureOpenAI(provider, parentProvider, onEdit)
+            is ProviderSetting.Google -> ProviderConfigureGoogle(provider, parentProvider, onEdit)
+            is ProviderSetting.Claude -> ProviderConfigureClaude(provider, parentProvider, onEdit)
             is ProviderSetting.Plugin -> ProviderConfigurePlugin(provider, onEdit)
         }
     }
 }
 
-fun ProviderSetting.convertTo(type: KClass<out ProviderSetting>): ProviderSetting {
+fun ProviderSetting.convertTo(
+    type: KClass<out ProviderSetting>,
+    keepBlankBaseUrl: Boolean = false,
+): ProviderSetting {
     if (this::class == type) return this
 
-    val apiKey = when (this) {
-        is ProviderSetting.OpenAI -> this.apiKey
-        is ProviderSetting.Google -> this.apiKey
-        is ProviderSetting.Claude -> this.apiKey
-        is ProviderSetting.Plugin -> this.apiKey
-    }
-    val sourceBaseUrl = when (this) {
-        is ProviderSetting.OpenAI -> this.baseUrl
-        is ProviderSetting.Google -> this.baseUrl
-        is ProviderSetting.Claude -> this.baseUrl
-        is ProviderSetting.Plugin -> this.baseUrl
-    }
+    val apiKey = this.apiKeyOrBlank()
+    val sourceBaseUrl = this.baseUrlOrBlank()
     val targetDefaultBaseUrl = when (type) {
         ProviderSetting.OpenAI::class -> ProviderSetting.OpenAI().baseUrl
         ProviderSetting.Google::class -> ProviderSetting.Google().baseUrl
         ProviderSetting.Claude::class -> ProviderSetting.Claude().baseUrl
         else -> error("Unsupported provider type: $type")
     }
-    val convertedBaseUrl = if (sourceBaseUrl.isBlank()) targetDefaultBaseUrl else sourceBaseUrl.convertToTargetBaseUrl(targetDefaultBaseUrl)
+    val convertedBaseUrl = if (sourceBaseUrl.isBlank()) {
+        if (keepBlankBaseUrl) "" else targetDefaultBaseUrl
+    } else {
+        sourceBaseUrl.convertToTargetBaseUrl(targetDefaultBaseUrl)
+    }
 
     return when (type) {
         ProviderSetting.OpenAI::class -> ProviderSetting.OpenAI(
             id = this.id, enabled = this.enabled, name = this.name, models = this.models,
             balanceOption = this.balanceOption, customHeaders = this.customHeaders, builtIn = this.builtIn,
             description = this.description, shortDescription = this.shortDescription,
-            apiKey = apiKey, baseUrl = convertedBaseUrl
+            apiKey = apiKey, baseUrl = convertedBaseUrl,
         )
         ProviderSetting.Google::class -> ProviderSetting.Google(
             id = this.id, enabled = this.enabled, name = this.name, models = this.models,
             balanceOption = this.balanceOption, customHeaders = this.customHeaders, builtIn = this.builtIn,
             description = this.description, shortDescription = this.shortDescription,
-            apiKey = apiKey, baseUrl = convertedBaseUrl
+            apiKey = apiKey, baseUrl = convertedBaseUrl,
         )
         ProviderSetting.Claude::class -> ProviderSetting.Claude(
             id = this.id, enabled = this.enabled, name = this.name, models = this.models,
@@ -136,12 +139,7 @@ internal fun ProviderSetting.defaultBaseUrlForReset(): String {
             is ProviderSetting.Plugin -> if (defaultProvider is ProviderSetting.Plugin) return defaultProvider.baseUrl
         }
     }
-    return when (this) {
-        is ProviderSetting.OpenAI -> ProviderSetting.OpenAI().baseUrl
-        is ProviderSetting.Google -> ProviderSetting.Google().baseUrl
-        is ProviderSetting.Claude -> ProviderSetting.Claude().baseUrl
-        is ProviderSetting.Plugin -> ""
-    }
+    return this.defaultProtocolBaseUrl()
 }
 
 internal fun ProviderSetting.resetBaseUrlToDefault(): ProviderSetting {
@@ -155,62 +153,21 @@ internal fun ProviderSetting.resetBaseUrlToDefault(): ProviderSetting {
 }
 
 internal fun ProviderSetting.isUsingDefaultBaseUrl(): Boolean {
-    val baseUrl = when (this) {
-        is ProviderSetting.OpenAI -> this.baseUrl
-        is ProviderSetting.Google -> this.baseUrl
-        is ProviderSetting.Claude -> this.baseUrl
-        is ProviderSetting.Plugin -> this.baseUrl
-    }
-    return baseUrl == defaultBaseUrlForReset()
-}
-
-private fun String.convertToTargetBaseUrl(targetDefaultBaseUrl: String): String {
-    val sourceUrl = this.toHttpUrlOrNull() ?: return this
-    val sourceHost = sourceUrl.host.lowercase()
-    if (sourceHost in OFFICIAL_PROVIDER_HOSTS) return targetDefaultBaseUrl
-    val targetUrl = targetDefaultBaseUrl.toHttpUrlOrNull() ?: return this
-    val convertedPath = sourceUrl.encodedPath.convertToTargetPath(targetUrl.encodedPath)
-    return sourceUrl.newBuilder().encodedPath(convertedPath).build().toString()
-}
-
-private fun String.convertToTargetPath(targetPath: String): String {
-    val source = this.normalizePath()
-    val target = targetPath.normalizePath()
-    val replaced = when {
-        source.lowercase().endsWith(V1_BETA_SUFFIX) -> source.dropLast(V1_BETA_SUFFIX.length) + target
-        source.lowercase().endsWith(V1_SUFFIX) -> source.dropLast(V1_SUFFIX.length) + target
-        source.isBlank() -> target
-        else -> source + target
-    }
-    return replaced.normalizePath()
-}
-
-private fun String.normalizePath(): String {
-    val value = this.trim()
-    if (value.isEmpty() || value == "/") return ""
-    val path = if (value.startsWith("/")) value else "/$value"
-    return path.trimEnd('/')
+    return this.baseUrlOrBlank() == defaultBaseUrlForReset()
 }
 
 private fun String.isValidBaseUrl(): Boolean = this.toHttpUrlOrNull() != null
 
-private const val OPENAI_OFFICIAL_HOST = "api.openai.com"
-private const val GOOGLE_OFFICIAL_HOST = "generativelanguage.googleapis.com"
-private const val CLAUDE_OFFICIAL_HOST = "api.anthropic.com"
-private const val V1_SUFFIX = "/v1"
-private const val V1_BETA_SUFFIX = "/v1beta"
-private val OFFICIAL_PROVIDER_HOSTS = setOf(
-    OPENAI_OFFICIAL_HOST,
-    GOOGLE_OFFICIAL_HOST,
-    CLAUDE_OFFICIAL_HOST
-)
-
 @Composable
 private fun ProviderConfigureOpenAI(
     provider: ProviderSetting.OpenAI,
+    parentProvider: ProviderSetting? = null,
     onEdit: (provider: ProviderSetting.OpenAI) -> Unit
 ) {
     val toaster = LocalToaster.current
+    val inheritedBaseUrl = remember(provider::class, parentProvider) {
+        parentProvider?.let { provider.copy(baseUrl = "").resolveInheritedBaseUrl(it) }
+    }
 
     provider.description()
 
@@ -218,6 +175,9 @@ private fun ProviderConfigureOpenAI(
         value = provider.name,
         onValueChange = { onEdit(provider.copy(name = it)) },
         label = { Text(stringResource(R.string.setting_provider_page_name)) },
+        placeholder = if (parentProvider != null) {
+            { Text("留空则继承父提供商 (${parentProvider.name})") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
     )
 
@@ -226,6 +186,9 @@ private fun ProviderConfigureOpenAI(
         value = provider.apiKey,
         onValueChange = { onEdit(provider.copy(apiKey = it.trim())) },
         label = { Text(stringResource(R.string.setting_provider_page_api_key)) },
+        placeholder = if (parentProvider != null) {
+            { Text("留空则继承父提供商 API Key") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
         maxLines = 3,
         visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -240,6 +203,9 @@ private fun ProviderConfigureOpenAI(
         value = provider.baseUrl,
         onValueChange = { onEdit(provider.copy(baseUrl = it.trim())) },
         label = { Text(stringResource(R.string.setting_provider_page_api_base_url)) },
+        placeholder = if (inheritedBaseUrl != null) {
+            { Text("留空则继承: $inheritedBaseUrl") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
         isError = provider.baseUrl.isNotBlank() && !provider.baseUrl.isValidBaseUrl(),
     )
@@ -265,24 +231,25 @@ private fun ProviderConfigureOpenAI(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_enable))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.enabled,
             onCheckedChange = { onEdit(provider.copy(enabled = it)) }
         )
     }
 
     val responseAPIWarning = stringResource(R.string.setting_provider_page_response_api_warning)
+    val effectiveHostUrl = provider.baseUrl.ifBlank { inheritedBaseUrl.orEmpty() }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_response_api))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.useResponseApi,
             onCheckedChange = {
                 onEdit(provider.copy(useResponseApi = it))
-                if (it && provider.baseUrl.toHttpUrlOrNull()?.host != "api.openai.com") {
+                if (it && effectiveHostUrl.toHttpUrlOrNull()?.host != "api.openai.com") {
                     toaster.show(message = responseAPIWarning, type = ToastType.Warning)
                 }
             }
@@ -295,7 +262,7 @@ private fun ProviderConfigureOpenAI(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_include_history_reasoning))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.includeHistoryReasoning,
             onCheckedChange = { onEdit(provider.copy(includeHistoryReasoning = it)) }
         )
@@ -305,14 +272,22 @@ private fun ProviderConfigureOpenAI(
 @Composable
 private fun ProviderConfigureClaude(
     provider: ProviderSetting.Claude,
+    parentProvider: ProviderSetting? = null,
     onEdit: (provider: ProviderSetting.Claude) -> Unit
 ) {
+    val inheritedBaseUrl = remember(provider::class, parentProvider) {
+        parentProvider?.let { provider.copy(baseUrl = "").resolveInheritedBaseUrl(it) }
+    }
+
     provider.description()
 
     OutlinedTextField(
         value = provider.name,
         onValueChange = { onEdit(provider.copy(name = it)) },
         label = { Text(stringResource(R.string.setting_provider_page_name)) },
+        placeholder = if (parentProvider != null) {
+            { Text("留空则继承父提供商 (${parentProvider.name})") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
         maxLines = 3,
     )
@@ -322,6 +297,9 @@ private fun ProviderConfigureClaude(
         value = provider.apiKey,
         onValueChange = { onEdit(provider.copy(apiKey = it.trim())) },
         label = { Text(stringResource(R.string.setting_provider_page_api_key)) },
+        placeholder = if (parentProvider != null) {
+            { Text("留空则继承父提供商 API Key") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
         maxLines = 3,
         visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -336,6 +314,9 @@ private fun ProviderConfigureClaude(
         value = provider.baseUrl,
         onValueChange = { onEdit(provider.copy(baseUrl = it.trim())) },
         label = { Text(stringResource(R.string.setting_provider_page_api_base_url)) },
+        placeholder = if (inheritedBaseUrl != null) {
+            { Text("留空则继承: $inheritedBaseUrl") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
         isError = provider.baseUrl.isNotBlank() && !provider.baseUrl.isValidBaseUrl(),
     )
@@ -346,7 +327,7 @@ private fun ProviderConfigureClaude(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_enable))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.enabled,
             onCheckedChange = { onEdit(provider.copy(enabled = it)) }
         )
@@ -358,7 +339,7 @@ private fun ProviderConfigureClaude(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_claude_prompt_caching))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.promptCaching,
             onCheckedChange = { onEdit(provider.copy(promptCaching = it)) }
         )
@@ -392,10 +373,15 @@ private fun ProviderConfigureClaude(
 @Composable
 private fun ProviderConfigureGoogle(
     provider: ProviderSetting.Google,
+    parentProvider: ProviderSetting? = null,
     onEdit: (provider: ProviderSetting.Google) -> Unit
 ) {
     val context = LocalContext.current
     val toaster = LocalToaster.current
+    val inheritedBaseUrl = remember(provider::class, parentProvider) {
+        parentProvider?.let { provider.copy(baseUrl = "").resolveInheritedBaseUrl(it) }
+    }
+    val parentGoogle = parentProvider as? ProviderSetting.Google
     val serviceAccountJsonLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -425,6 +411,9 @@ private fun ProviderConfigureGoogle(
         value = provider.name,
         onValueChange = { onEdit(provider.copy(name = it)) },
         label = { Text(stringResource(R.string.setting_provider_page_name)) },
+        placeholder = if (parentProvider != null) {
+            { Text("留空则继承父提供商 (${parentProvider.name})") }
+        } else null,
         modifier = Modifier.fillMaxWidth(),
     )
 
@@ -434,6 +423,9 @@ private fun ProviderConfigureGoogle(
             value = provider.apiKey,
             onValueChange = { onEdit(provider.copy(apiKey = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_api_key)) },
+            placeholder = if (parentProvider != null) {
+                { Text("留空则继承父提供商 API Key") }
+            } else null,
             modifier = Modifier.fillMaxWidth(),
             maxLines = 3,
             visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -446,15 +438,23 @@ private fun ProviderConfigureGoogle(
     }
 
     if (!provider.vertexAI) {
+        val effectiveBaseUrl = if (provider.baseUrl.isBlank() && inheritedBaseUrl != null) {
+            inheritedBaseUrl
+        } else {
+            provider.baseUrl
+        }
         OutlinedTextField(
             value = provider.baseUrl,
             onValueChange = { onEdit(provider.copy(baseUrl = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_api_base_url)) },
+            placeholder = if (inheritedBaseUrl != null) {
+                { Text("留空则继承: $inheritedBaseUrl") }
+            } else null,
             modifier = Modifier.fillMaxWidth(),
             isError = provider.baseUrl.isNotBlank() && (
                 !provider.baseUrl.isValidBaseUrl() || !provider.baseUrl.endsWith("/v1beta")
                 ),
-            supportingText = if (!provider.baseUrl.endsWith("/v1beta")) {
+            supportingText = if (!effectiveBaseUrl.endsWith("/v1beta")) {
                 { Text("The base URL usually ends with `/v1beta`") }
             } else null,
         )
@@ -466,7 +466,7 @@ private fun ProviderConfigureGoogle(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_enable))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.enabled,
             onCheckedChange = { onEdit(provider.copy(enabled = it)) }
         )
@@ -478,7 +478,7 @@ private fun ProviderConfigureGoogle(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_vertex_ai))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.vertexAI,
             onCheckedChange = { onEdit(provider.copy(vertexAI = it)) }
         )
@@ -491,7 +491,7 @@ private fun ProviderConfigureGoogle(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Interactions API (Beta)")
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = provider.useInteractionsApi,
                 onCheckedChange = { onEdit(provider.copy(useInteractionsApi = it)) }
             )
@@ -505,7 +505,7 @@ private fun ProviderConfigureGoogle(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(stringResource(R.string.setting_provider_page_use_service_account))
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = provider.useServiceAccount,
                 onCheckedChange = { onEdit(provider.copy(useServiceAccount = it)) }
             )
@@ -524,6 +524,11 @@ private fun ProviderConfigureGoogle(
             value = provider.serviceAccountEmail,
             onValueChange = { onEdit(provider.copy(serviceAccountEmail = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_service_account_email)) },
+            placeholder = if (parentGoogle != null && parentGoogle.serviceAccountEmail.isNotBlank()) {
+                { Text("留空则继承: ${parentGoogle.serviceAccountEmail}") }
+            } else if (parentProvider != null) {
+                { Text("留空则继承父提供商") }
+            } else null,
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -532,6 +537,9 @@ private fun ProviderConfigureGoogle(
             value = provider.privateKey,
             onValueChange = { onEdit(provider.copy(privateKey = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_private_key)) },
+            placeholder = if (parentProvider != null) {
+                { Text("留空则继承父提供商私钥") }
+            } else null,
             modifier = Modifier.fillMaxWidth(),
             maxLines = 6,
             minLines = 3,
@@ -544,10 +552,14 @@ private fun ProviderConfigureGoogle(
             },
         )
 
+        val inheritedLocation = parentGoogle?.location?.takeIf { it.isNotBlank() } ?: "us-central1"
         OutlinedTextField(
             value = provider.location,
             onValueChange = { onEdit(provider.copy(location = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_location)) },
+            placeholder = if (parentProvider != null) {
+                { Text("留空则继承: $inheritedLocation") }
+            } else null,
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -555,6 +567,11 @@ private fun ProviderConfigureGoogle(
             value = provider.projectId,
             onValueChange = { onEdit(provider.copy(projectId = it.trim())) },
             label = { Text(stringResource(R.string.setting_provider_page_project_id)) },
+            placeholder = if (parentGoogle != null && parentGoogle.projectId.isNotBlank()) {
+                { Text("留空则继承: ${parentGoogle.projectId}") }
+            } else if (parentProvider != null) {
+                { Text("留空则继承父提供商") }
+            } else null,
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -591,7 +608,7 @@ private fun ProviderConfigurePlugin(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(stringResource(R.string.setting_provider_page_enable))
-        Switch(
+        me.rerere.rikkahub.ui.custom.UISwitch(
             checked = provider.enabled,
             onCheckedChange = { onEdit(provider.copy(enabled = it)) }
         )

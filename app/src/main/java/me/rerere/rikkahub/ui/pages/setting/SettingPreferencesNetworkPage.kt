@@ -187,7 +187,7 @@ fun SettingPreferencesNetworkPage(vm: SettingVM = koinViewModel()) {
     }
 
     if (proxyListSheetVisible) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { proxyListSheetVisible = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
@@ -221,7 +221,7 @@ fun SettingPreferencesNetworkPage(vm: SettingVM = koinViewModel()) {
     }
 
     if (outboundSheetVisible) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { outboundSheetVisible = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {

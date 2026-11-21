@@ -440,4 +440,63 @@ class ConversationSessionTest {
             scope.cancel()
         }
     }
+
+    @Test
+    fun `failed multi-step tool generation closes started tool and strips broken tail fragment without losing prior steps`() = runBlocking {
+        val id = Uuid.random()
+        var persisted = Conversation.ofId(id).updateCurrentMessages(listOf(UIMessage.user("deploy")))
+        val session = ConversationSession(id, persisted, this, {})
+        session.initialize { persisted }
+
+        val multiStepPartial = UIMessage(
+            role = MessageRole.ASSISTANT,
+            parts = listOf(
+                UIMessagePart.Reasoning("step 1 done", finishedAt = null),
+                UIMessagePart.Tool(
+                    toolCallId = "step-1",
+                    toolName = "workspace_read_file",
+                    input = """{"path":"/workspace/config.json"}""",
+                    output = listOf(UIMessagePart.Text("""{"port":8080}""")),
+                ),
+                UIMessagePart.Tool(
+                    toolCallId = "step-2-started",
+                    toolName = "workspace_shell",
+                    input = """{"command":"echo ok"}""",
+                    output = emptyList(),
+                    startedAt = kotlin.time.Clock.System.now(),
+                ),
+                UIMessagePart.Tool(
+                    toolCallId = "step-3-broken-sse",
+                    toolName = "workspace_wr",
+                    input = """{"path":"/work""",
+                    output = emptyList(),
+                ),
+            ),
+        )
+        val failure = IllegalStateException("HTTP 502 Bad Gateway")
+        runCatching {
+            flow {
+                emit(multiStepPartial)
+                throw failure
+            }.onCompletion { cause ->
+                session.finishGeneration(cause = cause, interruptedErrorMessage = "HTTP 502") {
+                    persisted = it
+                }
+            }.collect { msg ->
+                session.updateConversation(
+                    session.state.value.updateCurrentMessages(listOf(UIMessage.user("deploy"), msg))
+                )
+            }
+        }
+
+        assertEquals(2, persisted.messageNodes.size)
+        val savedAssistant = persisted.messageNodes[1].currentMessage
+        val savedTools = savedAssistant.getTools()
+        assertEquals(2, savedTools.size)
+        assertEquals("step-1", savedTools[0].toolCallId)
+        assertEquals("""{"port":8080}""", (savedTools[0].output.single() as UIMessagePart.Text).text)
+        assertEquals("step-2-started", savedTools[1].toolCallId)
+        assertTrue(savedTools[1].isExecuted)
+        assertTrue((savedTools[1].output.single() as UIMessagePart.Text).text.contains("HTTP 502"))
+    }
 }

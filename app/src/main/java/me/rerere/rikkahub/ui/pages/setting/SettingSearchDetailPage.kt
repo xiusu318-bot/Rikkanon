@@ -406,7 +406,7 @@ internal fun TavilyOptions(
             Text("Let Tavily generate an answer summary alongside the search results")
         },
         tail = {
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = options.includeAnswer,
                 onCheckedChange = { checked ->
                     onUpdateOptions(options.copy(includeAnswer = checked))
@@ -855,7 +855,7 @@ internal fun BochaOptions(
             Text(stringResource(R.string.search_detail_summary_desc))
         },
         tail = {
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = options.summary,
                 onCheckedChange = { checked ->
                     onUpdateOptions(options.copy(summary = checked))

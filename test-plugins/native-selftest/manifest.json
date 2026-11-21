@@ -1,0 +1,12 @@
+{
+  "id": "rikka.native.selftest",
+  "name": "原生能力自测",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "main": "main.js",
+  "description": "自测 rikka.java（反射）/ rikka.host（宿主对象）/ rikka.hook（方法 Hook）。在插件详情页点「运行全部测试」。",
+  "permissions": [
+    "native",
+    "hook"
+  ]
+}

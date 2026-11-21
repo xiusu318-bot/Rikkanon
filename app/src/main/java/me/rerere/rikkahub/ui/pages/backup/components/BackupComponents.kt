@@ -250,7 +250,7 @@ internal fun <T> BackupFilesSheet(
     onRestore: (T) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(
             initialValue = SheetValue.Hidden,

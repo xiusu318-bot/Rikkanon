@@ -42,6 +42,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Idea
 import me.rerere.hugeicons.stroke.Idea01
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
 import me.rerere.ui.components.ToggleSurface
 import me.rerere.ui.icons.ReasoningHigh
 import me.rerere.ui.icons.ReasoningLow
@@ -119,7 +120,7 @@ fun ReasoningPicker(
             .collect { hapticFeedback.performHapticFeedback(HapticFeedbackType.SegmentTick) }
     }
 
-    ModalBottomSheet(
+    UIModalBottomSheet(
         onDismissRequest = onDismissRequest,
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
     ) {

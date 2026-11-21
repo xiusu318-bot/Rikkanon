@@ -1,7 +1,9 @@
 package me.rerere.rikkahub.ui.components.ai
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,7 +20,7 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -70,13 +72,21 @@ import me.rerere.rikkahub.ui.components.ui.CardGroup
 import me.rerere.rikkahub.ui.components.ui.ExtensionSelector
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalSettings
+import me.rerere.rikkahub.ui.custom.LocalActiveUIPreset
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
+import me.rerere.rikkahub.ui.custom.UISlot
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.hasUICustomShapes
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiCornerShape
 import me.rerere.rikkahub.ui.hooks.ChatInputState
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalSessionManager
 import me.rerere.workspace.WorkspaceShellStatus
 import org.koin.compose.koinInject
 
 @Composable
-internal fun FilesPicker(
+internal fun FilesPickerSheet(
+    sheetState: SheetState,
     conversation: Conversation,
     assistant: Assistant,
     chatModel: Model?,
@@ -118,47 +128,45 @@ internal fun FilesPicker(
     var showMcpSheet by remember { mutableStateOf(false) }
     var showExtensionSheet by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        AttachmentGrid(
-            actions = buildList {
-                add(AttachmentAction(HugeIcons.Camera01, R.string.take_picture, onTakePic))
-                add(AttachmentAction(HugeIcons.Image02, R.string.photo, onPickImage))
-                add(AttachmentAction(HugeIcons.PaintBoard, R.string.sketch, onSketch))
-                if (provider != null && provider is ProviderSetting.Google) {
-                    add(AttachmentAction(HugeIcons.Video01, R.string.video, onPickVideo))
-                    add(AttachmentAction(HugeIcons.MusicNote03, R.string.audio, onPickAudio))
-                }
-                add(AttachmentAction(HugeIcons.Files02, R.string.upload_file, onPickFile))
-                onStartVoiceMode?.let { start ->
-                    add(AttachmentAction(HugeIcons.Voice, R.string.chat_page_voice_title, start))
-                }
-            }
-        )
-
-        val boundSubAssistants = remember(settings.assistants, assistant.effectiveSubAgentIds) {
-            val ids = assistant.effectiveSubAgentIds
-            settings.assistants.filter { it.id in ids }
+    val boundSubAssistants = remember(settings.assistants, assistant.effectiveSubAgentIds) {
+        val ids = assistant.effectiveSubAgentIds
+        settings.assistants.filter { it.id in ids }
+    }
+    val defaultName = stringResource(R.string.assistant_page_default_assistant)
+    val subSupporting = when {
+        !assistant.isSubAgentEnabled -> "未绑定子代理"
+        else -> "已绑定 ${boundSubAssistants.size} 个: " + boundSubAssistants.joinToString(", ") {
+            it.name.ifBlank { defaultName }
         }
-        val defaultName = stringResource(R.string.assistant_page_default_assistant)
-        val subSupporting = when {
-            !assistant.isSubAgentEnabled -> "未绑定子代理"
-            else -> "已绑定 ${boundSubAssistants.size} 个: " + boundSubAssistants.joinToString(", ") {
-                it.name.ifBlank { defaultName }
-            }
-        }
-        val activeExtensionCount =
-            assistant.quickMessageIds.size +
-                assistant.modeInjectionIds.size +
-                assistant.lorebookIds.size +
-                assistant.enabledSkills.size
+    }
+    val activeExtensionCount =
+        assistant.quickMessageIds.size +
+            assistant.modeInjectionIds.size +
+            assistant.lorebookIds.size +
+            assistant.enabledSkills.size
+    val enabledMcpCount = settings.mcpServers.count { it.commonOptions.enable && it.id in assistant.mcpServers }
+    val isGoogle = provider != null && provider is ProviderSetting.Google
 
-        CardGroup {
+    val attachmentActions = buildList {
+        add(AttachmentAction(HugeIcons.Camera01, R.string.take_picture, onTakePic))
+        add(AttachmentAction(HugeIcons.Image02, R.string.photo, onPickImage))
+        add(AttachmentAction(HugeIcons.PaintBoard, R.string.sketch, onSketch))
+        if (isGoogle) {
+            add(AttachmentAction(HugeIcons.Video01, R.string.video, onPickVideo))
+            add(AttachmentAction(HugeIcons.MusicNote03, R.string.audio, onPickAudio))
+        }
+        add(AttachmentAction(HugeIcons.Files02, R.string.upload_file, onPickFile))
+        onStartVoiceMode?.let { start ->
+            add(AttachmentAction(HugeIcons.Voice, R.string.chat_page_voice_title, start))
+        }
+    }
+
+    val renderAttachments: @Composable (Modifier) -> Unit = { mod ->
+        AttachmentGrid(actions = attachmentActions, modifier = mod)
+    }
+
+    val renderOptions: @Composable (Modifier) -> Unit = { mod ->
+        CardGroup(modifier = mod) {
             // 1. 工作区
             item(
                 onClick = { showWorkspaceSheet = true },
@@ -273,7 +281,6 @@ internal fun FilesPicker(
 
             // 4. MCP
             if (settings.mcpServers.isNotEmpty()) {
-                val enabledMcpCount = settings.mcpServers.count { it.commonOptions.enable && it.id in assistant.mcpServers }
                 item(
                     onClick = { showMcpSheet = true },
                     leadingContent = {
@@ -341,119 +348,231 @@ internal fun FilesPicker(
         }
     }
 
-    if (showWorkspaceSheet) {
-        WorkspaceSelectSheet(
-            assistant = assistant,
-            workspaces = workspaces,
-            onSelect = { workspaceId ->
-                val newId = workspaceId?.let { Uuid.parse(it) }
-                if (newId != assistant.workspaceId) {
-                    onUpdateAssistant(assistant.copy(workspaceId = newId))
-                }
-                showWorkspaceSheet = false
-            },
-            onManage = {
-                showWorkspaceSheet = false
-                onDismiss()
-                navController.navigate(Screen.Workspaces)
-            },
-            onDismiss = { showWorkspaceSheet = false },
-        )
-    }
-
-    if (showMcpSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showMcpSheet = false },
-            sheetState = rememberBottomSheetState(
-                initialValue = SheetValue.Expanded,
-                enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
-            ),
-        ) {
-            McpPickerPage(
-                assistant = assistant,
-                servers = settings.mcpServers,
-                mcpManager = mcpManager,
-                onUpdateAssistant = onUpdateAssistant,
-                onBack = { showMcpSheet = false },
+    val renderPlugins: @Composable (Modifier) -> Unit = { mod ->
+        Box(mod) {
+            me.rerere.rikkahub.ui.pages.extensions.plugin.PluginChatMoreMounts(
+                conversationId = conversation.id.toString(),
+                assistantId = assistant.id.toString(),
+                onDismissSheet = onDismiss,
             )
         }
     }
 
-    if (showExtensionSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showExtensionSheet = false },
-            sheetState = rememberBottomSheetState(
-                initialValue = SheetValue.Expanded,
-                enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
-            ),
+    val renderContent: @Composable (Modifier) -> Unit = { mod ->
+        Column(
+            modifier = mod
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.75f)
-                    .padding(horizontal = 16.dp),
-            ) {
-                SheetHeader(
-                    title = stringResource(R.string.assistant_page_tab_extensions),
-                )
-                ExtensionSelector(
-                    assistant = assistant,
-                    settings = settings,
-                    onUpdate = onUpdateAssistant,
-                    modifier = Modifier.weight(1f),
-                    onNavigateToQuickMessages = { quickMessageId ->
-                        showExtensionSheet = false
-                        onDismiss()
-                        navController.navigate(Screen.QuickMessages(quickMessageId = quickMessageId))
-                    },
-                    onNavigateToPrompts = { initialTab, presetId, lorebookId ->
-                        showExtensionSheet = false
-                        onDismiss()
-                        navController.navigate(
-                            Screen.Prompts(
-                                initialTab = initialTab,
-                                presetId = presetId,
-                                lorebookId = lorebookId,
-                            )
-                        )
-                    },
-                    onNavigateToSkills = { skillName ->
-                        showExtensionSheet = false
-                        onDismiss()
-                        if (skillName != null) {
-                            navController.navigate(Screen.SkillDetail(skillName))
-                        } else {
-                            navController.navigate(Screen.Skills)
-                        }
-                    },
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-            }
+            renderAttachments(Modifier)
+            renderOptions(Modifier)
+            renderPlugins(Modifier)
         }
     }
 
-    if (showCwdSheet && boundWorkspace != null) {
-        WorkspaceCwdPickerSheet(
-            workspaceId = boundWorkspace.id,
-            workspaceDir = boundWorkspace.workspaceDir(),
-            currentCwd = conversation.workspaceCwd,
-            onSelectCwd = { newCwd ->
-                onUpdateConversation(conversation.copy(workspaceCwd = newCwd))
-            },
-            onDismiss = { showCwdSheet = false },
-        )
+    val renderSubSheets: @Composable () -> Unit = {
+        if (showWorkspaceSheet) {
+            WorkspaceSelectSheet(
+                assistant = assistant,
+                workspaces = workspaces,
+                onSelect = { workspaceId ->
+                    val newId = workspaceId?.let { Uuid.parse(it) }
+                    if (newId != assistant.workspaceId) {
+                        onUpdateAssistant(assistant.copy(workspaceId = newId))
+                    }
+                    showWorkspaceSheet = false
+                },
+                onManage = {
+                    showWorkspaceSheet = false
+                    onDismiss()
+                    navController.navigate(Screen.Workspaces)
+                },
+                onDismiss = { showWorkspaceSheet = false },
+            )
+        }
+
+        if (showMcpSheet) {
+            UIModalBottomSheet(
+                onDismissRequest = { showMcpSheet = false },
+                sheetState = rememberBottomSheetState(
+                    initialValue = SheetValue.Expanded,
+                    enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+                ),
+            ) {
+                McpPickerPage(
+                    assistant = assistant,
+                    servers = settings.mcpServers,
+                    mcpManager = mcpManager,
+                    onUpdateAssistant = onUpdateAssistant,
+                    onBack = { showMcpSheet = false },
+                )
+            }
+        }
+
+        if (showExtensionSheet) {
+            UIModalBottomSheet(
+                onDismissRequest = { showExtensionSheet = false },
+                sheetState = rememberBottomSheetState(
+                    initialValue = SheetValue.Expanded,
+                    enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+                ),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.75f)
+                        .padding(horizontal = 16.dp),
+                ) {
+                    SheetHeader(
+                        title = stringResource(R.string.assistant_page_tab_extensions),
+                    )
+                    ExtensionSelector(
+                        assistant = assistant,
+                        settings = settings,
+                        onUpdate = onUpdateAssistant,
+                        modifier = Modifier.weight(1f),
+                        onNavigateToQuickMessages = { quickMessageId ->
+                            showExtensionSheet = false
+                            onDismiss()
+                            navController.navigate(Screen.QuickMessages(quickMessageId = quickMessageId))
+                        },
+                        onNavigateToPrompts = { initialTab, presetId, lorebookId ->
+                            showExtensionSheet = false
+                            onDismiss()
+                            navController.navigate(
+                                Screen.Prompts(
+                                    initialTab = initialTab,
+                                    presetId = presetId,
+                                    lorebookId = lorebookId,
+                                )
+                            )
+                        },
+                        onNavigateToSkills = { skillName ->
+                            showExtensionSheet = false
+                            onDismiss()
+                            if (skillName != null) {
+                                navController.navigate(Screen.SkillDetail(skillName))
+                            } else {
+                                navController.navigate(Screen.Skills)
+                            }
+                        },
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+            }
+        }
+
+        if (showCwdSheet && boundWorkspace != null) {
+            WorkspaceCwdPickerSheet(
+                workspaceId = boundWorkspace.id,
+                workspaceDir = boundWorkspace.workspaceDir(),
+                currentCwd = conversation.workspaceCwd,
+                onSelectCwd = { newCwd ->
+                    onUpdateConversation(conversation.copy(workspaceCwd = newCwd))
+                },
+                onDismiss = { showCwdSheet = false },
+            )
+        }
+
+        if (showCompressDialog) {
+            CompressContextDialog(
+                onDismiss = {
+                    onShowCompressDialogChange(false)
+                    onDismiss()
+                },
+                onConfirm = { additionalPrompt, targetTokens, keepRecentMessages ->
+                    onCompressContext(additionalPrompt, targetTokens, keepRecentMessages)
+                }
+            )
+        }
     }
 
-    if (showCompressDialog) {
-        CompressContextDialog(
-            onDismiss = {
-                onShowCompressDialogChange(false)
-                onDismiss()
-            },
-            onConfirm = { additionalPrompt, targetTokens, keepRecentMessages ->
-                onCompressContext(additionalPrompt, targetTokens, keepRecentMessages)
+    val slotActive = LocalActiveUIPreset.current?.hasSlot("chat.more") == true
+    UISlot(
+        name = "chat.more",
+        data = if (slotActive) mapOf(
+            "assistant" to assistant.name.ifBlank { defaultName },
+            "assistantId" to assistant.id.toString(),
+            "conversationId" to conversation.id.toString(),
+            "model" to chatModel?.displayName.orEmpty(),
+            "isGoogle" to isGoogle,
+            "canVoice" to (onStartVoiceMode != null),
+            "hasWorkspace" to (boundWorkspace != null),
+            "workspace" to boundWorkspace?.name.orEmpty(),
+            "workspaceId" to boundWorkspace?.id.orEmpty(),
+            "canTerminal" to (boundWorkspace?.supportsTerminal() == true),
+            "showCwd" to showCwd,
+            "cwd" to (conversation.workspaceCwd ?: boundWorkspace?.workspaceDir().orEmpty()),
+            "subAgentEnabled" to assistant.isSubAgentEnabled,
+            "subAgentCount" to boundSubAssistants.size,
+            "subAgentSummary" to subSupporting,
+            "hasMcp" to settings.mcpServers.isNotEmpty(),
+            "mcpCount" to enabledMcpCount,
+            "extensionCount" to activeExtensionCount,
+            "messageCount" to conversation.messageNodes.size,
+        ) else emptyMap(),
+        parts = if (slotActive) mapOf(
+            "content" to { info -> renderContent(info.modifier) },
+            "attachments" to { info -> renderAttachments(info.modifier) },
+            "options" to { info -> renderOptions(info.modifier) },
+            "plugins" to { info -> renderPlugins(info.modifier) },
+        ) else emptyMap(),
+        actions = if (slotActive) buildMap {
+            put("dismiss", onDismiss)
+            put("close", onDismiss)
+            put("take_photo", onTakePic)
+            put("camera", onTakePic)
+            put("pick_image", onPickImage)
+            put("photo", onPickImage)
+            put("sketch", onSketch)
+            if (isGoogle) {
+                put("pick_video", onPickVideo)
+                put("video", onPickVideo)
+                put("pick_audio", onPickAudio)
+                put("audio", onPickAudio)
             }
-        )
+            put("pick_file", onPickFile)
+            put("file", onPickFile)
+            if (onStartVoiceMode != null) {
+                put("voice", onStartVoiceMode)
+            }
+            put("open_workspace") { showWorkspaceSheet = true }
+            if (boundWorkspace != null) {
+                put("open_workspace_detail") {
+                    onDismiss()
+                    navController.navigate(Screen.WorkspaceDetail(boundWorkspace.id))
+                }
+                if (boundWorkspace.supportsTerminal()) {
+                    put("open_terminal") {
+                        onDismiss()
+                        navController.navigate(Screen.WorkspaceTerminal(boundWorkspace.id))
+                    }
+                }
+            }
+            if (showCwd) {
+                put("open_cwd") { showCwdSheet = true }
+            }
+            put("open_sub_agents") {
+                onDismiss()
+                navController.navigate(Screen.AssistantSubAgent(assistant.id.toString()))
+            }
+            if (settings.mcpServers.isNotEmpty()) {
+                put("open_mcp") { showMcpSheet = true }
+            }
+            put("open_extensions") { showExtensionSheet = true }
+            put("compress") { onShowCompressDialogChange(true) }
+        } else emptyMap(),
+        whenReplaced = renderSubSheets,
+    ) {
+        UIModalBottomSheet(
+            sheetState = sheetState,
+            onDismissRequest = onDismiss,
+        ) {
+            renderContent(Modifier)
+        }
+        renderSubSheets()
     }
 }
 
@@ -494,26 +613,38 @@ private fun AttachmentTile(
     action: AttachmentAction,
     modifier: Modifier = Modifier,
 ) {
+    val tileStyle = uiComponentStyle("attachment_tile") ?: uiComponentStyle("card")
+    val scheme = MaterialTheme.colorScheme
+    val tileShape = tileStyle?.cornerDp?.let { uiCornerShape(it.dp) }
+        ?: if (hasUICustomShapes()) MaterialTheme.shapes.large else RoundedCornerShape(16.dp)
+    val tileBorder = tileStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+        BorderStroke(it.dp, tileStyle.colorOr({ s -> s.borderColor }, scheme, scheme.outlineVariant))
+    }
     Surface(
         onClick = action.onClick,
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = tileShape,
+        color = tileStyle.colorOr({ it.background }, scheme, scheme.surfaceContainerLow),
+        border = tileBorder,
         modifier = modifier.heightIn(min = 76.dp),
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 14.dp),
+            modifier = Modifier.padding(
+                horizontal = (tileStyle?.paddingHorizontalDp ?: 8f).dp,
+                vertical = (tileStyle?.paddingVerticalDp ?: 14f).dp,
+            ),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Icon(
                 imageVector = action.icon,
                 contentDescription = null,
-                modifier = Modifier.size(24.dp),
-                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size((tileStyle?.widthDp ?: 24f).dp),
+                tint = tileStyle.colorOr({ it.color }, scheme, scheme.primary),
             )
             Text(
                 text = stringResource(action.label),
                 style = MaterialTheme.typography.labelMedium,
+                color = tileStyle.colorOr({ it.secondaryColor }, scheme, androidx.compose.ui.graphics.Color.Unspecified),
                 autoSize = TextAutoSize.StepBased(minFontSize = 11.sp, maxFontSize = 13.sp),
                 maxLines = 1,
                 softWrap = false,
@@ -525,10 +656,26 @@ private fun AttachmentTile(
 
 @Composable
 internal fun CountBadge(count: Int) {
-    Badge(
-        containerColor = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    val badgeStyle = uiComponentStyle("card_group.value") ?: uiComponentStyle("tag")
+    if (badgeStyle == null && !hasUICustomShapes()) {
+        Badge(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) {
+            Text(count.toString())
+        }
+        return
+    }
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        shape = badgeStyle?.cornerDp?.let { uiCornerShape(it.dp) } ?: MaterialTheme.shapes.extraSmall,
+        color = badgeStyle.colorOr({ it.background }, scheme, scheme.primaryContainer),
+        contentColor = badgeStyle.colorOr({ it.color }, scheme, scheme.onPrimaryContainer),
     ) {
-        Text(count.toString())
+        Text(
+            text = count.toString(),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+        )
     }
 }

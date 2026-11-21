@@ -70,7 +70,7 @@ class SafeModeActivity : ComponentActivity() {
         CrashHandler.clearCrashed(this)
         enableEdgeToEdge()
         setContent {
-            RikkahubTheme {
+            RikkahubTheme(ignoreCustomUi = true) {
                 val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle()
                 var showAssistantPicker by remember { mutableStateOf(false) }
                 val scope = rememberCoroutineScope()
@@ -117,6 +117,27 @@ class SafeModeActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(stringResource(R.string.safe_mode_enter_app))
+                        }
+
+                        // 界面自定义开着时崩溃：可能是主题引起的（如主题放进页面的宿主控件出错），给一个关掉它再进入的入口
+                        if (settings.enableCustomUi) {
+                            Text(
+                                text = "崩溃时「界面自定义」处于开启状态，可能是主题引起的。可以先关闭它再进入，之后到「设置 → 扩展 → 界面自定义」里修改主题并重新开启。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        settingsStore.update { it.copy(enableCustomUi = false) }
+                                        startActivity(Intent(this@SafeModeActivity, RouteActivity::class.java))
+                                        finish()
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("关闭界面自定义后进入")
+                            }
                         }
 
                         if (stackTrace != null) {

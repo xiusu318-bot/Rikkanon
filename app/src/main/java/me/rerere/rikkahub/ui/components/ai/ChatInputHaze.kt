@@ -4,6 +4,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazeState
@@ -30,7 +31,7 @@ internal fun Modifier.chatInputHaze(
     hazeState: HazeState,
     displaySetting: DisplaySetting,
     containerColor: Color,
-    shape: RoundedCornerShape,
+    shape: Shape,
 ): Modifier {
     if (!displaySetting.enableBlurEffect) return this
     return when (displaySetting.backgroundEffectType) {
@@ -57,7 +58,9 @@ internal fun Modifier.chatInputHaze(
                             depth = OpticalSizeValue.Fixed(0.5f),
                         )
                     )
-                    shape(shape)
+                    if (shape is RoundedCornerShape) {
+                        shape(shape)
+                    }
                 },
             )
         }

@@ -5,6 +5,9 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.Model
@@ -74,9 +77,10 @@ data class UIMessage(
         }
     }
 
-    fun hasBase64Part(): Boolean = parts.any {
-        it is UIMessagePart.Image && it.url.startsWith("data:")
-    }
+    fun hasBase64Part(): Boolean = parts.hasBase64ImagePart()
+
+    fun isEmptyAssistantShell(): Boolean =
+        role == MessageRole.ASSISTANT && parts.isEmptyUIMessage() && rawJsonElementOrNull() == null
 
     /**
      * 用快照还原出一个只用于展示名称和图标的 [Model]
@@ -312,9 +316,9 @@ fun UIMessage.finishReasoning(): UIMessage {
 fun UIMessage.finishPendingTools(
     transform: (UIMessagePart.Tool) -> UIMessagePart.Tool
 ): UIMessage {
-    val updatedParts = parts.map { part ->
+    val updatedParts = parts.mapNotNull { part ->
         if (part is UIMessagePart.Tool && !part.isExecuted) {
-            transform(part)
+            if (part.hasValidStreamedCall()) transform(part) else null
         } else {
             part
         }
@@ -328,6 +332,107 @@ fun UIMessage.finishPendingTools(
         parts = updatedParts,
         finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault())
     ).finishReasoning()
+}
+
+private fun List<UIMessagePart>.hasBase64ImagePart(): Boolean = any { part ->
+    when (part) {
+        is UIMessagePart.Image -> part.url.startsWith("data:")
+        is UIMessagePart.Tool -> part.output.hasBase64ImagePart()
+        else -> false
+    }
+}
+
+/**
+ * 判断未执行完的 [UIMessagePart.Tool] 是否已构成一条完整的工具调用（而非流式 SSE 半途断开留下的残缺碎片）：
+ * - 工具名必须非空；
+ * - 若已进入执行阶段（`startedAt != null`）或已离开默认 `Auto` 审批态（如 `Pending` / `Approved`），视为完整调用；
+ * - 否则要求 `input` 为非空且可解析为完整 [JsonObject]。
+ */
+fun UIMessagePart.Tool.hasValidStreamedCall(): Boolean {
+    if (toolName.isBlank()) return false
+    if (startedAt != null || approvalState !is ToolApprovalState.Auto) return true
+    if (input.isBlank()) return false
+    return runCatching { json.parseToJsonElement(input) is JsonObject }.getOrDefault(false)
+}
+
+fun buildInterruptedToolOutputJson(status: String, errorMessage: String): String =
+    json.encodeToString(
+        buildJsonObject {
+            put("status", JsonPrimitive(status))
+            put("error", JsonPrimitive(errorMessage))
+        }
+    )
+
+/**
+ * 收尾被取消、异常中断或进程退出后冷启动恢复的消息：
+ * - 为未结束的 `Reasoning` 补齐 `finishedAt`；
+ * - 将仍处于 `IN_PROGRESS` 的 `ServerTool` 标记为 `FAILED`；
+ * - 对未产生 `output` 的 `Tool`：
+ *   1. 若允许保留待审批/可恢复状态且该工具满足对应条件，原样保留；
+ *   2. 若属于完整工具调用（[hasValidStreamedCall]），补写结构化中断/取消结果以保留该步卡片且满足各家 API `tool_use` ⇄ `tool_result` 配对校验；
+ *   3. 若只是流式传输半截中断的残缺碎片，仅剥离该残缺部件，保留同一条消息内已完成的全部前置步骤、思考与正文。
+ */
+fun UIMessage.finalizeInterruptedParts(
+    keepPendingApprovals: Boolean,
+    keepResumableApprovals: Boolean = false,
+    status: String = "interrupted",
+    errorMessage: String = "Generation interrupted before tool execution completed.",
+    stripMetadataKeys: Set<String> = emptySet(),
+): UIMessage {
+    val now = Clock.System.now()
+    val updatedParts = parts.mapNotNull { part ->
+        when (part) {
+            is UIMessagePart.Reasoning -> {
+                if (part.finishedAt == null) part.copy(finishedAt = now) else part
+            }
+
+            is UIMessagePart.ServerTool -> {
+                if (!part.isFinished) part.copy(status = ServerToolStatus.FAILED) else part
+            }
+
+            is UIMessagePart.Tool -> {
+                val cleanedTool = if (
+                    stripMetadataKeys.isNotEmpty() &&
+                    part.metadata != null &&
+                    stripMetadataKeys.any { it in part.metadata!! }
+                ) {
+                    val remaining = part.metadata!! - stripMetadataKeys
+                    part.copy(metadata = if (remaining.isEmpty()) null else JsonObject(remaining))
+                } else {
+                    part
+                }
+
+                when {
+                    cleanedTool.isExecuted -> {
+                        if (cleanedTool.startedAt != null && cleanedTool.finishedAt == null) {
+                            cleanedTool.copy(finishedAt = now)
+                        } else {
+                            cleanedTool
+                        }
+                    }
+
+                    (keepPendingApprovals && cleanedTool.isPending) ||
+                        (keepResumableApprovals && cleanedTool.canResumeExecution) -> cleanedTool
+
+                    cleanedTool.hasValidStreamedCall() -> cleanedTool.copy(
+                        output = listOf(UIMessagePart.Text(buildInterruptedToolOutputJson(status, errorMessage))),
+                        finishedAt = cleanedTool.finishedAt ?: cleanedTool.startedAt?.let { now },
+                    )
+
+                    else -> null
+                }
+            }
+
+            else -> part
+        }
+    }
+
+    if (updatedParts == parts) return this
+
+    return copy(
+        parts = updatedParts,
+        finishedAt = finishedAt ?: now.toLocalDateTime(TimeZone.currentSystemDefault()),
+    )
 }
 
 /**

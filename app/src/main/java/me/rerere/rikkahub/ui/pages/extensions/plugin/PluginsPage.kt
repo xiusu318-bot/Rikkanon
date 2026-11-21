@@ -146,7 +146,7 @@ fun PluginsPage() {
                                     IconButton(enabled = index < sorted.lastIndex, onClick = {
                                         scope.launch { swapPriority(host, sorted, index, index + 1) }
                                     }) { Icon(HugeIcons.ArrowDown01, contentDescription = "下移") }
-                                    Switch(
+                                    me.rerere.rikkahub.ui.custom.UISwitch(
                                         checked = enabled,
                                         onCheckedChange = { checked ->
                                             scope.launch {

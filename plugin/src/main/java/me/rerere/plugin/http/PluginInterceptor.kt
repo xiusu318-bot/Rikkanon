@@ -22,6 +22,7 @@ import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -34,6 +35,7 @@ import okio.Source
 import okio.Timeout
 import okio.buffer
 import java.io.IOException
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -62,8 +64,12 @@ object PluginRequestContexts {
 
 /**
  * 插件 intercept 链的 OkHttp 应用层拦截器。没有已启用的 intercept 时只移除上下文请求头后直接放行。
+ * [proxyClientResolver] 允许插件在 `next({ ...req, proxy: "..." })` 中为单次请求动态切换代理或直连。
  */
-class PluginInterceptor(private val host: PluginHost) : Interceptor {
+class PluginInterceptor(
+    private val host: PluginHost,
+    private val proxyClientResolver: ((String) -> OkHttpClient)? = null,
+) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
         val token = original.header(PluginRequestContexts.HEADER)
@@ -75,9 +81,9 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
         val handlers = host.chain(PluginHookKind.INTERCEPT, context?.filter ?: { true })
         if (handlers.isEmpty()) return chain.proceed(request)
 
-        val session = InterceptSession(chain, handlers, ctx)
+        val session = InterceptSession(chain, handlers, ctx, proxyClientResolver)
         try {
-            val response = runBlocking { session.run(0, request) }
+            val response = runBlocking { session.run(0, request, null) }
             return session.attachCleanup(response)
         } catch (e: Throwable) {
             val upstreamIo = session.matchUpstreamIoException(e)
@@ -95,6 +101,35 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
         private val sessions = ConcurrentHashMap<String, Pair<InterceptSession, Int>>()
         private val bodies = ConcurrentHashMap<String, InterceptSession.UpstreamBody>()
 
+        /** 供 `rikka.fetch({ stream: true })` 注册流式响应体，复用同一套按行/全文/Base64 读取机制。 */
+        fun registerExternalBody(response: Response, pluginId: String? = null): JsonObject {
+            val bodyId = UUID.randomUUID().toString()
+            bodies[bodyId] = InterceptSession.UpstreamBody(null, response, response.body.source(), pluginId = pluginId)
+            return buildJsonObject {
+                put("status", response.code)
+                put("headers", headersToJson(response.headers))
+                put("bodyId", bodyId)
+            }
+        }
+
+        /** 插件停止或热重载时关闭该插件尚未读完的 `fetch({ stream: true })` 响应体，防止连接泄漏。 */
+        fun closeExternalBodiesOf(pluginId: String) {
+            bodies.entries.removeIf { (_, body) ->
+                if (body.session == null && body.pluginId == pluginId) {
+                    runCatching { body.response.close() }
+                    true
+                } else false
+            }
+        }
+
+        private fun resolveBody(id: String, callerPluginId: String?): InterceptSession.UpstreamBody {
+            val body = bodies[id] ?: error("响应体 $id 不存在或已关闭")
+            if (body.pluginId != null && callerPluginId != null && body.pluginId != callerPluginId) {
+                error("响应体 $id 不存在或已关闭")
+            }
+            return body
+        }
+
         /** JS `next(req)`：进入链上下一个插件或真正发出请求。 */
         suspend fun handleNext(args: JsonElement): JsonElement {
             val obj = args.jsonObject
@@ -103,31 +138,62 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
             return session.next(index, obj["req"]!!.jsonObject)
         }
 
-        suspend fun readLine(args: JsonElement): JsonElement {
-            val body = bodyOf(args)
+        suspend fun readLine(args: JsonElement, callerPluginId: String? = null): JsonElement {
+            val id = args.jsonObject["bodyId"]!!.jsonPrimitive.content
+            val body = resolveBody(id, callerPluginId)
             val line = try {
                 withContext(Dispatchers.IO) { body.source.readUtf8Line() }
             } catch (e: IOException) {
-                body.session.recordUpstreamIoException(e)
+                body.session?.recordUpstreamIoException(e)
                 throw e
+            }
+            if (line == null && body.session == null) {
+                bodies.remove(id)?.response?.close()
             }
             return if (line == null) JsonNull else JsonPrimitive(line + "\n")
         }
 
-        suspend fun readText(args: JsonElement): JsonElement {
-            val body = bodyOf(args)
+        suspend fun readText(args: JsonElement, callerPluginId: String? = null): JsonElement {
+            val id = args.jsonObject["bodyId"]!!.jsonPrimitive.content
+            val body = resolveBody(id, callerPluginId)
             val text = try {
                 withContext(Dispatchers.IO) { body.source.readUtf8() }
             } catch (e: IOException) {
-                body.session.recordUpstreamIoException(e)
+                body.session?.recordUpstreamIoException(e)
                 throw e
+            } finally {
+                if (body.session == null) {
+                    bodies.remove(id)?.response?.close()
+                }
             }
             return JsonPrimitive(text)
         }
 
-        private fun bodyOf(args: JsonElement): InterceptSession.UpstreamBody {
+        suspend fun readBase64(args: JsonElement, callerPluginId: String? = null): JsonElement {
             val id = args.jsonObject["bodyId"]!!.jsonPrimitive.content
-            return bodies[id] ?: error("响应体 $id 不存在或已关闭")
+            val body = resolveBody(id, callerPluginId)
+            val bytes = try {
+                withContext(Dispatchers.IO) { body.source.readByteArray() }
+            } catch (e: IOException) {
+                body.session?.recordUpstreamIoException(e)
+                throw e
+            } finally {
+                if (body.session == null) {
+                    bodies.remove(id)?.response?.close()
+                }
+            }
+            return JsonPrimitive(Base64.getEncoder().encodeToString(bytes))
+        }
+
+        fun closeBody(args: JsonElement, callerPluginId: String? = null): JsonElement {
+            val id = args.jsonObject["bodyId"]!!.jsonPrimitive.content
+            val existing = bodies[id] ?: return JsonNull
+            if (existing.pluginId != null && callerPluginId != null && existing.pluginId != callerPluginId) {
+                error("响应体 $id 不存在或已关闭")
+            }
+            // 重复关闭（或已读完自动关闭后再关闭）不报错
+            bodies.remove(id)?.response?.close()
+            return JsonNull
         }
     }
 
@@ -135,13 +201,20 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
         private val chain: Interceptor.Chain,
         private val handlers: List<Pair<PluginRuntime, PluginRegistration>>,
         private val ctx: JsonObject,
+        private val proxyClientResolver: ((String) -> OkHttpClient)?,
     ) {
-        class UpstreamBody(val session: InterceptSession, val response: Response, val source: BufferedSource)
+        class UpstreamBody(
+            val session: InterceptSession?,
+            val response: Response,
+            val source: BufferedSource,
+            val pluginId: String? = null,
+        )
 
         private val id = UUID.randomUUID().toString()
         private val tokens = mutableListOf<String>()
         private val bodyIds = mutableListOf<String>()
         private val originalRequests = ConcurrentHashMap<Int, Request>()
+        private val proxyOverrides = ConcurrentHashMap<Int, String?>()
 
         @Volatile
         private var lastUpstreamIoException: IOException? = null
@@ -167,10 +240,19 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
             return if (ioName in msg || (ioMsg.isNotEmpty() && ioMsg in msg)) io else null
         }
 
-        suspend fun run(index: Int, request: Request): Response {
+        suspend fun run(index: Int, request: Request, proxyOverride: String?): Response {
             if (index >= handlers.size) {
                 return try {
-                    withContext(Dispatchers.IO) { chain.proceed(request) }
+                    withContext(Dispatchers.IO) {
+                        val customClient = if (!proxyOverride.isNullOrBlank() && proxyClientResolver != null) {
+                            proxyClientResolver.invoke(proxyOverride)
+                        } else null
+                        if (customClient != null) {
+                            customClient.newCall(request).execute()
+                        } else {
+                            chain.proceed(request)
+                        }
+                    }
                 } catch (e: IOException) {
                     recordUpstreamIoException(e)
                     throw e
@@ -181,10 +263,11 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
             synchronized(tokens) { tokens += token }
             sessions[token] = this to index
             originalRequests[index] = request
+            if (proxyOverride != null) proxyOverrides[index] = proxyOverride
             val payload = buildJsonObject {
                 put("handler", reg.handlerId)
                 put("token", token)
-                put("req", requestToJson(request))
+                put("req", requestToJson(request, proxyOverride))
                 put("ctx", ctx)
             }
             // intercept 包含等待上游的时间，不设插件超时
@@ -194,7 +277,8 @@ class PluginInterceptor(private val host: PluginHost) : Interceptor {
 
         suspend fun next(index: Int, req: JsonObject): JsonElement {
             val base = originalRequests[index] ?: error("intercept 会话状态丢失")
-            val response = run(index + 1, jsonToRequest(req, base))
+            val nextProxy = req["proxy"]?.jsonPrimitive?.contentOrNull ?: proxyOverrides[index]
+            val response = run(index + 1, jsonToRequest(req, base), nextProxy)
             val bodyId = UUID.randomUUID().toString()
             bodies[bodyId] = UpstreamBody(this, response, response.body.source())
             synchronized(bodyIds) { bodyIds += bodyId }
@@ -323,7 +407,7 @@ private val TEXT_TYPES = setOf("json", "text", "xml", "x-www-form-urlencoded", "
 private fun isTextual(type: MediaType?): Boolean =
     type == null || type.type == "text" || TEXT_TYPES.any { type.subtype.contains(it) }
 
-private fun headersToJson(headers: Headers): JsonObject =
+internal fun headersToJson(headers: Headers): JsonObject =
     JsonObject(headers.toMultimap().mapValues { JsonPrimitive(it.value.joinToString(", ")) })
 
 private fun jsonToHeaders(element: JsonElement?): Headers {
@@ -333,10 +417,11 @@ private fun jsonToHeaders(element: JsonElement?): Headers {
     }.build()
 }
 
-private fun requestToJson(request: Request): JsonObject = buildJsonObject {
+private fun requestToJson(request: Request, proxy: String? = null): JsonObject = buildJsonObject {
     put("url", request.url.toString())
     put("method", request.method)
     put("headers", headersToJson(request.headers))
+    if (proxy != null) put("proxy", proxy)
     val body = request.body
     when {
         body == null -> put("body", JsonNull)
@@ -357,8 +442,10 @@ private fun jsonToRequest(obj: JsonObject, base: Request): Request {
     val method = obj["method"]?.jsonPrimitive?.contentOrNull ?: base.method
     val headers = jsonToHeaders(obj["headers"])
     val bodyText = obj["body"]?.let { if (it is JsonNull) null else it.jsonPrimitive.content }
+    val bodyBase64 = obj["bodyBase64"]?.let { if (it is JsonNull) null else it.jsonPrimitive.contentOrNull }
     val mediaType = headers["Content-Type"]?.toMediaTypeOrNull() ?: base.body?.contentType()
     val body = when {
+        bodyBase64 != null -> Base64.getDecoder().decode(bodyBase64).toRequestBody(mediaType)
         bodyText != null -> bodyText.toRequestBody(mediaType)
         base.body != null && !isTextual(base.body?.contentType()) -> base.body
         else -> null

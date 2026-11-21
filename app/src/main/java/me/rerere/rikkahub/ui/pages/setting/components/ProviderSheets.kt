@@ -42,7 +42,7 @@ internal fun <T> ProviderTypeSheet(
     onSelect: (T) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(
             initialValue = SheetValue.Hidden,
@@ -106,7 +106,7 @@ internal fun <T> ProviderEditSheet(
 ) {
     var current by remember(initial) { mutableStateOf(initial) }
 
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(
             initialValue = SheetValue.Hidden,

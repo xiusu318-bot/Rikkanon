@@ -41,6 +41,8 @@ import me.rerere.hugeicons.stroke.ArrowTurnBackward
 import me.rerere.hugeicons.stroke.Folder01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
+import me.rerere.rikkahub.ui.custom.uiButtonShape
 import me.rerere.workspace.WorkspaceFileEntry
 import me.rerere.workspace.WorkspaceStorageArea
 import org.koin.compose.koinInject
@@ -75,7 +77,7 @@ fun WorkspaceCwdPickerSheet(
         }
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    UIModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -168,17 +170,23 @@ fun WorkspaceCwdPickerSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (currentCwd != null) {
-                    TextButton(onClick = {
-                        onSelectCwd(null)
-                        onDismiss()
-                    }) {
+                    TextButton(
+                        onClick = {
+                            onSelectCwd(null)
+                            onDismiss()
+                        },
+                        shape = uiButtonShape(),
+                    ) {
                         Text(stringResource(R.string.workspace_cwd_reset))
                     }
                 }
-                FilledTonalButton(onClick = {
-                    onSelectCwd(toAbsolutePath(workspaceDir, browsePath))
-                    onDismiss()
-                }) {
+                FilledTonalButton(
+                    onClick = {
+                        onSelectCwd(toAbsolutePath(workspaceDir, browsePath))
+                        onDismiss()
+                    },
+                    shape = uiButtonShape(),
+                ) {
                     Text(stringResource(R.string.workspace_cwd_set))
                 }
             }

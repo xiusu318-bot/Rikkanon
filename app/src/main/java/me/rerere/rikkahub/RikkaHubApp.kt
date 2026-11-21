@@ -113,6 +113,9 @@ class RikkaHubApp : Application() {
             runCatching { me.rerere.rikkahub.data.plugin.PluginCapabilitySync.sync(host, get()) }
         }
 
+        // 界面自定义：保存的编译结果与代码不符的预设在后台重新编译（总开关关闭时不工作）
+        me.rerere.rikkahub.ui.custom.UIPresetCompileSync.start(get<AppScope>(), get())
+
         // Load models.dev data for model capability matching, then refresh it in background
         updateModelsDev()
 

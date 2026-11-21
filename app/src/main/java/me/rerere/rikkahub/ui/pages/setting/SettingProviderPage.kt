@@ -177,7 +177,7 @@ fun SettingProviderPage(vm: SettingVM = koinViewModel()) {
                     }
                 },
                 singleLine = true,
-                shape = CircleShape,
+                shape = me.rerere.rikkahub.ui.custom.uiSearchBarShape(),
             )
 
 
@@ -246,7 +246,7 @@ private fun RecommendProviderButton(
     }
 
     if (showSheet) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { showSheet = false },
             sheetState = rememberBottomSheetState(
                 initialValue = SheetValue.Hidden,

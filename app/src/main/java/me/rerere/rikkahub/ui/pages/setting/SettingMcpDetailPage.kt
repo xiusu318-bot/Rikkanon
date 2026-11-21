@@ -348,7 +348,7 @@ private fun McpCommonOptionsConfigure(
             ) {
                 Text(stringResource(R.string.setting_mcp_page_enable))
                 Spacer(Modifier.weight(1f))
-                Switch(
+                me.rerere.rikkahub.ui.custom.UISwitch(
                     checked = config.commonOptions.enable,
                     onCheckedChange = { enabled ->
                         update(

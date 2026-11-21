@@ -398,7 +398,7 @@ private fun CustomThemeEditSheet(
         mutableStateOf(theme ?: CustomTheme())
     }
 
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
     ) {

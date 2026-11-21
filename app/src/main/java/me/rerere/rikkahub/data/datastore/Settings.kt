@@ -24,6 +24,7 @@ import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
+import me.rerere.rikkahub.data.model.UIPreset
 import me.rerere.rikkahub.data.sync.s3.S3Config
 import me.rerere.rikkahub.ui.theme.CustomTheme
 import me.rerere.rikkahub.ui.theme.PresetThemes
@@ -84,6 +85,8 @@ data class Settings(
     val modeInjections: List<PromptInjection.ModeInjection> = DEFAULT_MODE_INJECTIONS,
     val enableAdvancedPrompt: Boolean = true,
     val promptPresets: List<PromptPreset> = DEFAULT_PROMPT_PRESETS,
+    val enableCustomUi: Boolean = false,
+    val uiPresets: List<UIPreset> = emptyList(),
     val lorebooks: List<Lorebook> = emptyList(),
     val quickMessages: List<QuickMessage> = emptyList(),
     val enableSecretKeyAlias: Boolean = false,
@@ -298,18 +301,11 @@ fun JsonElement.replaceSecretKeyAliases(settings: Settings, enabled: Boolean): J
 }
 
 /**
- * 将工具输出文本中出现的真实密钥值 [SecretKeyEntry.secretValue] 反向替换回代名词 [SecretKeyEntry.keyName]，
- * 防止命令回显或报错信息将真实密钥泄露给云端模型。
+ * 将工具输出文本中出现的真实密钥值 [SecretKeyEntry.secretValue]（含 JSON 字段转义、URL 变体、PTY 折行，
+ * 以及 `od -c`/`xxd`/`hexdump`/`base64`/字节码/长密钥切片等探测变形）脱敏还原，防止命令回显或拆字节排查把真实密钥泄露给云端模型。
  */
 fun Settings.redactSecretKeyValues(output: String, enabled: Boolean = true): String {
     if (!enabled || output.isEmpty() || secretKeys.isEmpty()) return output
-    var result = output
-    secretKeys
-        .filter { it.enabled && it.keyName.isNotBlank() && it.secretValue.isNotEmpty() }
-        .sortedByDescending { it.secretValue.length }
-        .forEach { entry ->
-            result = result.replace(entry.secretValue, entry.keyName)
-        }
-    return result
+    return me.rerere.rikkahub.data.secret.SecretKeySanitizer.redactToolPayload(output, secretKeys)
 }
 

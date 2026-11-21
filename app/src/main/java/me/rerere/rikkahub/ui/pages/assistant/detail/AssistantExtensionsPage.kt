@@ -43,7 +43,8 @@ fun AssistantExtensionsPage(id: String) {
     val skills by vm.skills.collectAsStateWithLifecycle()
     val navController = LocalNavController.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
-    val pagerState = rememberPagerState { ExtensionTab.entries.size }
+    val tabs = ExtensionTab.entries
+    val pagerState = rememberPagerState { tabs.size }
     val listPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
     // 页面背景比 sheet 深，列表项用更亮的容器色才分得开
     val listColors = ListItemDefaults.segmentedColors(
@@ -69,7 +70,7 @@ fun AssistantExtensionsPage(id: String) {
         ) {
             PagerTabs(
                 pagerState = pagerState,
-                tabs = ExtensionTab.entries,
+                tabs = tabs,
                 modifier = Modifier.padding(bottom = 4.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp),
             )
@@ -80,7 +81,7 @@ fun AssistantExtensionsPage(id: String) {
                     .fillMaxWidth()
                     .weight(1f),
             ) { page ->
-                when (val tab = ExtensionTab.entries[page]) {
+                when (val tab = tabs[page]) {
                     ExtensionTab.QUICK_MESSAGES -> {
                         if (settings.quickMessages.isEmpty()) {
                             ExtensionEmptyState(

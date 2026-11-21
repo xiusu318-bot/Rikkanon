@@ -256,7 +256,7 @@ internal fun AssistantBasicContent(
                 headlineContent = { Text(stringResource(R.string.assistant_page_temperature)) },
                 supportingContent = { Text(stringResource(R.string.assistant_page_temperature_warning)) },
                 trailingContent = {
-                    Switch(
+                    me.rerere.rikkahub.ui.custom.UISwitch(
                         checked = assistant.temperature != null,
                         onCheckedChange = { enabled ->
                             onUpdate(
@@ -299,7 +299,7 @@ internal fun AssistantBasicContent(
                 headlineContent = { Text(stringResource(R.string.assistant_page_top_p)) },
                 supportingContent = { Text(stringResource(R.string.assistant_page_top_p_warning)) },
                 trailingContent = {
-                    Switch(
+                    me.rerere.rikkahub.ui.custom.UISwitch(
                         checked = assistant.topP != null,
                         onCheckedChange = { enabled ->
                             onUpdate(

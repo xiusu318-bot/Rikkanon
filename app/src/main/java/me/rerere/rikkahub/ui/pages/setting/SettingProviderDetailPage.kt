@@ -104,6 +104,7 @@ import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.datastore.createBlankOverride
 import me.rerere.rikkahub.ui.components.ai.ModelAbilityTag
 import me.rerere.rikkahub.ui.components.ai.ModelModalityTag
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
@@ -893,7 +894,7 @@ private fun AddModelButton(
     if (dialogState.isEditing) {
         dialogState.currentState?.let { modelState ->
             val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
-            ModalBottomSheet(
+            me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
                 onDismissRequest = {
                     dialogState.dismiss()
                 },
@@ -976,7 +977,7 @@ private fun ModelPicker(
 ) {
     var showModal by remember { mutableStateOf(false) }
     if (showModal) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { showModal = false },
             sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded)),
         ) {
@@ -1308,7 +1309,7 @@ private fun ModelCard(
     if (dialogState.isEditing) {
         dialogState.currentState?.let { editingModel ->
             val sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
-            ModalBottomSheet(
+            me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
                 onDismissRequest = {
                     dialogState.dismiss()
                 },
@@ -1427,7 +1428,7 @@ private fun ModelCard(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        if (model.providerOverwrite != null) {
+                        if (model.providerOverwrite?.enabled == true) {
                             Tag(type = TagType.INFO) {
                                 Text(
                                     model.providerOverwrite?.javaClass?.simpleName ?: model.providerOverwrite?.name
@@ -1551,7 +1552,7 @@ private fun BuiltInToolsSettings(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Switch(
+                    me.rerere.rikkahub.ui.custom.UISwitch(
                         checked = tool in tools,
                         onCheckedChange = { checked ->
                             if (checked) {
@@ -1591,6 +1592,11 @@ private fun ProviderOverrideSettings(
         )
 
         if (providerOverride != null) {
+            val effectiveName = providerOverride.name.ifBlank {
+                parentProvider?.name ?: providerOverride.javaClass.simpleName
+            }
+            val typeName = providerOverride.javaClass.simpleName ?: "Override"
+            val suffix = if (providerOverride.enabled) "$typeName Override" else "$typeName Override · 已禁用"
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -1605,11 +1611,11 @@ private fun ProviderOverrideSettings(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         AutoAIIcon(
-                            providerOverride.name,
+                            effectiveName,
                             modifier = Modifier.size(24.dp)
                         )
                         Text(
-                            text = "${providerOverride.name} (Override)",
+                            text = "$effectiveName ($suffix)",
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f)
                         )
@@ -1634,12 +1640,7 @@ private fun ProviderOverrideSettings(
         } else {
             Button(
                 onClick = {
-                    editingProvider = parentProvider?.copyProvider(
-                        id = Uuid.random(),
-                        builtIn = false,
-                        models = emptyList(), // 这里必须设置为空，不然会导致循环依赖JSON
-                        description = {},
-                    )
+                    editingProvider = parentProvider?.createBlankOverride()
                     showProviderConfig = true
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -1652,7 +1653,7 @@ private fun ProviderOverrideSettings(
 
         // Provider configuration modal
         if (showProviderConfig && editingProvider != null) {
-            ModalBottomSheet(
+            me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
                 onDismissRequest = {
                     showProviderConfig = false
                     editingProvider = null
@@ -1681,6 +1682,7 @@ private fun ProviderOverrideSettings(
                     ) {
                         ProviderConfigure(
                             provider = internalProvider,
+                            parentProvider = parentProvider,
                             onEdit = { internalProvider = it }
                         )
                     }

@@ -40,9 +40,15 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.BorderStroke
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Edit03
 import me.rerere.hugeicons.stroke.LookTop
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.hasUICustomShapes
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiCornerShape
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.datastore.Settings
@@ -109,7 +115,7 @@ fun AssistantPicker(
 }
 
 @Composable
-private fun AssistantPickerSheet(
+internal fun AssistantPickerSheet(
     settings: Settings,
     currentAssistant: Assistant,
     onAssistantSelected: (Assistant) -> Unit,
@@ -133,10 +139,14 @@ private fun AssistantPickerSheet(
         }
     }
 
-    ModalBottomSheet(
+    UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
     ) {
+        val chipShape = uiComponentStyle("tag")?.cornerDp?.let { uiCornerShape(it.dp) }
+            ?: if (hasUICustomShapes()) MaterialTheme.shapes.small else RoundedCornerShape(50)
+        val cardStyle = uiComponentStyle("card")
+        val scheme = MaterialTheme.colorScheme
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -167,7 +177,7 @@ private fun AssistantPickerSheet(
                             },
                             label = { Text(tag.name) },
                             selected = tag.id in selectedTagIds,
-                            shape = RoundedCornerShape(50),
+                            shape = chipShape,
                         )
                     }
                 }
@@ -185,10 +195,13 @@ private fun AssistantPickerSheet(
                     Card(
                         onClick = { onAssistantSelected(assistant) },
                         modifier = Modifier.animateItem(),
-                        shape = MaterialTheme.shapes.large,
+                        shape = cardStyle?.cornerDp?.let { uiCornerShape(it.dp) } ?: MaterialTheme.shapes.large,
+                        border = cardStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+                            BorderStroke(it.dp, cardStyle.colorOr({ s -> s.borderColor }, scheme, scheme.outlineVariant))
+                        },
                         colors = CardDefaults.cardColors(
-                            containerColor = if (checked) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-                            contentColor = if (checked) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                            containerColor = if (checked) scheme.primaryContainer else cardStyle.colorOr({ it.background }, scheme, scheme.surface),
+                            contentColor = if (checked) scheme.onPrimaryContainer else scheme.onSurface,
                         ),
                     ) {
                         AssistantItem(

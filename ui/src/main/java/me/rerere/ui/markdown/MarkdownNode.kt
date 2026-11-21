@@ -81,8 +81,21 @@ sealed interface MarkdownBlock {
     data class Container(
         val children: List<MarkdownBlock>,
         val style: TextStyle,
+        val boxStyle: MarkdownBoxStyle? = null,
+        /** 原 HTML 是否带文字样式；为 false 时只因盒样式才成为容器，未开启 [MarkdownTheme.htmlBoxStyle] 时按原样展开。 */
+        val hasTextStyle: Boolean = true,
     ) : MarkdownBlock
 }
+
+@Immutable
+data class MarkdownBoxStyle(
+    val backgroundColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
+    val borderColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified,
+    val borderWidthDp: Float = 0f,
+    val cornerRadiusDp: Float = 0f,
+    val paddingHorizontalDp: Float = 0f,
+    val paddingVerticalDp: Float = 0f,
+)
 
 /** [checked] 非 null 时是任务列表项 */
 @Immutable

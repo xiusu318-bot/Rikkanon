@@ -36,6 +36,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEachIndexed
 import kotlinx.coroutines.launch
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiToggleButtonColors
+import me.rerere.rikkahub.ui.custom.uiToggleButtonShapes
 
 internal interface PagerTab {
     val icon: ImageVector
@@ -55,6 +58,9 @@ internal fun PagerTabs(
     // 用 targetPage 而不是 currentPage，跨多页跳转时中间的按钮不会依次闪过
     val selectedIndex = pagerState.targetPage
     val requesters = remember(tabs) { tabs.map { BringIntoViewRequester() } }
+    val tabStyle = uiComponentStyle("pager_tab")
+    val tabShapes = uiToggleButtonShapes("pager_tab")
+    val tabColors = uiToggleButtonColors("pager_tab", MaterialTheme.colorScheme.surfaceContainerHighest)
 
     // 滑动翻页后，把选中的按钮滚进可视范围
     LaunchedEffect(selectedIndex) {
@@ -67,7 +73,7 @@ internal fun PagerTabs(
             .horizontalScroll(rememberScrollState())
             .padding(contentPadding)
             .selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy((tabStyle?.spacingDp ?: 8f).coerceAtLeast(0f).dp),
     ) {
         tabs.fastForEachIndexed { index, tab ->
             val selected = index == selectedIndex
@@ -79,9 +85,8 @@ internal fun PagerTabs(
                 modifier = Modifier
                     .bringIntoViewRequester(requesters[index])
                     .semantics { role = Role.Tab },
-                colors = ToggleButtonDefaults.colors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                ),
+                shapes = tabShapes,
+                colors = tabColors,
             ) {
                 AnimatedVisibility(
                     visible = selected,

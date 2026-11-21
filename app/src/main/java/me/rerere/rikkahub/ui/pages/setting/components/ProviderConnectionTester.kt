@@ -291,7 +291,7 @@ private fun TestResultItem(
         val stackTrace = remember(state.error) {
             state.error.stackTraceToString()
         }
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { showErrorSheet = false },
             sheetState = sheetState,
         ) {

@@ -5,10 +5,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.util.Base64
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,9 +20,11 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import me.rerere.plugin.host.PluginHostApi
 import me.rerere.plugin.manifest.PluginPermission
 import me.rerere.plugin.runtime.PluginRuntime
@@ -28,6 +32,9 @@ import me.rerere.rikkahub.CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.data.files.saveUploadFromBytes
+import me.rerere.rikkahub.data.files.saveUploadText
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
 
@@ -38,9 +45,16 @@ sealed interface PluginUiEvent {
         val presentation: String = "page",
         val argsJson: String = "null",
         val title: String? = null,
+        val widthDp: Int? = null,
+        val heightDp: Int? = null,
     ) : PluginUiEvent
     data class ClosePanel(val pluginId: String, val path: String? = null) : PluginUiEvent
-    data class EmitToPanel(val pluginId: String, val event: String, val dataJson: String) : PluginUiEvent
+    data class EmitToPanel(
+        val pluginId: String,
+        val event: String,
+        val dataJson: String,
+        val path: String? = null,
+    ) : PluginUiEvent
 }
 
 /** 插件发起的界面事件，由 RouteActivity 与打开的面板消费。 */
@@ -71,6 +85,29 @@ class AppPluginHostApi(private val context: Context) : PluginHostApi, KoinCompon
     private val conversations by lazy { PluginConversationApi(get(), get(), get()) }
     private val settings by lazy { PluginSettingsApi(get(), get()) }
     private val workspace by lazy { PluginWorkspaceApi(get(), get()) }
+    private val filesManager by lazy { get<FilesManager>() }
+
+    /**
+     * 同步宿主对象（`rikka.host.context / activity / koin / get`），返回 Java 句柄。
+     * 需要 `native` 权限（与 `rikka.java` 相同）。
+     */
+    override fun callSync(runtime: PluginRuntime, name: String, args: JsonElement): JsonElement {
+        if (name.startsWith("host.")) runtime.requirePermission(PluginPermission.NATIVE)
+        val bridge = runtime.javaBridge
+        return when (name) {
+            "host.context" -> bridge.encode(context.applicationContext)
+            "host.activity" -> bridge.encode(PluginCurrentActivity.get(context.applicationContext as android.app.Application))
+            "host.koin" -> bridge.encode(getKoin())
+            "host.get" -> {
+                val o = args.obj()
+                val cls = bridge.findClass(o.str("cls"))
+                val qualifier = (o["qualifier"] as? JsonPrimitive)?.contentOrNull?.let { org.koin.core.qualifier.named(it) }
+                bridge.encode(getKoin().get<Any>(cls.kotlin, qualifier))
+            }
+
+            else -> super.callSync(runtime, name, args)
+        }
+    }
 
     override suspend fun call(runtime: PluginRuntime, name: String, args: JsonElement): JsonElement {
         val ns = name.substringBefore('.')
@@ -102,6 +139,8 @@ class AppPluginHostApi(private val context: Context) : PluginHostApi, KoinCompon
                 workspace.call(name, args.obj())
             }
 
+            "attachments" -> saveAttachment(args.obj())
+
             "notify" -> {
                 runtime.requirePermission(PluginPermission.NOTIFICATION)
                 notify(runtime, args.obj())
@@ -122,6 +161,30 @@ class AppPluginHostApi(private val context: Context) : PluginHostApi, KoinCompon
         }
     }
 
+    private suspend fun saveAttachment(obj: JsonObject): JsonElement {
+        val fileName = obj.strOrNull("fileName") ?: "attachment.bin"
+        val mime = obj.strOrNull("mime") ?: "application/octet-stream"
+        val b64 = obj.strOrNull("base64")
+        val text = obj.strOrNull("text")
+        val entity = when {
+            b64 != null -> {
+                val clean = if (b64.contains("base64,")) b64.substringAfter("base64,") else b64
+                val bytes = Base64.decode(clean, Base64.DEFAULT)
+                filesManager.saveUploadFromBytes(bytes, fileName, mime)
+            }
+            text != null -> filesManager.saveUploadText(text, fileName, mime)
+            else -> error("attachments.save 需要 base64 或 text 参数")
+        }
+        val file = filesManager.getFile(entity)
+        return buildJsonObject {
+            put("id", entity.id)
+            put("fileName", entity.displayName)
+            put("mime", entity.mimeType)
+            put("path", file.absolutePath)
+            put("url", file.toUri().toString())
+        }
+    }
+
     private fun ui(runtime: PluginRuntime, name: String, obj: JsonObject): JsonElement = when (name) {
         "ui.open" -> {
             val path = obj.str("path")
@@ -137,6 +200,8 @@ class AppPluginHostApi(private val context: Context) : PluginHostApi, KoinCompon
                     presentation = presentation,
                     argsJson = (obj["args"] ?: JsonNull).toString(),
                     title = obj.strOrNull("title"),
+                    widthDp = obj.intOrNull("width"),
+                    heightDp = obj.intOrNull("height"),
                 )
             )
             JsonNull
@@ -153,6 +218,7 @@ class AppPluginHostApi(private val context: Context) : PluginHostApi, KoinCompon
                     pluginId = runtime.id,
                     event = obj.str("event"),
                     dataJson = (obj["data"] ?: JsonNull).toString(),
+                    path = obj.strOrNull("path"),
                 )
             )
             JsonNull

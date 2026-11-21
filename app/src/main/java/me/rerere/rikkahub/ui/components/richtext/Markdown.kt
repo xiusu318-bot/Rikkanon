@@ -139,19 +139,66 @@ fun MarkdownBlock(
 ) {
     val enableLatexRendering = LocalSettings.current.displaySetting.enableLatexRendering
     val enableQuoteHighlight = LocalSettings.current.displaySetting.enableQuoteHighlight
-    val fontSize = LocalTextStyle.current.merge(style).fontSize
+    val customTypo = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.typographySection?.takeIf { it.enabled }
+    val colorScheme = MaterialTheme.colorScheme
+    val baseStyle = LocalTextStyle.current.merge(style).let { merged ->
+        if (customTypo != null) {
+            val customBodyColor = me.rerere.rikkahub.ui.custom.resolveUIColor(customTypo.bodyTextColorHex, colorScheme)
+            val scaledFontSize = if (merged.fontSize.isSp) merged.fontSize * customTypo.fontSizeMultiplier else merged.fontSize
+            // 未写行距倍率时，原版行距随字号倍率等比缩放
+            val scaledLineHeight = when {
+                customTypo.lineHeightMultiplier != null && scaledFontSize.isSp -> scaledFontSize * customTypo.lineHeightMultiplier
+                merged.lineHeight.isSp -> merged.lineHeight * customTypo.fontSizeMultiplier
+                else -> merged.lineHeight
+            }
+            merged.copy(
+                fontSize = scaledFontSize,
+                lineHeight = scaledLineHeight,
+                color = if (customBodyColor != Color.Unspecified) customBodyColor else merged.color,
+            )
+        } else merged
+    }
+    val fontSize = baseStyle.fontSize
     val density = LocalDensity.current
-    val quoteColor = MaterialTheme.colorScheme.tertiary
-    val defaultTheme = MarkdownDefaults.theme(style)
-    val theme = remember(defaultTheme, fontSize, density, enableQuoteHighlight, quoteColor) {
+    val quoteColor = if (customTypo != null) {
+        me.rerere.rikkahub.ui.custom.resolveUIColor(customTypo.quoteTextColorHex, colorScheme, colorScheme.tertiary)
+    } else {
+        colorScheme.tertiary
+    }
+    val effectiveQuoteEnabled = customTypo?.quoteHighlightEnabled ?: enableQuoteHighlight
+    val defaultTheme = MarkdownDefaults.theme(baseStyle)
+    val theme = remember(defaultTheme, fontSize, density, effectiveQuoteEnabled, quoteColor, customTypo, colorScheme) {
+        val headingColor = customTypo?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it.headingColorHex, colorScheme) } ?: Color.Unspecified
+        val inlineCodeColor = customTypo?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it.inlineCodeColorHex, colorScheme) } ?: Color.Unspecified
+        val boldColor = customTypo?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it.boldTextColorHex, colorScheme) } ?: Color.Unspecified
+        val italicColor = customTypo?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it.italicTextColorHex, colorScheme) } ?: Color.Unspecified
+        val quoteBarColor = customTypo?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it.blockquoteBarColorHex, colorScheme) } ?: Color.Unspecified
+        val quoteBgColor = customTypo?.let { me.rerere.rikkahub.ui.custom.resolveUIColor(it.blockquoteBgColorHex, colorScheme) } ?: Color.Unspecified
         defaultTheme.copy(
+            headings = if (headingColor != Color.Unspecified) {
+                defaultTheme.headings.map { it.copy(color = headingColor) }
+            } else defaultTheme.headings,
             inlineCode = defaultTheme.inlineCode.copy(
                 fontFamily = JetbrainsMono,
                 fontFeatureSettings = "'calt' 0, 'liga' 0, 'clig' 0",
+                color = if (inlineCodeColor != Color.Unspecified) inlineCodeColor else defaultTheme.inlineCode.color,
             ),
-            // 段落间距跟随字号，调整字体大小时保持比例
-            blockSpacing = if (fontSize.isSp) with(density) { fontSize.toDp() } else defaultTheme.blockSpacing,
-            quotedText = SpanStyle(color = quoteColor).takeIf { enableQuoteHighlight },
+            // 段落间距跟随字号或自定义段距
+            blockSpacing = when {
+                customTypo?.blockSpacingDp != null -> customTypo.blockSpacingDp.coerceAtLeast(0f).dp
+                fontSize.isSp -> with(density) { fontSize.toDp() }
+                else -> defaultTheme.blockSpacing
+            },
+            quotedText = SpanStyle(
+                color = quoteColor,
+                fontWeight = if (customTypo?.quoteFontWeightBold == true) FontWeight.SemiBold else null,
+            ).takeIf { effectiveQuoteEnabled },
+            boldText = if (boldColor != Color.Unspecified) SpanStyle(color = boldColor, fontWeight = FontWeight.Bold) else null,
+            italicText = if (italicColor != Color.Unspecified) SpanStyle(color = italicColor) else null,
+            firstLineIndentSp = customTypo?.firstLineIndentSp?.coerceAtLeast(0f) ?: 0f,
+            quoteColor = if (quoteBarColor != Color.Unspecified) quoteBarColor else defaultTheme.quoteColor,
+            quoteBackgroundColor = quoteBgColor,
+            htmlBoxStyle = customTypo != null,
         )
     }
 
@@ -197,7 +244,7 @@ fun MarkdownBlock(
     Markdown(
         content = content,
         modifier = modifier.padding(horizontal = 4.dp),
-        style = style,
+        style = baseStyle,
         theme = theme,
         components = components,
     )

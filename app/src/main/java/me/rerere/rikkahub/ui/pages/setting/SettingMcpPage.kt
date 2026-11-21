@@ -438,7 +438,7 @@ private fun McpServerConfigModal(state: EditState<McpServerConfig>) {
     state.EditStateContent { config, updateValue ->
         val pagerState = rememberPagerState { 2 }
         val scope = rememberCoroutineScope()
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = {
                 state.dismiss()
             },
@@ -554,7 +554,7 @@ private fun McpCommonOptionsConfigure(
             ) {
                 Text(stringResource(R.string.setting_mcp_page_enable))
                 Spacer(Modifier.weight(1f))
-                Switch(
+                me.rerere.rikkahub.ui.custom.UISwitch(
                     checked = config.commonOptions.enable,
                     onCheckedChange = { enabled ->
                         update(
@@ -1042,7 +1042,7 @@ private fun McpImportModal(
     val noValidConfigMsg = stringResource(R.string.setting_mcp_page_import_no_valid_config)
     val parseErrorMsg = stringResource(R.string.setting_mcp_page_import_parse_error)
 
-    ModalBottomSheet(
+    me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
     ) {

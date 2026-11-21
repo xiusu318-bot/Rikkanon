@@ -55,8 +55,15 @@ import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.mcp.McpServerConfig
 import me.rerere.rikkahub.data.ai.mcp.McpStatus
 import me.rerere.rikkahub.data.model.Assistant
+import androidx.compose.foundation.BorderStroke
 import me.rerere.rikkahub.ui.components.ui.Tag
 import me.rerere.rikkahub.ui.components.ui.TagType
+import me.rerere.rikkahub.ui.custom.UIModalBottomSheet
+import me.rerere.rikkahub.ui.custom.UISwitch
+import me.rerere.rikkahub.ui.custom.colorOr
+import me.rerere.rikkahub.ui.custom.uiComponentStyle
+import me.rerere.rikkahub.ui.custom.uiCornerShape
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemColors
 import me.rerere.ui.components.ToggleSurface
 import org.koin.compose.koinInject
 
@@ -118,7 +125,7 @@ fun McpPickerButton(
         }
     }
     if (showMcpPicker) {
-        ModalBottomSheet(
+        UIModalBottomSheet(
             onDismissRequest = { showMcpPicker = false },
             sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
         ) {
@@ -182,6 +189,7 @@ fun McpPickerListItem(
     SegmentedListItem(
         onClick = onClick,
         shapes = shapes,
+        colors = uiSegmentedListItemColors(),
         modifier = modifier,
         leadingContent = {
             if (loading) {
@@ -286,10 +294,16 @@ fun McpPicker(
                     )
                 )
             }
+            val cardStyle = uiComponentStyle("card") ?: uiComponentStyle("card_group")
+            val scheme = MaterialTheme.colorScheme
             Card(
                 onClick = { toggle(!checked) },
+                shape = cardStyle?.cornerDp?.let { uiCornerShape(it.dp) } ?: CardDefaults.shape,
+                border = cardStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+                    BorderStroke(it.dp, cardStyle.colorOr({ s -> s.borderColor }, scheme, scheme.outlineVariant))
+                },
                 colors = CardDefaults.cardColors(
-                    containerColor = CustomColors.listItemColors.containerColor
+                    containerColor = cardStyle.colorOr({ it.background }, scheme, CustomColors.listItemColors.containerColor)
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -347,7 +361,7 @@ fun McpPicker(
                             }
                         }
                     }
-                    Switch(checked = checked, onCheckedChange = { toggle(it) })
+                    UISwitch(checked = checked, onCheckedChange = { toggle(it) })
                 }
             }
         }

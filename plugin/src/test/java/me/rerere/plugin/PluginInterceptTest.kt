@@ -1,7 +1,9 @@
 package me.rerere.plugin
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.plugin.host.DefaultPluginServices
 import me.rerere.plugin.host.PluginHost
@@ -174,4 +176,59 @@ class PluginInterceptTest {
 
     private suspend fun <T> withIo(block: () -> T): T =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
+
+    @Test
+    fun `external stream body is isolated per plugin and closed when plugin stops`() = runBlocking {
+        var bodyClosed = false
+        val rawBody = object : okhttp3.ResponseBody() {
+            override fun contentType() = "text/plain".toMediaType()
+            override fun contentLength(): Long = -1L
+            override fun source(): okio.BufferedSource = okio.Buffer().writeUtf8("line1\nline2\n")
+            override fun close() {
+                bodyClosed = true
+                super.close()
+            }
+        }
+        val dummyReq = Request.Builder().url("https://api.example.com/sse").build()
+        val dummyResp = okhttp3.Response.Builder()
+            .request(dummyReq)
+            .protocol(okhttp3.Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(rawBody)
+            .build()
+
+        val regJson = PluginInterceptor.registerExternalBody(dummyResp, pluginId = "p.owner")
+        val bodyId = regJson["bodyId"]!!.jsonPrimitive.content
+        val arg = buildJsonObject { put("bodyId", bodyId) }
+
+        val crossRead = runCatching { PluginInterceptor.readLine(arg, callerPluginId = "p.other") }
+        assertTrue(crossRead.isFailure)
+        val crossClose = runCatching { PluginInterceptor.closeBody(arg, callerPluginId = "p.other") }
+        assertTrue(crossClose.isFailure)
+        assertEquals(false, bodyClosed)
+
+        assertEquals("line1\n", PluginInterceptor.readLine(arg, callerPluginId = "p.owner").jsonPrimitive.content)
+        assertEquals(false, bodyClosed)
+        PluginInterceptor.closeExternalBodiesOf("p.owner")
+        assertEquals(true, bodyClosed)
+    }
+
+    @Test
+    fun `uiMountsBySlot tracks visible mounts and clears on stop`() = runBlocking {
+        assertTrue(host.uiMountsBySlot.value.isEmpty())
+        enable(
+            "ui.p",
+            """
+            const m1 = rikka.ui.mount("message.footer", { type: "button", title: "A" }, () => {});
+            const m2 = rikka.ui.mount("message.footer", { type: "button", title: "B", visible: false }, () => {});
+            rikka.expose("show", () => rikka.ui.update(m2, { visible: true }));
+            """.trimIndent(),
+        )
+        assertEquals(1, host.uiMountsBySlot.value["message.footer"]?.size)
+        host.callExposed("ui.p", "show", JsonNull)
+        assertEquals(2, host.uiMountsBySlot.value["message.footer"]?.size)
+        host.setEnabled("ui.p", false)
+        assertTrue(host.uiMountsBySlot.value.isEmpty())
+    }
 }

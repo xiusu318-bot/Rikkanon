@@ -29,6 +29,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ToggleButtonDefaults
+import androidx.compose.material3.ToggleButtonShapes
+import androidx.compose.material3.ToggleButtonSize
+import me.rerere.ui.components.LocalCustomShapesEnabled
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -211,10 +214,18 @@ private fun CropAspectBar(state: ImageCropState) {
             .selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        val customShapes = LocalCustomShapesEnabled.current
         CropAspect.Options.forEach { aspect ->
             ToggleButton(
                 checked = state.aspect == aspect,
                 onCheckedChange = { state.selectAspect(aspect) },
+                shapes = if (customShapes) {
+                    ToggleButtonShapes(
+                        shape = MaterialTheme.shapes.medium,
+                        pressedShape = MaterialTheme.shapes.extraSmall,
+                        checkedShape = MaterialTheme.shapes.medium,
+                    )
+                } else ToggleButtonDefaults.shapesFor(ToggleButtonSize.Small),
                 colors = ToggleButtonDefaults.colors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                 ),

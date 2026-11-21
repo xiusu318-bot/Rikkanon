@@ -36,7 +36,7 @@ fun ShareSheet(
 ) {
     val context = LocalContext.current
     if (state.isShow) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = {
                 state.dismiss()
             },

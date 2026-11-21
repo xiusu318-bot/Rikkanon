@@ -469,7 +469,7 @@ private fun AssistantRegexCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Switch(
+                me.rerere.rikkahub.ui.custom.UISwitch(
                     checked = regex.enabled,
                     onCheckedChange = { enabled ->
                         onUpdate(
@@ -663,7 +663,7 @@ private fun AssistantRegexCard(
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f)
                         )
-                        Switch(
+                        me.rerere.rikkahub.ui.custom.UISwitch(
                             checked = regex.requestOnly,
                             onCheckedChange = { requestOnly ->
                                 onUpdate(
@@ -690,7 +690,7 @@ private fun AssistantRegexCard(
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f)
                         )
-                        Switch(
+                        me.rerere.rikkahub.ui.custom.UISwitch(
                             checked = regex.visualOnly,
                             onCheckedChange = { visualOnly ->
                                 onUpdate(

@@ -134,10 +134,15 @@ private fun ReasoningContent(
     val isPreview = expandState == ReasoningCardState.Preview
     val fontSizeRatio = LocalSettings.current.displaySetting.fontSizeRatio
     val bodySmall = MaterialTheme.typography.bodySmall
+    // 界面自定义 ui.style("reasoning") 的 secondaryColor：思考正文颜色；未设置时为原版
+    val customReasoningTextColor = me.rerere.rikkahub.ui.custom.uiComponentStyle("reasoning")?.secondaryColor?.let {
+        me.rerere.rikkahub.ui.custom.resolveUIColor(it, MaterialTheme.colorScheme)
+    } ?: Color.Unspecified
     val reasoningTextStyle = bodySmall.copy(
         fontSize = bodySmall.fontSize * fontSizeRatio,
         lineHeight = bodySmall.lineHeight * fontSizeRatio,
         fontFamily = LocalTextStyle.current.fontFamily,
+        color = if (customReasoningTextColor != Color.Unspecified) customReasoningTextColor else bodySmall.color,
     )
     Column(
         modifier = Modifier
@@ -215,6 +220,13 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
     val thinkingTitle = reasoning.reasoning.extractThinkingTitle()
     val showThinkingTitle = loading && thinkingTitle != null
     val chatFontFamily = LocalTextStyle.current.fontFamily
+    // 界面自定义 ui.style("reasoning") 的 color：标题与图标颜色；未设置时为原版
+    val titleColor = me.rerere.rikkahub.ui.custom.uiComponentStyle("reasoning")?.color?.let {
+        me.rerere.rikkahub.ui.custom.resolveUIColor(it, MaterialTheme.colorScheme, MaterialTheme.colorScheme.secondary)
+    } ?: MaterialTheme.colorScheme.secondary
+
+    // 界面自定义：主题可用 ui.slot("chat.reasoning.header", ...) 接管标题行；没写时走原版
+    val headerSlotActive = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.hasSlot("chat.reasoning.header") == true
 
     ControlledChainOfThoughtStep(
         expanded = state.expandState == ReasoningCardState.Expanded,
@@ -224,32 +236,62 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
                 imageVector = HugeIcons.Idea01,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.secondary,
+                tint = titleColor,
             )
         },
-        label = {
-            if (showThinkingTitle) {
-                ReasoningTitle(title = thinkingTitle!!)
-            } else {
-                Text(
-                    text = stringResource(
-                        R.string.deep_thinking_seconds,
-                        state.duration.toDouble(DurationUnit.SECONDS).toFloat()
-                    ),
-                    style = MaterialTheme.typography.titleSmall.copy(fontFamily = chatFontFamily),
-                    color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.shimmer(isLoading = loading),
+        label = if (headerSlotActive) {
+            {
+                ReasoningHeaderSlot(
+                    loading = loading,
+                    thinkingTitle = thinkingTitle,
+                    duration = state.duration,
+                    title = { info ->
+                        ReasoningLabel(
+                            showThinkingTitle = showThinkingTitle,
+                            thinkingTitle = thinkingTitle,
+                            duration = state.duration,
+                            loading = loading,
+                            color = if (info.textColor != Color.Unspecified) info.textColor else titleColor,
+                            modifier = info.modifier,
+                        )
+                    },
+                    durationBlock = { info ->
+                        if (state.duration > 0.seconds) {
+                            ReasoningDuration(
+                                duration = state.duration,
+                                loading = loading,
+                                color = if (info.textColor != Color.Unspecified) info.textColor else titleColor,
+                                modifier = info.modifier,
+                            )
+                        }
+                    },
+                    original = {
+                        ReasoningLabel(
+                            showThinkingTitle = showThinkingTitle,
+                            thinkingTitle = thinkingTitle,
+                            duration = state.duration,
+                            loading = loading,
+                            color = titleColor,
+                        )
+                    },
+                )
+            }
+        } else {
+            {
+                ReasoningLabel(
+                    showThinkingTitle = showThinkingTitle,
+                    thinkingTitle = thinkingTitle,
+                    duration = state.duration,
+                    loading = loading,
+                    color = titleColor,
                 )
             }
         },
-        extra = {
-            if (showThinkingTitle && state.duration > 0.seconds) {
-                Text(
-                    text = state.duration.toString(DurationUnit.SECONDS, 1),
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = chatFontFamily),
-                    color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.shimmer(isLoading = loading),
-                )
+        extra = if (headerSlotActive) null else {
+            {
+                if (showThinkingTitle && state.duration > 0.seconds) {
+                    ReasoningDuration(duration = state.duration, loading = loading, color = titleColor)
+                }
             }
         },
         collapsedAdaptiveWidth = collapsedAdaptiveWidth,
@@ -270,7 +312,76 @@ fun ChainOfThoughtScope.ChatMessageReasoningStep(
 
 
 @Composable
-private fun ReasoningTitle(title: String) {
+private fun ReasoningLabel(
+    showThinkingTitle: Boolean,
+    thinkingTitle: String?,
+    duration: kotlin.time.Duration,
+    loading: Boolean,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val chatFontFamily = LocalTextStyle.current.fontFamily
+    if (showThinkingTitle && thinkingTitle != null) {
+        // 原版路径不多包一层
+        if (modifier == Modifier) ReasoningTitle(title = thinkingTitle, color = color)
+        else androidx.compose.foundation.layout.Box(modifier) { ReasoningTitle(title = thinkingTitle, color = color) }
+    } else {
+        Text(
+            text = stringResource(
+                R.string.deep_thinking_seconds,
+                duration.toDouble(DurationUnit.SECONDS).toFloat()
+            ),
+            style = MaterialTheme.typography.titleSmall.copy(fontFamily = chatFontFamily),
+            color = color,
+            modifier = modifier.shimmer(isLoading = loading),
+        )
+    }
+}
+
+@Composable
+private fun ReasoningDuration(
+    duration: kotlin.time.Duration,
+    loading: Boolean,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val chatFontFamily = LocalTextStyle.current.fontFamily
+    Text(
+        text = duration.toString(DurationUnit.SECONDS, 1),
+        style = MaterialTheme.typography.labelSmall.copy(fontFamily = chatFontFamily),
+        color = color,
+        modifier = modifier.shimmer(isLoading = loading),
+    )
+}
+
+/**
+ * 思考步骤标题行接入点 `chat.reasoning.header`。展开 / 收起、左侧图标与时间线、思考正文仍由宿主负责。
+ * 数据：loading / title（思考中提取的小标题）/ seconds；原版部件：title / duration / original。
+ */
+@Composable
+private fun ReasoningHeaderSlot(
+    loading: Boolean,
+    thinkingTitle: String?,
+    duration: kotlin.time.Duration,
+    title: @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit,
+    durationBlock: @Composable (me.rerere.rikkahub.ui.custom.UINodeRenderInfo) -> Unit,
+    original: @Composable () -> Unit,
+) {
+    me.rerere.rikkahub.ui.custom.UISlot(
+        name = "chat.reasoning.header",
+        data = mapOf(
+            "loading" to loading,
+            "title" to thinkingTitle.orEmpty(),
+            "seconds" to "%.1f".format(duration.toDouble(DurationUnit.SECONDS)),
+        ),
+        parts = mapOf("title" to title, "duration" to durationBlock),
+        modifier = Modifier.fillMaxWidth(),
+        original = original,
+    )
+}
+
+@Composable
+private fun ReasoningTitle(title: String, color: Color = MaterialTheme.colorScheme.secondary) {
     val chatFontFamily = LocalTextStyle.current.fontFamily
     AnimatedContent(
         targetState = title,
@@ -283,7 +394,7 @@ private fun ReasoningTitle(title: String) {
         Text(
             text = it,
             style = MaterialTheme.typography.titleSmall.copy(fontFamily = chatFontFamily),
-            color = MaterialTheme.colorScheme.secondary,
+            color = color,
             modifier = Modifier
                 .padding(horizontal = 4.dp)
                 .shimmer(true),

@@ -24,6 +24,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedListItem
+import me.rerere.rikkahub.ui.custom.hasUICustomShapes
+import me.rerere.rikkahub.ui.custom.uiSegmentedItemBorder
+import me.rerere.rikkahub.ui.custom.uiSegmentedListGap
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemColors
+import me.rerere.rikkahub.ui.custom.uiSegmentedListItemShapes
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -119,12 +124,14 @@ fun MediaCreationSessionsPage(vm: MediaCreationSessionsVM = koinViewModel()) {
             itemsIndexed(items, key = { _, session -> session.id.toString() }) { index, session ->
                 SessionItem(
                     session = session,
-                    shapes = ListItemDefaults.segmentedShapes(index = index, count = items.size),
+                    shapes = uiSegmentedListItemShapes(index = index, count = items.size),
                     resolve = vm::resolve,
                     onOpen = { open(session.id) },
                     onRename = { renaming = session },
                     onDelete = { deleting = session },
-                    modifier = Modifier.animateItem(),
+                    modifier = Modifier
+                        .animateItem()
+                        .uiSegmentedItemBorder(index, items.size),
                 )
             }
         }
@@ -180,7 +187,7 @@ private fun EmptySessionsState(modifier: Modifier = Modifier) {
                 .size(128.dp)
                 .background(
                     color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = MaterialShapes.Cookie9Sided.toShape(),
+                    shape = if (hasUICustomShapes()) MaterialTheme.shapes.extraLarge else MaterialShapes.Cookie9Sided.toShape(),
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -233,9 +240,13 @@ private fun SessionItem(
         onClick = onOpen,
         shapes = shapes,
         modifier = modifier,
-        colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceBright),
+        colors = uiSegmentedListItemColors(),
         leadingContent = {
-            val shape = sessionShapes[session.id.hashCode().mod(sessionShapes.size)].toShape()
+            val shape = if (hasUICustomShapes()) {
+                MaterialTheme.shapes.medium
+            } else {
+                sessionShapes[session.id.hashCode().mod(sessionShapes.size)].toShape()
+            }
             val cover = session.cover
             when {
                 // 有任务在生成时换成变形的加载指示器

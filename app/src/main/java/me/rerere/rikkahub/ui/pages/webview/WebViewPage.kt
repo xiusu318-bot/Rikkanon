@@ -152,7 +152,7 @@ fun WebViewPage(url: String, contentId: String) {
     }
 
     if (showConsoleSheet) {
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { showConsoleSheet = false },
             sheetState = sheetState
         ) {

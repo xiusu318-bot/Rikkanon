@@ -253,6 +253,38 @@ class WorkspaceRepository(
         overwrite: Boolean,
     ): WorkspaceFileEntry = withBackend(id) { it.writeText(path, text, overwrite) }
 
+    suspend fun readBytes(
+        id: String,
+        path: String,
+        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
+    ): ByteArray = readFromBackend(id) { backend ->
+        ByteArrayOutputStream().use { out ->
+            backend.exportFile(area, path, out)
+            out.toByteArray()
+        }
+    }
+
+    suspend fun writeBytes(
+        id: String,
+        path: String,
+        bytes: ByteArray,
+        overwrite: Boolean = true,
+        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
+    ): WorkspaceFileEntry = withBackend(id) { backend ->
+        val normalized = path.trim().removePrefix("/")
+        val parent = normalized.substringBeforeLast('/', "")
+        val fileName = normalized.substringAfterLast('/')
+        if (overwrite) {
+            backend.deleteFile(area, normalized, false)
+        } else {
+            val exists = backend.listFiles(area, parent).any { it.name == fileName }
+            if (exists) throw IllegalStateException("File already exists: $path")
+        }
+        java.io.ByteArrayInputStream(bytes).use { input ->
+            backend.importFile(area, parent, fileName, input)
+        }
+    }
+
     /**
      * 读取文本用于应用内预览/编辑, 支持两个存储区.
      * FILES 区走 [WorkspaceBackend.readText] (自带大小保护); LINUX 区通过 exportFile 读入内存,

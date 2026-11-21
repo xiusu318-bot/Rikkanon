@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -66,11 +67,13 @@ internal fun MarkdownBlocks(
     modifier: Modifier = Modifier,
     spacing: Dp = LocalMarkdownContext.current.theme.blockSpacing,
 ) {
+    val htmlBoxStyle = LocalMarkdownContext.current.theme.htmlBoxStyle
+    val shown = if (htmlBoxStyle) blocks else remember(blocks) { blocks.flattenBoxOnlyContainers() }
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(spacing),
     ) {
-        blocks.fastForEachIndexed { index, block ->
+        shown.fastForEachIndexed { index, block ->
             MarkdownBlockNode(block = block, first = index == 0)
         }
     }
@@ -80,8 +83,20 @@ internal fun MarkdownBlocks(
 @Composable
 private fun MarkdownBlockNode(block: MarkdownBlock, first: Boolean) {
     val context = LocalMarkdownContext.current
+    val paragraphIndentStyle = if (context.theme.firstLineIndentSp > 0f) {
+        TextStyle(
+            textIndent = androidx.compose.ui.text.style.TextIndent(
+                firstLine = androidx.compose.ui.unit.TextUnit(
+                    context.theme.firstLineIndentSp,
+                    androidx.compose.ui.unit.TextUnitType.Sp,
+                )
+            )
+        )
+    } else null
     when (block) {
-        is MarkdownBlock.Paragraph -> WithTextStyle(block.style) { InlineContent(block.content) }
+        is MarkdownBlock.Paragraph -> WithTextStyle(
+            paragraphIndentStyle?.merge(block.style) ?: block.style
+        ) { InlineContent(block.content) }
         is MarkdownBlock.Heading -> HeadingBlock(block, first)
         is MarkdownBlock.CodeBlock -> context.components.codeBlock(block)
         is MarkdownBlock.Quote -> QuoteBlock(block)
@@ -89,7 +104,42 @@ private fun MarkdownBlockNode(block: MarkdownBlock, first: Boolean) {
         is MarkdownBlock.Table -> context.components.table(block)
         is MarkdownBlock.Divider -> HorizontalDivider(color = context.theme.dividerColor)
         is MarkdownBlock.Details -> DetailsBlock(block)
-        is MarkdownBlock.Container -> WithTextStyle(block.style) { MarkdownBlocks(block.children) }
+        is MarkdownBlock.Container -> ContainerBlock(block)
+    }
+}
+
+/** 未开启盒样式时，只因盒样式才成为容器的块按原版展开为子块。 */
+private fun List<MarkdownBlock>.flattenBoxOnlyContainers(): List<MarkdownBlock> {
+    if (none { it is MarkdownBlock.Container && !it.hasTextStyle }) return this
+    return flatMap { if (it is MarkdownBlock.Container && !it.hasTextStyle) it.children.flattenBoxOnlyContainers() else listOf(it) }
+}
+
+@Composable
+private fun ContainerBlock(block: MarkdownBlock.Container) {
+    val box = block.boxStyle?.takeIf { LocalMarkdownContext.current.theme.htmlBoxStyle }
+    // 盒子模式下背景由整块盒子绘制，不再作为逐字底色
+    WithTextStyle(if (box == null) block.style else block.style.copy(background = androidx.compose.ui.graphics.Color.Unspecified)) {
+        if (box == null) {
+            MarkdownBlocks(block.children)
+        } else {
+            val shape = RoundedCornerShape(box.cornerRadiusDp.dp)
+            var mod: Modifier = Modifier
+            if (box.cornerRadiusDp > 0f) {
+                mod = mod.clip(shape)
+            }
+            if (box.backgroundColor != androidx.compose.ui.graphics.Color.Unspecified) {
+                mod = mod.background(box.backgroundColor, shape)
+            }
+            if (box.borderWidthDp > 0f && box.borderColor != androidx.compose.ui.graphics.Color.Unspecified) {
+                mod = mod.border(box.borderWidthDp.dp, box.borderColor, shape)
+            }
+            if (box.paddingHorizontalDp > 0f || box.paddingVerticalDp > 0f) {
+                mod = mod.padding(horizontal = box.paddingHorizontalDp.dp, vertical = box.paddingVerticalDp.dp)
+            }
+            Box(modifier = mod) {
+                MarkdownBlocks(block.children)
+            }
+        }
     }
 }
 
@@ -171,12 +221,22 @@ private fun HeadingBlock(block: MarkdownBlock.Heading, first: Boolean) {
 
 @Composable
 private fun QuoteBlock(block: MarkdownBlock.Quote) {
-    val barColor = LocalMarkdownContext.current.theme.quoteColor
+    val theme = LocalMarkdownContext.current.theme
+    val barColor = theme.quoteColor
+    val bgColor = theme.quoteBackgroundColor
     val textColor = LocalTextStyle.current.color.takeOrElse { LocalContentColor.current }
     ProvideTextStyle(TextStyle(color = textColor.copy(alpha = textColor.alpha * 0.75f))) {
         MarkdownBlocks(
             blocks = block.children,
             modifier = Modifier
+                .then(
+                    if (bgColor != androidx.compose.ui.graphics.Color.Unspecified) {
+                        Modifier
+                            .clip(RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp))
+                            .background(bgColor)
+                            .padding(vertical = 6.dp, horizontal = 8.dp)
+                    } else Modifier
+                )
                 .drawBehind {
                     val barWidth = 3.dp.toPx()
                     drawRoundRect(

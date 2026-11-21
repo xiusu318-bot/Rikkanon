@@ -92,10 +92,14 @@ fun Switch(
         else -> thumbColorUnchecked
     }
 
+    val customShapes = LocalCustomShapesEnabled.current
+    val trackShape = if (customShapes) MaterialTheme.shapes.small else RoundedCornerShape(50)
+    val thumbShape = if (customShapes) MaterialTheme.shapes.extraSmall else CircleShape
+
     Box(
         modifier = modifier
             .size(width = dimensions.trackWidth, height = dimensions.trackHeight)
-            .clip(RoundedCornerShape(50))
+            .clip(trackShape)
             .background(currentTrackColor)
             .clickable(
                 enabled = enabled,
@@ -113,9 +117,9 @@ fun Switch(
                 .size(dimensions.thumbSize)
                 .shadow(
                     elevation = if (enabled) 2.dp else 0.dp,
-                    shape = CircleShape
+                    shape = thumbShape
                 )
-                .clip(CircleShape)
+                .clip(thumbShape)
                 .background(currentThumbColor)
         )
     }

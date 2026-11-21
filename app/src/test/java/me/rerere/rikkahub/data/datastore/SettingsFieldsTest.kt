@@ -15,6 +15,7 @@ import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.PromptPreset
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
+import me.rerere.rikkahub.data.model.UIPreset
 import me.rerere.rikkahub.data.sync.s3.S3Config
 import me.rerere.rikkahub.ui.theme.CustomTheme
 import me.rerere.search.SearchCommonOptions
@@ -161,6 +162,8 @@ private val SAMPLE = Settings(
     modeInjections = listOf(PromptInjection.ModeInjection(id = id(14), name = "mode")),
     enableAdvancedPrompt = false,
     promptPresets = listOf(PromptPreset(id = id(34), name = "preset")),
+    enableCustomUi = true,
+    uiPresets = listOf(UIPreset(id = id(35), name = "ui_preset")),
     lorebooks = listOf(Lorebook(id = id(12), name = "lorebook")),
     quickMessages = listOf(QuickMessage(id = id(13), title = "hi")),
     enableSecretKeyAlias = true,
@@ -225,6 +228,8 @@ private val STORED_KEYS = setOf(
     "mode_injections",
     "enable_advanced_prompt",
     "prompt_presets",
+    "enable_custom_ui",
+    "ui_presets",
     "lorebooks",
     "quick_messages",
     "enable_secret_key_alias",

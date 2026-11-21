@@ -31,6 +31,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.semantics
@@ -47,6 +48,8 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import me.rerere.rikkahub.ui.custom.observeUIShaderTouch
+import me.rerere.rikkahub.ui.custom.toContentTransform
 import coil3.ImageLoader
 import coil3.compose.setSingletonImageLoaderFactory
 import coil3.gif.AnimatedImageDecoder
@@ -96,6 +99,7 @@ import me.rerere.rikkahub.ui.components.ai.SecretKeysPage
 import me.rerere.rikkahub.ui.pages.extensions.ExtensionsPage
 import me.rerere.rikkahub.ui.pages.extensions.PromptPage
 import me.rerere.rikkahub.ui.pages.extensions.QuickMessagesPage
+import me.rerere.rikkahub.ui.pages.extensions.UICustomizePage
 import me.rerere.rikkahub.ui.pages.extensions.skills.SkillDetailPage
 import me.rerere.rikkahub.ui.pages.memory.MemoryFilePage
 import me.rerere.rikkahub.ui.pages.extensions.skills.SkillsPage
@@ -322,6 +326,14 @@ class RouteActivity : ComponentActivity() {
         }
 
         SharedTransitionLayout {
+            val pluginHost = org.koin.compose.koinInject<me.rerere.plugin.host.PluginHost>()
+            val pluginUiMounts by pluginHost.uiMountsBySlot.collectAsStateWithLifecycle()
+            val shaderTouchState = if (settings.enableCustomUi) {
+                remember { me.rerere.rikkahub.ui.custom.UIShaderTouchState() }
+            } else null
+            val chatOverlayOverride = if (settings.enableCustomUi) {
+                remember { me.rerere.rikkahub.ui.custom.UIChatOverlayOverrideState() }
+            } else null
             CompositionLocalProvider(
                 LocalNavController provides Navigator(backStack),
                 LocalSharedTransitionScope provides this,
@@ -329,37 +341,45 @@ class RouteActivity : ComponentActivity() {
                 LocalToaster provides toastState,
                 LocalTTSState provides tts,
                 LocalASRState provides asr,
+                me.rerere.rikkahub.ui.pages.extensions.plugin.LocalPluginUiMounts provides pluginUiMounts,
+                me.rerere.rikkahub.ui.custom.LocalUIShaderTouch provides shaderTouchState,
+                me.rerere.rikkahub.ui.custom.LocalUIChatOverlayOverride provides chatOverlayOverride,
             ) {
                 TTSController()
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .observeUIShaderTouch(shaderTouchState, requireActiveObserver = true)
                         .semantics { testTagsAsResourceId = true }
                         .background(MaterialTheme.colorScheme.background)
                 ) {
+                    // 界面自定义：页面切换动画（ui.transition），未设置时为 null，使用下面的原版动画
+                    val uiTransitions = me.rerere.rikkahub.ui.custom.LocalActiveUIPreset.current?.transitions
                     NavDisplay(
                         backStack = backStack,
                         entryDecorators = listOf(
                             rememberSaveableStateHolderNavEntryDecorator(),
                             rememberViewModelStoreNavEntryDecorator(),
+                            // 界面自定义：页面级接入点（ui.page），未设置时直接显示原页面
+                            remember { me.rerere.rikkahub.ui.custom.uiPageEntryDecorator { backStack.toList() } },
                         ),
                         modifier = Modifier.fillMaxSize(),
                         // 同一帧内连续两次返回时 NavDisplay 的返回状态还没更新，会多回调一次，不加判断会把栈弹空
                         onBack = { if (backStack.size > 1) backStack.removeLastOrNull() },
                         transitionSpec = {
-                            if (backStack.size == 1) fadeIn() togetherWith fadeOut()
+                            uiTransitions?.push?.toContentTransform() ?: if (backStack.size == 1) fadeIn() togetherWith fadeOut()
                             else {
                                 slideInHorizontally { it } togetherWith
                                     slideOutHorizontally { -it / 2 } + scaleOut(targetScale = 0.7f) + fadeOut()
                             }
                         },
                         popTransitionSpec = {
-                            slideInHorizontally { -it / 2 } + scaleIn(initialScale = 0.7f) + fadeIn() togetherWith
-                                slideOutHorizontally { it }
+                            uiTransitions?.pop?.toContentTransform() ?: (slideInHorizontally { -it / 2 } + scaleIn(initialScale = 0.7f) + fadeIn() togetherWith
+                                slideOutHorizontally { it })
                         },
                         predictivePopTransitionSpec = {
-                            slideInHorizontally { -it / 2 } + scaleIn(initialScale = 0.7f) + fadeIn() togetherWith
-                                slideOutHorizontally { it }
+                            uiTransitions?.pop?.toContentTransform() ?: (slideInHorizontally { -it / 2 } + scaleIn(initialScale = 0.7f) + fadeIn() togetherWith
+                                slideOutHorizontally { it })
                         },
                         entryProvider = entryProvider {
                             entry<Screen.Chat>(
@@ -569,6 +589,12 @@ class RouteActivity : ComponentActivity() {
                                 )
                             }
 
+                            entry<Screen.UICustomize> { key ->
+                                UICustomizePage(
+                                    initialPresetId = key.presetId,
+                                )
+                            }
+
                             entry<Screen.Skills> {
                                 SkillsPage()
                             }
@@ -626,6 +652,11 @@ class RouteActivity : ComponentActivity() {
                         }
                     )
                     me.rerere.rikkahub.ui.pages.extensions.plugin.PluginPanelOverlays()
+                    val topKey = backStack.lastOrNull()
+                    val overlayHandledByChat = topKey is Screen.Chat && chatOverlayOverride?.isOverridden(topKey.id) == true
+                    if (!overlayHandledByChat) {
+                        me.rerere.rikkahub.ui.custom.UIGlobalOverlay(topKey)
+                    }
                     if (BuildConfig.DEBUG) {
                         Text(
                             text = "[开发模式]",
@@ -830,6 +861,11 @@ sealed interface Screen : NavKey {
         val initialTab: Int = 0,
         val presetId: String? = null,
         val lorebookId: String? = null,
+    ) : Screen
+
+    @Serializable
+    data class UICustomize(
+        val presetId: String? = null,
     ) : Screen
 
     @Serializable

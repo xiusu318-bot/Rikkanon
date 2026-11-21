@@ -138,7 +138,7 @@ private fun UnifiedLogList(
     }
 
     selectedLog?.let { log ->
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = { selectedLog = null },
             sheetState = sheetState
         ) {
@@ -174,7 +174,7 @@ private fun RequestLoggingSwitchCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Switch(
+            me.rerere.rikkahub.ui.custom.UISwitch(
                 checked = enabled,
                 onCheckedChange = onEnabledChange
             )

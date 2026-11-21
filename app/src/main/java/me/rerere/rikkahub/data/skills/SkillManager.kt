@@ -4,19 +4,27 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import me.rerere.plugin.host.PluginHost
+import me.rerere.plugin.manifest.PluginHookKind
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.files.FileFolders
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.get
 import java.io.File
 
 class SkillManager(
     private val context: Context,
     private val settingsStore: SettingsStore,
-) {
+) : KoinComponent {
     companion object {
         private const val TAG = "SkillManager"
     }
 
     private val builtinLock = Any()
+    private val syncedPluginSkills = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     @Volatile
     private var builtinExtracted = false
@@ -50,12 +58,60 @@ class SkillManager(
     }
 
     /**
-     * 列出所有可用技能：用户技能 + 内置技能，同名时用户技能覆盖内置技能。
+     * 列出所有可用技能：用户技能 + 内置技能 + 已启用插件声明的技能，同名时用户技能优先。
      */
     fun listSkills(): List<SkillMetadata> = mergeWithBuiltinSkills(
         local = listSkillsIn(getSkillsDir(), builtin = false),
-        builtin = listBuiltinSkills(),
+        builtin = listBuiltinSkills() + listPluginSkills(),
     )
+
+    private fun listPluginSkills(): List<SkillMetadata> {
+        val host = get<PluginHost>()
+        val regs = host.chain(PluginHookKind.SKILL)
+        if (regs.isEmpty()) return emptyList()
+        val root = context.filesDir.resolve("plugin_skills")
+        return regs.mapNotNull { (rt, reg) ->
+            val meta = reg.meta.jsonObject
+            val name = meta.getValue("name").jsonPrimitive.content
+            val description = meta.getValue("description").jsonPrimitive.content
+            val body = meta.getValue("content").jsonPrimitive.content
+            val compat = meta.getValue("compatibility").jsonPrimitive.contentOrNull
+            // 写入 SKILL.md 失败：记入插件错误，本次不列出该技能
+            runCatching {
+                val fullContent = if (body.trimStart().startsWith("---")) {
+                    body
+                } else {
+                    buildString {
+                        appendLine("---")
+                        appendLine("name: $name")
+                        appendLine("description: $description")
+                        if (compat != null) appendLine("compatibility: $compat")
+                        appendLine("---")
+                        appendLine()
+                        append(body)
+                    }
+                }
+                val dir = root.resolve(rt.id).resolve(name)
+                val cacheKey = "${rt.id}/$name"
+                val contentHash = fullContent.hashCode()
+                val skillMdFile = dir.resolve("SKILL.md")
+                if (syncedPluginSkills[cacheKey] != contentHash || !skillMdFile.isFile) {
+                    dir.mkdirs()
+                    if (!skillMdFile.isFile || skillMdFile.readText() != fullContent) {
+                        skillMdFile.writeText(fullContent)
+                    }
+                    syncedPluginSkills[cacheKey] = contentHash
+                }
+                SkillMetadata(
+                    name = name,
+                    description = description,
+                    compatibility = compat,
+                    skillDir = dir,
+                    builtin = true,
+                )
+            }.onFailure { host.recordError(rt.id, it) }.getOrNull()
+        }
+    }
 
     fun findSkill(name: String): SkillMetadata? = listSkills().firstOrNull { it.name == name }
 

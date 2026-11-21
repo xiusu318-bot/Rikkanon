@@ -1,5 +1,6 @@
 package me.rerere.plugin.host
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -7,6 +8,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.plugin.error.PluginException
 import me.rerere.plugin.registry.PluginRegistration
 import me.rerere.plugin.runtime.PluginRuntime
@@ -49,12 +53,36 @@ class PluginHost(
 
     private val services by lazy { servicesFactory(this) }
 
-    /** 任一运行中插件的注册表变化（mount / unmount / 启停）时递增，界面据此重组。 */
+    /** 按挂载点 `slot` 预分桶且已过滤 `visible != false` 的启用 UI 挂载项缓存（仅在注册表变化时重建一次）。 */
+    private val _uiMountsBySlot = MutableStateFlow<Map<String, List<Pair<PluginRuntime, PluginRegistration>>>>(emptyMap())
+    val uiMountsBySlot: StateFlow<Map<String, List<Pair<PluginRuntime, PluginRegistration>>>> = _uiMountsBySlot.asStateFlow()
+
+    /** 任一运行中插件的注册表变化（mount / unmount / update / 启停）时递增，界面据此重组。 */
     private val _version = MutableStateFlow(0)
     val registrationsVersion: StateFlow<Int> = _version.asStateFlow()
-    fun bumpVersion() = _version.update { it + 1 }
+    fun bumpVersion() {
+        rebuildUiMounts()
+        _version.update { it + 1 }
+    }
 
-    /** 运行时内注册变化监听（如定时任务需要重新调度）。 */
+    private fun rebuildUiMounts() {
+        val all = chain(me.rerere.plugin.manifest.PluginHookKind.UI)
+        if (all.isEmpty()) {
+            if (_uiMountsBySlot.value.isNotEmpty()) _uiMountsBySlot.value = emptyMap()
+            return
+        }
+        val grouped = LinkedHashMap<String, MutableList<Pair<PluginRuntime, PluginRegistration>>>()
+        for (pair in all) {
+            val meta = pair.second.meta.jsonObject
+            val visiblePrim = meta.getValue("spec").jsonObject["visible"] as? kotlinx.serialization.json.JsonPrimitive
+            if (visiblePrim != null && !visiblePrim.isString && visiblePrim.content == "false") continue
+            val slot = meta.getValue("slot").jsonPrimitive.content
+            grouped.getOrPut(slot) { ArrayList() }.add(pair)
+        }
+        _uiMountsBySlot.value = grouped
+    }
+
+    /** 运行时内注册变化监听（如定时任务需要重新调度、声明式能力需要同步）。 */
     @Volatile
     var onChanged: () -> Unit = {}
 
@@ -103,6 +131,15 @@ class PluginHost(
         refreshLocked()
     }
 
+    /** 热重载已启用插件（从磁盘重读 manifest 与 JS 并重启）。 */
+    suspend fun reload(id: String) = mutex.withLock {
+        refreshLocked()
+        val plugin = _installed.value.find { it.id == id } ?: error("插件 $id 未安装")
+        if (_states.value[id]?.enabled == true) {
+            startLocked(plugin)
+        }
+    }
+
     suspend fun updateState(id: String, update: (PluginState) -> PluginState) = mutex.withLock {
         store.updateStates { s ->
             val cur = s.plugins[id] ?: PluginState()
@@ -125,7 +162,12 @@ class PluginHost(
             callTimeoutMillis = timeoutOf(state),
             baseDir = plugin.dir,
             memoryLimitBytes = (state?.memoryLimitMb ?: PluginRuntime.DEFAULT_MEMORY_LIMIT_MB) * 1024L * 1024,
-            onRegistrationsChanged = { bumpVersion() },
+            onRegistrationsChanged = { uiOnly ->
+                bumpVersion()
+                // 只改界面挂载项（ui.mount / unmount / update）不影响定时任务与服务，无需同步；
+                // 加载过程中（尚未加入 runtimes）的注册不逐个同步，加载完成后下方统一同步一次
+                if (!uiOnly && runtimes.value.containsKey(plugin.id)) onChanged()
+            },
         )
         runtime.start()
         runtimes.update { it + (plugin.id to runtime) }
@@ -139,8 +181,11 @@ class PluginHost(
         else -> t
     }
 
-    private fun stopLocked(id: String) {
+    private suspend fun stopLocked(id: String) {
         val rt = runtimes.value[id] ?: return
+        // onUnload 出错记入插件错误，不影响停止
+        runCatching { rt.runUnloadHooks() }.onFailure { recordError(id, it) }
+        services.onPluginStopped(id)
         rt.close()
         runtimes.update { it - id }
         bumpVersion()
@@ -228,13 +273,37 @@ class PluginHost(
     ): kotlinx.serialization.json.JsonElement {
         val (rt, reg) = findNamed(kind, pluginId, name)
             ?: throw PluginException(pluginId, kind, "插件未启用或没有注册 $kind \"$name\"")
-        val methods = ((reg.meta as kotlinx.serialization.json.JsonObject)["methods"] as? kotlinx.serialization.json.JsonArray)
-            ?.map { (it as kotlinx.serialization.json.JsonPrimitive).content }.orEmpty()
-        if (method !in methods) throw PluginException(pluginId, kind, "$kind \"$name\" 没有实现 $method")
+        if (method !in methodsOf(reg)) throw PluginException(pluginId, kind, "$kind \"$name\" 没有实现 $method")
         return rt.invokeMethod(kind, reg.handlerId, method, args, timeoutMillis)
     }
 
-    /** 调用 ui.mount 注册的回调（点击入口等）。 */
+    /** 多方法注册项（registerProvider / registerTTS 等）声明的方法名，注册时一定写入。 */
+    private fun methodsOf(reg: PluginRegistration): List<String> =
+        reg.meta.jsonObject.getValue("methods").jsonArray.map { it.jsonPrimitive.content }
+
+    /** 多方法注册项是否实现了 [method]；插件未启用或没有该注册项时抛异常。 */
+    fun hasMethod(pluginId: String, kind: String, name: String, method: String): Boolean {
+        val (_, reg) = findNamed(kind, pluginId, name)
+            ?: throw PluginException(pluginId, kind, "插件未启用或没有注册 $kind \"$name\"")
+        return method in methodsOf(reg)
+    }
+
+    /** 真流式调用多方法注册项（如 provider.streamText、tts.speak、provider.generateImage）。 */
+    fun callMethodStream(
+        pluginId: String,
+        kind: String,
+        name: String,
+        method: String,
+        args: List<kotlinx.serialization.json.JsonElement>,
+        timeoutMillis: Long? = null,
+    ): Flow<kotlinx.serialization.json.JsonElement> {
+        val (rt, reg) = findNamed(kind, pluginId, name)
+            ?: throw PluginException(pluginId, kind, "插件未启用或没有注册 $kind \"$name\"")
+        if (method !in methodsOf(reg)) throw PluginException(pluginId, kind, "$kind \"$name\" 没有实现 $method")
+        return rt.invokeMethodStream(kind, reg.handlerId, method, args, timeoutMillis)
+    }
+
+    /** 调用 ui.mount 注册的回调（点击入口、表单变更等）。 */
     suspend fun callUiHandler(pluginId: String, handlerId: String, args: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement {
         val runtime = runtimes.value[pluginId] ?: throw PluginException(pluginId, "ui", "插件未启用")
         return runtime.invoke("ui", handlerId, listOf(args))

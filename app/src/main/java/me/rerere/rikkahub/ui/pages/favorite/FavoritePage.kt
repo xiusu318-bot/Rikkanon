@@ -144,10 +144,25 @@ private fun FavoriteCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val cardStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("card")
+    val scheme = MaterialTheme.colorScheme
     Card(
-        onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
-        colors = CustomColors.cardColorsOnSurfaceContainer,
+        modifier = Modifier.fillMaxWidth(),
+        shape = cardStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) } ?: CardDefaults.shape,
+        border = cardStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+            androidx.compose.foundation.BorderStroke(
+                it.dp,
+                me.rerere.rikkahub.ui.custom.resolveUIColor(cardStyle.borderColor.orEmpty(), scheme, scheme.outlineVariant),
+            )
+        },
+        colors = CardDefaults.cardColors(
+            containerColor = me.rerere.rikkahub.ui.custom.resolveUIColor(
+                cardStyle?.background.orEmpty(),
+                scheme,
+                CustomColors.cardColorsOnSurfaceContainer.containerColor,
+            )
+        ),
+        onClick = onClick
     ) {
         SelectionContainer {
             Column(

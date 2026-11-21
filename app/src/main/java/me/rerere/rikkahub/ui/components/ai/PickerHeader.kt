@@ -29,6 +29,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.ui.draw.clip
+import me.rerere.rikkahub.ui.custom.hasUICustomShapes
+import me.rerere.rikkahub.ui.custom.isUICutCornerShape
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -146,8 +151,17 @@ internal fun PickerHero(
     val iconSpatialSpec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
     val iconEffectsSpec = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
 
-    Box(
-        modifier = modifier
+    val customShapes = hasUICustomShapes()
+    val cut = isUICutCornerShape()
+    val heroBoxMod = if (customShapes) {
+        val heroShape = MaterialTheme.shapes.large
+        modifier
+            .size(72.dp)
+            .clip(heroShape)
+            .background(animatedContainerColor, heroShape)
+            .then(if (cut) Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, heroShape) else Modifier)
+    } else {
+        modifier
             .size(72.dp)
             .drawBehind {
                 // 弹簧会过冲，position 可能略微越界
@@ -163,7 +177,11 @@ internal fun PickerHero(
                 }) {
                     drawPath(path, animatedContainerColor)
                 }
-            },
+            }
+    }
+
+    Box(
+        modifier = heroBoxMod,
         contentAlignment = Alignment.Center,
     ) {
         AnimatedContent(

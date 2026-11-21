@@ -178,7 +178,7 @@ fun AssistantPage(vm: AssistantVM = koinViewModel()) {
                     }
                 },
                 singleLine = true,
-                shape = CircleShape,
+                shape = me.rerere.rikkahub.ui.custom.uiSearchBarShape(),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceBright,
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceBright,
@@ -354,7 +354,7 @@ private fun AssistantCreationSheet(
     state: EditState<Assistant>,
 ) {
     state.EditStateContent { assistant, update ->
-        ModalBottomSheet(
+        me.rerere.rikkahub.ui.custom.UIModalBottomSheet(
             onDismissRequest = {
                 state.dismiss()
             },
@@ -422,12 +422,25 @@ private fun AssistantItem(
     onCopy: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val cardStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("card")
+    val scheme = MaterialTheme.colorScheme
     Card(
         modifier = modifier.fillMaxWidth(),
         onClick = onEdit,
-        shape = RoundedCornerShape(20.dp),
+        shape = cardStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+            ?: me.rerere.rikkahub.ui.custom.uiCornerShape(20.dp),
+        border = cardStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+            androidx.compose.foundation.BorderStroke(
+                it.dp,
+                me.rerere.rikkahub.ui.custom.resolveUIColor(cardStyle.borderColor.orEmpty(), scheme, scheme.outlineVariant),
+            )
+        },
         colors = CardDefaults.cardColors(
-            containerColor = CustomColors.listItemColors.containerColor
+            containerColor = me.rerere.rikkahub.ui.custom.resolveUIColor(
+                cardStyle?.background.orEmpty(),
+                scheme,
+                CustomColors.listItemColors.containerColor,
+            )
         )
     ) {
         Row(

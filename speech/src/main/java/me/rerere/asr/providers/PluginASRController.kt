@@ -38,6 +38,10 @@ class PluginASRController(
     private val context: Context,
     private val provider: ASRProviderSetting.Plugin,
     private val transcribeFn: suspend (pluginId: String, providerName: String, wavBase64: String, sampleRate: Int) -> String,
+    /** 插件实现了实时流式识别时开启并返回 true；未实现返回 false（改用分段识别）。 */
+    private val streamStartFn: suspend (pluginId: String, providerName: String, sampleRate: Int) -> Boolean,
+    private val streamPushFn: suspend (pluginId: String, providerName: String, pcmBase64: String, sampleRate: Int) -> String?,
+    private val streamStopFn: suspend (pluginId: String, providerName: String) -> String?,
 ) : ASRController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -54,6 +58,9 @@ class PluginASRController(
     private var segmentStartElapsedMs = 0L
     private val completedTranscripts = Collections.synchronizedList(mutableListOf<String>())
 
+    @Volatile
+    private var streamingActive = false
+
     override fun start(onTranscriptChange: (String) -> Unit) {
         if (state.value.isRecording) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -67,6 +74,7 @@ class PluginASRController(
         }
         completedTranscripts.clear()
         flushJob = null
+        streamingActive = false
         _state.update { ASRState(status = ASRStatus.Listening, isAvailable = true) }
         startRecorder()
     }
@@ -77,8 +85,17 @@ class PluginASRController(
         _state.update { it.copy(status = ASRStatus.Stopping) }
         scope.launch(Dispatchers.IO) {
             try {
-                flushJob?.join()
-                flushSegment()
+                if (streamingActive) {
+                    val finalText = streamStopFn(provider.pluginId, provider.providerName)?.trim().orEmpty()
+                    if (finalText.isNotEmpty()) {
+                        _state.update { it.copy(transcript = finalText, errorMessage = null) }
+                        scope.launch { onTranscriptChange?.invoke(finalText) }
+                    }
+                    streamingActive = false
+                } else {
+                    flushJob?.join()
+                    flushSegment()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Final flush failed", e)
                 setError(e.message ?: "Plugin ASR final flush failed")
@@ -115,6 +132,8 @@ class PluginASRController(
             )
             audioRecord = recorder
             try {
+                val useStream = streamStartFn(provider.pluginId, provider.providerName, sampleRate)
+                streamingActive = useStream
                 recorder.startRecording()
                 val buffer = ByteArray(bufferSize)
                 val segmentMs = provider.segmentDurationSec.coerceAtLeast(0) * 1000L
@@ -123,16 +142,26 @@ class PluginASRController(
                     if (read > 0) {
                         val amplitude = calculateRmsAmplitude(buffer, read)
                         _state.update { it.copy(amplitudes = it.amplitudes.appendAmplitude(amplitude)) }
-                        val shouldFlush = synchronized(bufferLock) {
-                            currentBuffer.write(buffer, 0, read)
-                            if (segmentMs <= 0) {
-                                currentBuffer.size() >= MAX_SEGMENT_BYTES
-                            } else {
-                                val elapsed = SystemClock.elapsedRealtime() - segmentStartElapsedMs
-                                currentBuffer.size() >= MAX_SEGMENT_BYTES || elapsed >= segmentMs
+                        if (useStream) {
+                            val pcmSlice = buffer.copyOfRange(0, read)
+                            val b64 = Base64.encodeToString(pcmSlice, Base64.NO_WRAP)
+                            val partial = streamPushFn(provider.pluginId, provider.providerName, b64, sampleRate)?.trim()
+                            if (!partial.isNullOrEmpty()) {
+                                _state.update { it.copy(transcript = partial, errorMessage = null) }
+                                scope.launch { onTranscriptChange?.invoke(partial) }
                             }
+                        } else {
+                            val shouldFlush = synchronized(bufferLock) {
+                                currentBuffer.write(buffer, 0, read)
+                                if (segmentMs <= 0) {
+                                    currentBuffer.size() >= MAX_SEGMENT_BYTES
+                                } else {
+                                    val elapsed = SystemClock.elapsedRealtime() - segmentStartElapsedMs
+                                    currentBuffer.size() >= MAX_SEGMENT_BYTES || elapsed >= segmentMs
+                                }
+                            }
+                            if (shouldFlush) triggerFlush()
                         }
-                        if (shouldFlush) triggerFlush()
                     } else if (read < 0) {
                         throw IllegalStateException("AudioRecord read error: $read")
                     }

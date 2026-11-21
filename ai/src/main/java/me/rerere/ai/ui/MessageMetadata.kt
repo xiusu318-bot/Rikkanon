@@ -178,6 +178,12 @@ fun JsonElement.mapJsonStrings(transform: (String) -> String): JsonElement = whe
     is JsonObject -> JsonObject(mapValues { (_, v) -> v.mapJsonStrings(transform) })
 }
 
+suspend fun JsonElement.mapJsonStringsSuspend(transform: suspend (String) -> String): JsonElement = when (this) {
+    is kotlinx.serialization.json.JsonPrimitive -> if (isString) kotlinx.serialization.json.JsonPrimitive(transform(content)) else this
+    is JsonArray -> JsonArray(map { it.mapJsonStringsSuspend(transform) })
+    is JsonObject -> JsonObject(mapValues { (_, v) -> v.mapJsonStringsSuspend(transform) })
+}
+
 fun UIMessage.mapRawJsonStrings(transform: (String) -> String): UIMessage {
     if (rawJsonElementOrNull() == null) return this
     var changed = false
@@ -187,6 +193,30 @@ fun UIMessage.mapRawJsonStrings(transform: (String) -> String): UIMessage {
         } else null
         if (raw != null) {
             val mapped = raw.mapJsonStrings(transform)
+            if (mapped != raw) {
+                changed = true
+                val newMeta = JsonObject(
+                    (part.metadata ?: JsonObject(emptyMap())) + ("raw_json_element" to mapped)
+                )
+                when (part) {
+                    is UIMessagePart.Text -> part.copy(metadata = newMeta)
+                    else -> part
+                }
+            } else part
+        } else part
+    }
+    return if (changed) copy(parts = newParts) else this
+}
+
+suspend fun UIMessage.mapRawJsonStringsSuspend(transform: suspend (String) -> String): UIMessage {
+    if (rawJsonElementOrNull() == null) return this
+    var changed = false
+    val newParts = parts.map { part ->
+        val raw = if (part.metadata?.containsKey("raw_json_element") == true) {
+            part.metadataAs<RawJsonMessageMetadata>()?.rawJson
+        } else null
+        if (raw != null) {
+            val mapped = raw.mapJsonStringsSuspend(transform)
             if (mapped != raw) {
                 changed = true
                 val newMeta = JsonObject(

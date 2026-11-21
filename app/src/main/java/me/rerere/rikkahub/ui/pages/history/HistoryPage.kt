@@ -163,10 +163,13 @@ private fun SwipeableConversationItem(
     onTogglePin: () -> Unit = {},
     onClick: () -> Unit = {},
 ) {
+    val cardStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("card")
+    val itemShape = cardStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+        ?: if (me.rerere.rikkahub.ui.custom.hasUICustomShapes()) MaterialTheme.shapes.large else RoundedCornerShape(25)
     SwipeToDelete(
         onDelete = onDelete,
         modifier = modifier,
-        shape = RoundedCornerShape(25),
+        shape = itemShape,
     ) {
         ConversationItem(
             conversation = conversation,
@@ -183,10 +186,19 @@ private fun ConversationItem(
     onTogglePin: () -> Unit = {},
     onClick: () -> Unit = {},
 ) {
+    val cardStyle = me.rerere.rikkahub.ui.custom.uiComponentStyle("card")
+    val itemShape = cardStyle?.cornerDp?.let { me.rerere.rikkahub.ui.custom.uiCornerShape(it.dp) }
+        ?: if (me.rerere.rikkahub.ui.custom.hasUICustomShapes()) MaterialTheme.shapes.large else RoundedCornerShape(25)
     Surface(
         onClick = onClick,
         tonalElevation = 2.dp,
-        shape = RoundedCornerShape(25),
+        shape = itemShape,
+        border = cardStyle?.borderWidthDp?.takeIf { it > 0f }?.let {
+            androidx.compose.foundation.BorderStroke(
+                it.dp,
+                me.rerere.rikkahub.ui.custom.resolveUIColor(cardStyle.borderColor.orEmpty(), MaterialTheme.colorScheme, MaterialTheme.colorScheme.outlineVariant),
+            )
+        },
         modifier = modifier
     ) {
         ListItem(

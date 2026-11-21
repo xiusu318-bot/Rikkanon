@@ -11,6 +11,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import me.rerere.rikkahub.data.datastore.ChatFontFamily
 import me.rerere.rikkahub.data.datastore.DisplaySetting
+import me.rerere.rikkahub.ui.custom.LocalUIGlobalFontFamily
 import java.io.File
 
 val LocalChatFontFamily = staticCompositionLocalOf<FontFamily?> { null }
@@ -29,11 +30,18 @@ fun ChatFontProvider(
 @Composable
 fun rememberChatFontFamily(displaySetting: DisplaySetting): FontFamily {
     val context = LocalContext.current
+    // 聊天字体为「默认」时跟随界面自定义的全局字体（未设置 / 总开关关闭时为 null，行为不变）
+    val uiGlobalFont = LocalUIGlobalFontFamily.current
     return remember(
         displaySetting.chatFontFamily,
         displaySetting.chatCustomFontPath,
+        uiGlobalFont,
     ) {
-        displaySetting.resolveChatFontFamily(context)
+        if (displaySetting.chatFontFamily == ChatFontFamily.DEFAULT && uiGlobalFont != null) {
+            uiGlobalFont
+        } else {
+            displaySetting.resolveChatFontFamily(context)
+        }
     }
 }
 
@@ -41,16 +49,31 @@ fun DisplaySetting.resolveChatFontFamily(context: Context): FontFamily = when (c
     ChatFontFamily.DEFAULT -> FontFamily.Default
     ChatFontFamily.SERIF -> FontFamily.Serif
     ChatFontFamily.MONOSPACE -> FontFamily.Monospace
-    ChatFontFamily.CUSTOM -> loadCustomFontFamily(context, chatCustomFontPath) ?: FontFamily.Default
+    ChatFontFamily.CUSTOM -> loadFilesDirFontFamily(context, chatCustomFontPath) ?: FontFamily.Default
 }
 
-private fun loadCustomFontFamily(context: Context, relativePath: String): FontFamily? {
+private data class CachedFontKey(val path: String, val lastModified: Long, val length: Long)
+
+private val filesDirFontCache = object : LinkedHashMap<CachedFontKey, FontFamily>(8, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CachedFontKey, FontFamily>): Boolean = size > 16
+}
+
+/** 加载 filesDir 内的字体文件（路径不能越出 filesDir）；不存在或无法加载时返回 null。 */
+fun loadFilesDirFontFamily(context: Context, relativePath: String): FontFamily? {
     val file = resolveFilesDirFile(context, relativePath) ?: return null
     if (!file.isFile) return null
-    return runCatching {
+    val key = CachedFontKey(file.path, file.lastModified(), file.length())
+    synchronized(filesDirFontCache) {
+        filesDirFontCache[key]?.let { return it }
+    }
+    val loaded = runCatching {
         Typeface.createFromFile(file)
         FontFamily(Font(file))
-    }.getOrNull()
+    }.getOrNull() ?: return null
+    synchronized(filesDirFontCache) {
+        filesDirFontCache[key] = loaded
+    }
+    return loaded
 }
 
 private fun resolveFilesDirFile(context: Context, relativePath: String): File? {
