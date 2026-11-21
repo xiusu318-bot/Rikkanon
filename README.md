@@ -16,8 +16,8 @@
 
 > [!WARNING]
 > ### ⚠️ 更新预警与项目声明（使用前必读）
-> 1. **🚨 `v1.3.0` 慎重更新提示（可能存在大量 Bug）**：
->    - 本次版本涉及较多界面接入与底层链路改动，仅做过有限的个人自用测试，**目前可能存在大量未知 Bug，追求日常稳定使用的用户请慎重更新**（继续使用旧版即可；如要尝试更新，请务必提前备份聊天记录与配置）。
+> 1. **🚨 `v1.3.0` 慎重更新提示（未经充分测试，可能存在大量 Bug）**：
+>    - 本次更新改动面较大，**未经充分测试，仅开发者个人日常自用，很多场景和边界下的 Bug 可能根本测试不到；目前可能存在大量未知问题，追求日常稳定使用的用户请慎重更新**（建议继续使用旧版；如要尝试更新，请务必提前备份聊天记录与配置）。
 >    - **关于新增「主题美化（界面自定义）」功能的说明**：这个模块**目前不太稳定，也不太好用**（默认关闭）。因为个人爱好原因，宿主侧**只做了偏底层的底座能力**，没有提供省事的一键换皮模板或现成封装；如果只是简单改色还好，**想把界面彻底改成另一种风格基本需要手写代码覆盖很多插槽和页面，并不灵活方便**，唯一相对好一点的地方大概是限制少、相对自由一些。
 > 2. **🚨 插件系统无限制与源码自审声明（重要）**：
 >    - **请务必了解所安装插件的全部源代码及具体作用**：在导入和启用任何插件前，请确保它是你自己编写的代码，或你已完整审阅并明确知晓其全部源码与行为逻辑。
@@ -41,21 +41,29 @@
 
 ---
 
-## 📌 v1.3.0 更新内容（请慎重更新）
+## 📌 v1.3.0 更新内容（未经充分测试，请慎重更新）
 
-> **再次提醒**：本版本改动较多，**可能存在大量未知 Bug，建议日常主力使用的用户暂缓或慎重更新**，升级前请做好备份。
+> **再次提醒**：本次更新**未经充分测试，仅开发者个人自用，很多没用到的路径可能存在测试不到的 Bug，整体可能存在大量问题，请慎重更新**，升级前请做好数据备份。
 
 1. **新增实验性「主题美化（界面自定义）」底座（[`CUSTOM_UI_DOCS.md`](CUSTOM_UI_DOCS.md)）**：
    - 入口位于「设置 -> 偏好设置 -> 界面自定义」，总开关默认关闭（关闭时走原版逻辑，异常启动时可通过安全模式关闭）。
-   - **优缺点说明**：宿主只暴露了底层配色/字体/形状（含切角）、组件样式覆写（`ui.style`）、插槽替换（`ui.slot` / `chat.layout`）、着色器/动画节点以及列表与宿主反射桥（`LazyColumn` / `Compose` / `NativeView` / `java.copy`）等底座能力。**目前既不够稳定，用起来也不方便**——想深度改界面需要自己写不少 JS 去逐处覆盖组件和二级页面，只是自由度相对高一点。
-2. **JS 插件系统扩展原生反射/Hook 与流式接口（[`PLUGIN_API_DOC.md`](PLUGIN_API_DOC.md)）**：
-   - 新增需显式声明 `native` / `hook` 权限的 `rikka.java`、`rikka.host`、`rikka.hook` 原生调用与方法拦截能力，支持插件热重载与 `onUnload`；
-   - `registerTool` 支持动态 `parameters`/`systemPrompt`、多媒体 `display` 及中途挂起提问 `await ctx.askUser`；补充单次请求 `proxy`、`rikka.ws`、`rikka.attachments.save`、声明式资源注册（Skill/世界书/快捷消息）、底层服务流式通道及部分 UI 挂载项。
-3. **密钥代名词脱敏加固 & 提供商重写（子渠道）父子继承**：
-   - `SecretKeySanitizer` 保留外部与工作区执行工具的密钥展开，排除内部子代理与记忆工具入参，并在工具返回时对常见编码回显及 `od`/`xxd`/`hexdump`/`base64` 等拆字节输出做拦截脱敏；
-   - 模型「提供商重写（`providerOverwrite`）」留空字段默认回退继承父渠道当前值，关闭重写启用开关时直接回退父渠道。
-4. **连续工具调用单步增量落库与中断收尾调整**：
-   - 多步工具执行边界增量更新尾部消息节点，减少中途闪退或异常中断后整串已完成工具记录一并丢失的情况，并补充超 2MB 消息节点的分片读取兜底。
+   - **优缺点说明**：宿主只暴露了底层配色/字体/形状（含 `cut` 切角及超长卡片触摸修复）、共用组件样式覆写（`ui.style`）、插槽替换与聊天页骨架调整（`ui.slot` / `chat.layout`，含助手消息前置思考与正文中途工具按时间序拆分）、着色器/动画/视频节点（`Shader` / `animate` / `Video`），以及懒加载列表与宿主反射桥（`LazyColumn` / `Compose` / `NativeView` / `java.copy`）等底座能力。**目前不太稳定，也不太好用**——想彻底改掉界面外观需要手写代码覆盖很多组件和二级页面，并不灵活方便，只是相对自由一点。
+2. **JS 插件系统（`:plugin`）能力扩充与宿主修复（[`PLUGIN_API_DOC.md`](PLUGIN_API_DOC.md)）**：
+   - **原生全能力**：新增需显式声明 `native` / `hook` 权限的 `rikka.java`（反射调用任意 Java/Kotlin 代码、私有成员与隐藏 API、`java.copy` 数据类浅拷贝、接口代理与 `$async`/`$main` 线程切换）、`rikka.host`（取宿主内部服务）与 `rikka.hook`（基于 Pine 拦截/改写/替换方法），支持插件热重载与 `rikka.onUnload`；
+   - **底层服务真流式与能力补齐**：Provider 支持 `async function*` 真流式输出，新增查余额 `getBalance`、向量 `generateEmbedding`、生图 `generateImage`、改图 `editImage` 及完整模型能力声明；TTS 支持流式音频分片播放；ASR 新增实时 PCM 流式语音识别（`startStream` / `pushAudio` / `stopStream`）；
+   - **工具、网络与二进制文件**：`registerTool` 支持动态 `parameters`/`systemPrompt`、多媒体 `display` 及中途挂起提问 `await ctx.askUser`；`rikka.fetch` 与 `intercept` 支持单次请求动态指定 `proxy`、`rikka.fetch` 支持 `stream: true` 流式与 `base64` 二进制收发；新增 `rikka.ws` WebSocket、`rikka.attachments.save` 附件存储桥，以及 `rikka.files` / `rikka.workspace` 的 `readBase64` / `writeBase64` 二进制读写；插件宏支持在高级提示词预设与世界书组装阶段展开（含 JSON 块内递归展开）；
+   - **UI 挂载与 WebView 增强**：新增 `chat.more`（`+` 面板）、`message.footer`（消息底栏）、`tool.card`（自定义工具卡片图标/标题/摘要/详情）、`conversation.menu`（会话长按菜单）、顶底栏 `menu` 下拉菜单及 `rikka.ui.update` 动态局部刷新；`form` 新增 `password` / `slider` / `segmented` / `model` 控件与实时变更回调；WebView 默认透明、自动注入宿主主题色 CSS 变量、移除高度上限支持 DOM 自适应伸缩，`floating` 悬浮窗支持最小化折叠为胶囊；
+   - **宿主问题修复**：修复插件工具 `ctx.progress` / `ctx.askUser` 跨协程更新消息抛异常中断生成的问题；修复等待用户回答计入 30 秒调用超时的问题；修复 UI 挂载变化触发多余后台服务/WorkManager 同步的问题；禁止插件经 `rikka.files` 修改自身 `manifest.json`。
+3. **密钥代名词出入站阀门与防拆字节脱敏（`SecretKeySanitizer`）**：
+   - 保留外部与工作区执行工具的真实密钥展开与配置落盘，排除内部子代理通信（`conversation_*`）、记忆库（`memory_*`）与提问工具（`ask_*`）入参展开；
+   - 工具返回前逐字段解包 JSON 脱敏（覆盖 `stdout`、`stderr`、插件 `onProgress` 与 `workspace_edit_file` 编辑 Diff），还原常规编码回显并拦截 `od`、`xxd`、`hexdump`、任意偏移三相位 `base64`、字符拼接与高熵切片等拆字节探测（附零泄密格式诊断）。
+4. **提供商重写（`providerOverwrite` 子渠道）完整继承父渠道**：
+   - 模型「提供商重写」留空的 `名称`、`API Key`、`API Base Url` 实时回退继承父渠道当前值（跨 `OpenAI / Google / Claude` 协议切换自动适配 `/v1` ⇄ `/v1beta` 后缀），并同步继承父渠道的 `customHeaders`（自定义请求头）、`balanceOption`（余额配置）、API 路径及 Vertex 服务账号字段；关闭重写启用开关时直接回退父渠道。
+5. **连续工具单步增量落库、防连坐删消息与超长节点分片读取**：
+   - 多步工具启动与完成边界单事务增量更新尾部节点（`checkpointConversation`）；
+   - 修复网络断流或报错留下未执行完工具时直接把整条助手消息（连同前面已完成的所有工具步骤）整条删掉的问题，支持冷启动恢复（保留 `Pending` 待审批工具），在落库前自动兜底将残留 `data:` Base64 图片（含工具输出内图片）转存为本地文件防崩溃，并补充超 2MB `CursorWindow` 消息节点的 256K 分片流式读取。
+6. **Markdown `<div style="...">` 盒模型样式渲染**：
+   - 消息 Markdown 中写了 `padding` / `border` / `border-radius` / `background` 的 `<div style>` 支持渲染为整块圆角边框背景盒，不再只是逐字涂底色。
 
 ---
 
